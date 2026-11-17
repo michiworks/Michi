@@ -23,6 +23,8 @@ const EVENTS: MichiHostEvent[] = [
   { type: 'artifact_deleted', payload: { contextId: undefined, name: 'notes' } },
   { type: 'image', payload: { path: 'chart.png', caption: 'Chart', mimeType: 'image/png', size: 16 } },
   { type: 'image', payload: { path: 'chart.png', caption: undefined, mimeType: 'image/png', size: 16 } },
+  { type: 'blocks', payload: { blocks: [{ type: 'poll', id: 'cb-1', question: 'Q?', options: ['A', 'B'] }], title: 'Plan', fallbackText: 'Plan\n\nQ?\n- A\n- B' } },
+  { type: 'blocks', payload: { blocks: [{ type: 'stat', id: 'cb-2', label: 'Open', value: '3' }], fallbackText: 'Open: 3' } },
 ];
 
 function hostEvent(type: string, payload: unknown): HostEvent {
@@ -103,13 +105,17 @@ describe('Michi host events', () => {
       ['image', { path: 'chart.png', mimeType: 'image/png' }],
       ['image', null],
       ['image', ['chart.png']],
+      ['blocks', { blocks: [], fallbackText: '' }],
+      ['blocks', { blocks: [{ type: 'stat' }, 'x'], fallbackText: '' }],
+      ['blocks', { blocks: [{ type: 'stat' }] }],
+      ['blocks', { blocks: [{ type: 'stat' }], title: 3, fallbackText: '' }],
     ];
     for (const [type, payload] of malformed) {
       assert.equal(decodeMichiHostEvent(hostEvent(type, payload)), null, `${type} ${JSON.stringify(payload)}`);
     }
     assert.deepEqual(warn.mock.calls.map((call) => call.arguments[2]), [
       { type: 'spawn_branches' }, { type: 'branch_overview' }, { type: 'follow_ups' }, { type: 'follow_ups_status' },
-      { type: 'artifact_saved' }, { type: 'artifact_updated' }, { type: 'artifact_deleted' }, { type: 'image' },
+      { type: 'artifact_saved' }, { type: 'artifact_updated' }, { type: 'artifact_deleted' }, { type: 'image' }, { type: 'blocks' },
     ]);
     assert.ok(warn.mock.calls.every((call) => call.arguments[0] === 'chat' && call.arguments[1] === 'host event dropped: malformed payload'));
   });

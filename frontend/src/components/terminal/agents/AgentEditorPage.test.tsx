@@ -43,14 +43,18 @@ describe('AgentEditorPage', () => {
   it('allows invalid profile/fallback/permission data to save as Draft but blocks Enable', async () => {
     const onSaveDraft = vi.fn(); const onEnable = vi.fn();
     render(<AgentEditorPage initialScope="workspace" workspaceId="workspace-1" onSaveDraft={onSaveDraft} onEnable={onEnable} />);
-    const enable = actionButton('Enable');
-    const save = actionButton('Save Draft');
-    expect(enable.disabled).toBe(true);
-    expect(save.disabled).toBe(false);
     fireEvent.click(screen.getByText('+ add fallback profile', { selector: 'button' }));
     fireEvent.change(screen.getByLabelText('max attempts'), { target: { value: '0' } });
-    expect(within(screen.getByLabelText('Agent definition')).getAllByRole('alert').some((element) => element.textContent?.includes('Fallback runtime'))).toBe(true);
-    expect(enable.disabled).toBe(true);
+    const form = within(screen.getByLabelText('Agent definition'));
+    expect(form.queryByText('Fallback runtime is required.')).toBeNull();
+    await submitAction('Enable');
+    expect(onEnable).not.toHaveBeenCalled();
+    expect(form.getByText('Fallback runtime is required.')).toBeTruthy();
+    expect(form.queryAllByRole('alert')).toHaveLength(0);
+    const name = screen.getByLabelText('agent name');
+    expect(document.activeElement).toBe(name);
+    expect(name.getAttribute('aria-invalid')).toBe('true');
+    expect(document.getElementById(name.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Name is required.');
     await submitAction('Save Draft');
     expect(onSaveDraft).toHaveBeenCalledOnce();
     expect(onEnable).not.toHaveBeenCalled();
@@ -62,9 +66,15 @@ describe('AgentEditorPage', () => {
     fireEvent.click(screen.getByLabelText('Bounded default'));
     const ttl = screen.getByLabelText('default run TTL milliseconds');
     fireEvent.change(ttl, { target: { value: '100' } });
-    expect(screen.getByText(/TTL must be/)).not.toBeNull();
-    expect(actionButton('Save Draft').disabled).toBe(true);
+    expect(screen.queryByText(/TTL must be/)).toBeNull();
+    await submitAction('Save Draft');
+    expect(onSaveDraft).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(ttl);
+    expect(document.getElementById(ttl.getAttribute('aria-describedby') ?? '')?.textContent).toMatch(/TTL must be/);
+    // A draft may lack the rest, so a stopped Save Draft flags only what stops it.
+    expect(screen.queryByText('Name is required.')).toBeNull();
     fireEvent.change(ttl, { target: { value: '60000' } });
+    expect(screen.queryByText(/TTL must be/)).toBeNull();
     await submitAction('Save Draft');
     expect(onSaveDraft.mock.calls.at(-1)?.[0]).toMatchObject({ retention: 'bounded', defaultRunTtlMs: '60000' });
     fireEvent.click(screen.getByLabelText('Indefinite'));
@@ -119,15 +129,17 @@ it('blocks Enable for known unsupported primary and fallback reasoning while pre
     fallbackChain: [{ version: 1, runtimeId: 'codex', modelId: 'model', reasoning: 'max' }],
   };
   render(<AgentEditorPage definition={locatedAgentResource('reasoning-editor', draft)} onSaveDraft={onSaveDraft} onEnable={onEnable} />);
-  const enable = actionButton('Enable');
-  await waitFor(() => expect(screen.getAllByText(/Reasoning level max is unavailable/)).toHaveLength(2));
-  expect(enable.disabled).toBe(true);
+  await waitFor(() => expect(editorActions().getByText('2 validation issues')).toBeTruthy());
   await submitAction('Save Draft');
   expect(onSaveDraft).toHaveBeenCalledWith(expect.objectContaining({ runtimeProfile: expect.objectContaining({ reasoning: 'max' }), fallbackChain: [expect.objectContaining({ reasoning: 'max' })] }));
+  await submitAction('Enable');
+  expect(onEnable).not.toHaveBeenCalled();
+  expect(screen.getAllByText(/Reasoning level max is unavailable/)).toHaveLength(2);
   fireEvent.change(screen.getByLabelText('runtime reasoning'), { target: { value: 'high' } });
-  expect(enable.disabled).toBe(true);
+  expect(screen.getAllByText(/Reasoning level max is unavailable/)).toHaveLength(1);
+  await submitAction('Enable');
+  expect(onEnable).not.toHaveBeenCalled();
   fireEvent.change(screen.getByLabelText('fallback 1 reasoning'), { target: { value: 'high' } });
-  expect(enable.disabled).toBe(false);
   await submitAction('Enable');
   expect(onEnable).toHaveBeenCalledOnce();
 });

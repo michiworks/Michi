@@ -17,6 +17,7 @@ import {
   type AttentionIntent,
 } from './policy';
 import { resetOsNotificationsForTests } from './desktop';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 import { playAttentionSound } from './sound';
 
 type CardElement = React.ReactElement<{ children: [React.ReactElement<{ children: string }>, unknown] }>;
@@ -406,6 +407,18 @@ describe('sounds and the toast card', () => {
     expect(onOpen).toHaveBeenCalledTimes(1);
     fireEvent.keyDown(card, { key: 'Enter' });
     expect(onOpen).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it('asks the overlays over the window to leave before a click opens the target', () => {
+    const order: string[] = [];
+    const off = leaveOverlaysEvent.subscribe(() => order.push('leave'));
+    presentAttention(intent({ onOpen: () => order.push('open') }));
+    vi.advanceTimersByTime(1000);
+    const { unmount } = render(presentations().find((item) => item.card)!.card!);
+    fireEvent.click(screen.getByRole('button'));
+    expect(order).toEqual(['leave', 'open']);
+    off();
     unmount();
   });
 });

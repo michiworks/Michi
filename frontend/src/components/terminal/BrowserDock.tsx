@@ -65,7 +65,8 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
   }}>
     {captionHost && createPortal(<div data-browser-caption style={{
       display: 'flex', alignItems: 'center', minWidth: 0, flex: 1,
-      paddingLeft: 12, paddingRight: 'var(--browser-caption-actions, 0px)',
+      // Clears the topbar's icons, which lie over the Michi panel instead while it is docked.
+      paddingLeft: 12, paddingRight: 'max(0px, var(--browser-caption-actions, 0px) - var(--companion-dock-width, 0px))',
       // No focus dim: the native page cannot be dimmed, so dimming only its
       // caption and chrome would make them read as a darker frame.
       background: 'var(--term-pane-bg)', color: 'var(--term-fg)',
@@ -87,7 +88,8 @@ export default function BrowserDock({ items, focusedPane }: { items: BrowserPane
     }}>
       <PaneErrorBoundary paneId={item.id}><BrowserPane item={item} active={item.id === selected.id} /></PaneErrorBoundary>
     </div>)}
-    <ResizeHandle paneRef={dockRef} side="left"
+    <ResizeHandle paneRef={dockRef} side="left" label="Resize browser"
+      max={() => (dockRef.current?.parentElement?.clientWidth ?? 0) / 2}
       onResize={next => {
         const padding = parseFloat(getComputedStyle(dockRef.current!).paddingLeft) || 0;
         const available = dockRef.current?.parentElement?.clientWidth ?? next * 2;

@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import MentionEditor, { type MentionEditorHandle } from './MentionEditor';
 import { buildSlashEntries, type SlashEntry } from '../state/slashEntries';
+import type { ChatNodeState } from '../state/chatTypes';
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -14,7 +15,7 @@ async function openEditor(text: string, slash: { slashEntries?: readonly SlashEn
   const onSubmit = vi.fn();
   const onChange = vi.fn();
   const view = render(<MentionEditor ref={ref} value="" mentions={[]} onChange={onChange} currentNodeId="current"
-    sameTreeNodes={[]} onSubmit={onSubmit} {...slash}
+    onSubmit={onSubmit} {...slash}
     artifacts={[{ id: 'notes', name: 'Design notes', filePath: 'notes.md', source: 'user', createdAt: 1, updatedAt: 1 }]} />);
   await waitFor(() => expect(ref.current?.editor).toBeTruthy());
   await act(async () => { ref.current!.editor!.commands.insertContent(text); });
@@ -45,6 +46,22 @@ describe('Composer autocomplete menus', () => {
     await act(async () => { editor.commands.insertContent('z'); });
     act(() => { vi.advanceTimersByTime(200); });
     expect(editor.getText()).toBe(`${text}z`);
+  });
+
+  it('asks for the conversations it lists when the @ menu builds its rows, not on render', async () => {
+    const other: ChatNodeState = { nodeId: 'other', projectId: 'p', kind: 'chat', chatId: null, title: 'Release plan', followUps: [],
+      status: 'idle', messages: [], messagesLoaded: false, messageCount: 3 };
+    const getMentionCandidates = vi.fn(() => ({ sameTree: [], crossTree: [{ treeTitle: 'Plans', nodes: [other] }] }));
+    const ref = createRef<MentionEditorHandle>();
+    const editor = (value: string) => <MentionEditor ref={ref} value={value} mentions={[]} onChange={() => {}} currentNodeId="current"
+      artifacts={[]} onSubmit={() => {}} getMentionCandidates={getMentionCandidates} />;
+    const view = render(editor(''));
+    await waitFor(() => expect(ref.current?.editor).toBeTruthy());
+    view.rerender(editor('Draft '));
+    expect(getMentionCandidates).not.toHaveBeenCalled();
+    await act(async () => { ref.current!.editor!.commands.insertContent('@'); });
+    await waitFor(() => expect(screen.getByText('Release plan')).toBeTruthy());
+    expect(getMentionCandidates).toHaveBeenCalledOnce();
   });
 
   it('lists /names only, describes the highlighted row beside them, tags a skill sharing a command\'s name, and records the pick', async () => {
@@ -145,7 +162,7 @@ describe('@ menu row motion', () => {
     try {
       const ref = createRef<MentionEditorHandle>();
       render(<MentionEditor ref={ref} value="" mentions={[]} onChange={() => {}} currentNodeId="current"
-        sameTreeNodes={[]} onSubmit={() => {}}
+        onSubmit={() => {}}
         artifacts={[artifact('alpha', 'Alpha notes'), artifact('beta', 'Beta notes'), artifact('gamma', 'Gamma plan')]} />);
       await waitFor(() => expect(ref.current?.editor).toBeTruthy());
       await act(async () => { ref.current!.editor!.commands.insertContent('@'); });

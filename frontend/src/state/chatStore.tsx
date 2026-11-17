@@ -11,8 +11,10 @@ import { createBackgroundCatchUp, type BackgroundCatchUpActions } from './backgr
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { allocateNodeIdsLocal, ensureSession, fetchAgentStatus, fetchAgentStatusAfterFirstPaint, fetchBackgroundCursors, fetchNodeWorkspace, fetchReady, fetchTreeMessagePage, fetchWorkspaceStructure, listAgentModels, setChatMode, respondToPermission, cancelPermission, respondToUserInput, skipUserInput, cancelChatAndObserve, reattachTurnReplay, steerChat } from '../services/api';
 import { bindPendingPrimaryAgent, type AgentStatus, type TreeMessagePage } from '../services/api';
+import { DeferredToolCalls, DeferredToolCallsContext } from './deferredToolCalls';
 import { activeTreeRootNodeId, findTreeIdForNode, descendants, resolveBranchParent, isBranchEdge } from './tree';
 import { useMessageHistory, type MessageHistoryActions } from './useMessageHistory';
+import { PaneShownContext } from '../hooks/paneShown';
 export { activeTreeRootNodeId } from './tree';
 import { usePrefs } from './prefs';
 import { DARK_PALETTES } from '../components/terminal/tokens';
@@ -32,6 +34,7 @@ import { buildFlushPayload } from './queueFlush';
 import { expandMentions } from '../components/mentions';
 import { appendAttachmentsSentinel } from '../lib/composerAttachments';
 import { formatCommentsBlock, joinMessageParts, joinMessageQuotes } from '../lib/commentFormat';
+import { restoreNodeMentionTokens } from '../lib/nodeMentionTokens';
 import { useDigestOrchestration } from './digestOrchestration';
 import { visibleDigestMarkdown } from './digest';
 import { buildSubtreeContextBlocks } from './mergePreamble';
@@ -39,6 +42,7 @@ import { paneAfterClose, usePaneState } from './paneState';
 import { WINDOW_ID } from '../config/windowIdentity';
 export { WINDOW_ID } from '../config/windowIdentity';
 import { useFocusedNodeSeen, useShownNodesSeen } from './useCompletionSeen';
+import { useShownFailuresSeen } from './useFailureSeen';
 import { usePanePresenceIntegration } from './usePanePresenceIntegration';
 import { agentRunPaneId, DEFAULT_BROWSER_URL, pagePaneId, normalizeBrowserUrl, parseSourceLocation, singletonPaneId, uniquePaneId, type PaneItem, type PaneLauncherChoice } from './paneItems';
 import type { AgentResourceIdentity } from './agentIdentity';
@@ -51,7 +55,8 @@ import { navigateToNode } from './navigateToNode';
 import { useAgentModeCatalog } from '../hooks/useAgentModeCatalog';
 import { useWorkspacePrewarm } from '../hooks/useWorkspacePrewarm';
 import { useArtifactWatch } from '../hooks/useArtifactWatch';
-import { NODE_ACTIVITY_ACTIONS, reduceNodes, reduceProject } from './chatReducers';
+import { NODE_ACTIVITY_ACTIONS, reduceNodes, reduceProject, sentMessages } from './chatReducers';
+import { clearSendPreview, showSendPreview } from './sendPreview';
 import { prependToDraft } from './composerDraft';
 import {
   LEGACY_STATE_KEY,
@@ -71,7 +76,8 @@ import { NodeMessagesContext } from './nodeMessagesSelfHeal';
 import { useStructureSync } from './useStructureSync';
 import { backendInstalledEntities, mergeWorkspaceSnapshot } from './assistant/workspaceSnapshot';
 import { isSystemWorkspace } from './assistant/systemWorkspace';
-import { isListedThread, isVisibleConversationNode } from './conversationVisibility';
+import { isVisibleConversationNode } from './conversationVisibility';
+import { selectableTreeIds } from './sidebarSelectors';
 import { rememberUserWorkspace, userWorkspaceToReturnTo } from './assistant/userWorkspace';
 import { isNodeShownInWindow, isPaneShownInWindow } from './attention/targetVisibility';
 import { isServerAttentionActive, subscribeServerAttention, type AttentionIntent as ServerAttentionIntent } from '../services/serverAttention';
@@ -81,7 +87,7 @@ import { getCompanionPanelState, openCompanionPanel, useCompanionPanelShownNodeI
 import { requestOpenCompanionTarget, requestOpenScheduledRun } from './attentionOpenRequests';
 import { isAwaitingUserInput } from './askUserSelectors';
 import { companionNameNow } from './companion/companionName';
-import { companionPostRunId, isCheckinNodeId } from 'michi-shared';
+import { companionPostRunId, isCheckinNodeId, type SkillMessageMetadata } from 'michi-shared';
 import { captureMetaAgentTurnContext, mergeMetaAgentTurnContexts, withCarriedRefs } from '../services/api/assistant';
 import { takeSourceJumpInto } from './sourceNav/sourceNav';
 import { refreshMetaAgent } from './metaAgent/useMetaAgent';
@@ -284,7 +290,7 @@ function companionNoticeTitle(kind: 'approval' | 'question' | 'reply'): string {
 export const HIGH_FREQ_ACTIONS: ReadonlySet<ChatAction['type']> = new Set([
   'chunk', 'thought', 'heartbeat', 'tool-call', 'tool-call-update', 'plan',
   'subagent-list-update', 'subagent-tool-activity', 'apply-seq',
-  'set-composer-draft',
+  'apply-background-seq', 'context-usage', 'set-composer-draft',
 ]);
 
 interface AgentRunPaneActions {
@@ -468,12 +474,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const { availableModes, defaultModeId, agentModesLoading, agentModesError, retryAgentModes } =
     useAgentModeCatalog(activeProjectId, activeBackendConnectionId, agentStatus, activeWarmProject?.cwd);
   const [warmFailedError, setWarmFailedError] = useState<string | null>(null);
-  const [agentStatusUnreachable, setAgentStatusUnreachable] = useState(false);
+  // Tagged with the connection the failed reads went to, so a flag measured on
+  // one backend never describes another, not even for the render before the
+  // effect below resets it.
+  const [agentStatusUnreachableFor, setAgentStatusUnreachableFor] = useState<string | null>(null);
+  const agentStatusUnreachable = agentStatusUnreachableFor === activeBackendConnectionId;
   useEffect(() => {
     let cancelled = false;
+    // The reads below go to the active backend, which this effect is keyed on.
+    const connectionId = activeBackendConnectionId;
     setAgentStatus(null);
     setWarmFailedError(null);
-    setAgentStatusUnreachable(false);
+    setAgentStatusUnreachableFor(null);
     let statusLoaded = false;
     let statusRequestSeq = 0;
     let statusLoads = 0;
@@ -528,7 +540,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         statusLoads += 1;
         rememberRuntimeLabels(activeBackendConnectionId, status.availableRuntimes);
         setAgentStatus(status);
-        setAgentStatusUnreachable(false);
+        setAgentStatusUnreachableFor(null);
         refreshSanitizedModel(status, seq);
         return true;
       } catch {
@@ -544,13 +556,13 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     const loadUntilLoaded = async () => {
       const run = ++retryRun;
       const loadsBefore = statusLoads;
-      setAgentStatusUnreachable(false);
+      setAgentStatusUnreachableFor(null);
       const t0 = Date.now();
       while (!cancelled && run === retryRun && statusLoads === loadsBefore && Date.now() - t0 < POLL_TIMEOUT_MS) {
         if (await load()) return;
         await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
-      if (!cancelled && run === retryRun && statusLoads === loadsBefore) setAgentStatusUnreachable(true);
+      if (!cancelled && run === retryRun && statusLoads === loadsBefore) setAgentStatusUnreachableFor(connectionId);
     };
 
     const watchReady = async () => {
@@ -650,9 +662,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const selectAllTrees = useCallback(() => {
     const proj = projects.find((p) => p.id === activeProjectId);
     if (!proj) return;
-    selectTrees(proj.trees
-      .filter((t) => t.kind !== 'merge' && isListedThread(t, nodesRef.current[t.rootNodeId]))
-      .map((t) => t.id));
+    selectTrees(selectableTreeIds(proj, nodesRef.current));
   }, [projects, activeProjectId, selectTrees]);
 
   useEffect(() => {
@@ -671,8 +681,8 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // EFFECT only re-fires when the trashed set actually changes; `prunePaneIds`
   // is additionally a no-op (no setState) when none of those ids are open.
   // The scan itself can't gate on the structural-version channel: not every
-  // setNodes writer (hydration among them) bumps structureVersion,
-  // so gating there could miss deletions. It runs in
+  // setNodes writer (a digest's or a purged workspace's removal) bumps
+  // structureVersion, so gating there could miss deletions. It runs in
   // ChatProvider's render (which already commits per RAF frame while
   // streaming), adding only an allocation-free O(nodeCount) read loop — not the
   // channel-mutating per-chunk work the structural fast-path guards against.
@@ -953,6 +963,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     activeProjectId,
     nodes,
     structureVersion: nodeStore.getStructureVersion(),
+    structureVersionRef,
     hydrated,
     nodesRef,
     setProjects,
@@ -1065,7 +1076,18 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // placeholder (hydration only eager-loads the initially-active tree).
   // Mounted after `dispatch` is defined so it can dispatch `messages-loaded`.
   const { prefetchNode: prefetchTreeForNode, ensureNodeMessages } = useLazyTreeMessages({ hydrated, activeProjectId, projects, nodesRef, dispatch, reconnectStreamingRef: reconnectStreamingNodeRef, requests: treeMessageRequestsRef.current });
-  const { loadOlderMessages, ensureCompleteHistory } = useMessageHistory(nodesRef, projectsRef, dispatch, reconnectStreamingNodeRef);
+  const { loadOlderMessages, loadOlderUntil, ensureCompleteHistory } = useMessageHistory(nodesRef, projectsRef, dispatch, reconnectStreamingNodeRef);
+  const deferredToolCallsRef = useRef<DeferredToolCalls | null>(null);
+  if (!deferredToolCallsRef.current) {
+    deferredToolCallsRef.current = new DeferredToolCalls({
+      nodes: () => nodesRef.current, projects: () => projectsRef.current, dispatch,
+    });
+  }
+  useEffect(() => {
+    const loader = deferredToolCallsRef.current!;
+    loader.start();
+    return () => loader.stop();
+  }, []);
   // Sends waiting on their thread's history, their runtime's / catalog, or a
   // remote shown from the local cache.
   const preparingSends = useRef(new Set<string>());
@@ -1470,6 +1492,8 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   // So are those of the conversation the panel shows (V, open on Chat).
   const assistantShownNodeIds = useCompanionPanelShownNodeIds();
   useShownNodesSeen(assistantShownNodeIds, nodes, dispatch);
+  // A failure is viewed once a pane on screen shows it, focused or not (the sidebar's Failed mark).
+  useShownFailuresSeen(openPanes, nodes, dispatch);
 
   // Bulk close of the read loop — used by the unread filter's "Read all"
   // action to clear every unread chat thread at once.
@@ -1769,33 +1793,15 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   }), [dismissAnsweredAttention, dispatch, openPaneInTree, presentNodeAttention, setProjects]);
   sharedStreamHandlersRef.current = createSharedStreamHandlers;
 
-  const handleTurnEnd = useCallback((reason: TurnEndReason, endedNodeId: string) => {
-    const ended = nodesRef.current[endedNodeId];
-    // The visible answer can finish before its hidden runtime tail. If a new
-    // foreground turn has already started, that older terminal callback must
-    // not consume the new turn's queue or invalidate its session binding.
-    if (!ended || ended.status === 'streaming') return;
-    if (reason === 'error') {
-      boundSessionsRef.current.delete(endedNodeId);
-    }
-    // A turn in the agent's conversation ended: what it changed (a runtime switch, layout rules,
-    // the Pages upkeep's state) is read again, whether or not the panel shows it (F1a-review #7).
-    if (isCompanionNodeId(endedNodeId)) {
-      noteCompanionTurnEnded(endedNodeId);
-      void refreshMetaAgent();
-    }
-    const queueRuntimeId = ended.runtimeId ?? agentStatusRef.current?.runtime;
-    const queue = nextQueuedBatch((ended.pendingQueued ?? []).filter((entry) => !entry.steering),
-      sendSlashEntries(ended, projectsRef.current.find((project) => project.id === ended.projectId), queueRuntimeId));
-    if (queue.length === 0) return;
-    if (reason === 'error') {
-      dispatch({ type: 'mark-queue-errored', nodeId: endedNodeId });
-      return;
-    }
-    // A queue an error paused waits for the user ("paused, review and send
-    // manually"), whatever turn ends next.
-    if (ended.queueErrored) return;
+  // The next queued entries that go as one message (nextQueuedBatch); an
+  // entry a steer request owns stays.
+  const queuedBatchOf = useCallback((node: ChatNodeState) => nextQueuedBatch(
+    (node.pendingQueued ?? []).filter((entry) => !entry.steering),
+    sendSlashEntries(node, projectsRef.current.find((project) => project.id === node.projectId), node.runtimeId ?? agentStatusRef.current?.runtime),
+  ), []);
 
+  /** Send a batch of a node's queue as one message: at its turn's end, or a paused queue's Send now. */
+  const sendQueuedBatch = useCallback((endedNodeId: string, queue: ReturnType<typeof nextQueuedBatch>) => {
     const payload = buildFlushPayload(queue);
     if (!payload) return;
     const commentBlocks = queue
@@ -1835,6 +1841,8 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // A queued send left the composer when it was queued; what the user
       // has typed since stays.
       keepDraft: true,
+      // A block's answer drains alone (nextQueuedBatch) and stays marked as one.
+      ...(queue.length === 1 && queue[0].blockAnswer ? { blockAnswer: queue[0].blockAnswer } : {}),
       // A picked command or skill drains alone (nextQueuedBatch).
       ...(queue.length === 1 && queue[0].slash ? { slash: queue[0].slash } : {}),
       // Each queued send's context was read when the user sent it; combined sends carry all their refs.
@@ -1851,6 +1859,35 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sendMessageRef.current(endedNodeId, expandedText, meta);
     }, 0);
   }, [dispatch]);
+
+  const handleTurnEnd = useCallback((reason: TurnEndReason, endedNodeId: string) => {
+    const ended = nodesRef.current[endedNodeId];
+    // The visible answer can finish before its hidden runtime tail. If a new
+    // foreground turn has already started, that older terminal callback must
+    // not consume the new turn's queue or invalidate its session binding.
+    if (!ended || ended.status === 'streaming') return;
+    if (reason === 'error') {
+      boundSessionsRef.current.delete(endedNodeId);
+    }
+    // A turn in the agent's conversation ended: what it changed (a runtime switch, layout rules,
+    // the Pages upkeep's state) is read again, whether or not the panel shows it (F1a-review #7).
+    if (isCompanionNodeId(endedNodeId)) {
+      noteCompanionTurnEnded(endedNodeId);
+      void refreshMetaAgent();
+    }
+    const queue = queuedBatchOf(ended);
+    if (queue.length === 0) return;
+    // A queue waits for the user after an error, and after a Stop, here or in
+    // another window: once its answer is cut short, what was queued may no
+    // longer be what the user wants sent.
+    if (reason === 'error' || reason === 'cancel') {
+      dispatch({ type: 'mark-queue-errored', nodeId: endedNodeId, ...(reason === 'cancel' ? { stopped: true } : {}) });
+      return;
+    }
+    // A paused queue waits for the user (Send now), whatever turn ends next.
+    if (ended.queueErrored) return;
+    sendQueuedBatch(endedNodeId, queue);
+  }, [dispatch, queuedBatchOf, sendQueuedBatch]);
   turnEndHandlerRef.current = handleTurnEnd;
 
   /** Stream a message. Lazily creates the backend chat session on first use. */
@@ -1870,10 +1907,57 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // goes with it however long the waits below and ensureSession take (F1a-review #1). Undefined
       // for other chats.
       const metaAgentContext = meta?.metaAgentContext !== undefined ? meta.metaAgentContext : captureMetaAgentTurnContext(nodeId);
-      const rejectSend = () => {
+      // Named before the waits below, so the preview of a waiting send and
+      // the messages it lands as share their rows (sendPreview.ts).
+      const assistantId = `a-${nodeId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const userSend = (userText: string, skill?: SkillMessageMetadata): Extract<ChatAction, { type: 'user-send' }> => ({
+        type: 'user-send',
+        nodeId,
+        userText,
+        assistantId,
+        quotedText: meta?.quotedText,
+        attachments: meta?.attachments,
+        comments: meta?.comments,
+        mentions: meta?.mentions,
+        ...(meta?.keepDraft ? { keepDraft: true } : {}),
+        ...(meta?.quoteSource ? { quoteSource: meta.quoteSource } : {}),
+        ...(skill ? { skill } : {}),
+        ...(metaAgentContext !== undefined ? { metaAgentContext } : {}),
+        ...(meta?.blockAnswer ? { blockAnswer: meta.blockAnswer } : {}),
+      });
+      // A send that has to wait shows at once, as a running turn the pane can
+      // Stop. A `/name`, which may run as a command instead, and a skill's
+      // rerun wait unseen.
+      let stopped = false;
+      const waitAborted = new AbortController();
+      // Its Stop, registered once it shows (previewSend).
+      let shownStop: (() => void) | undefined;
+      const endPreview = () => {
+        clearSendPreview(nodeId, assistantId);
+        if (shownStop && cancelFns.current[nodeId] === shownStop) delete cancelFns.current[nodeId];
+      };
+      const rejectSend = (stop = false) => {
+        if (shownStop) {
+          endPreview();
+          // It never became a turn: what was queued behind it waits for the user, as after a Stop.
+          dispatch({ type: 'mark-queue-errored', nodeId, ...(stop ? { stopped: true } : {}) });
+        }
         dispatch({ type: 'set-composer-draft', nodeId,
           draft: meta?.rejectedDraft ?? { value: text, mentions: [] }, preserveExisting: true });
         meta?.onRejected?.();
+      };
+      // Stopped before it left: nothing reached the agent, so it goes back to
+      // the composer, and the next send need not wait for this one's wait.
+      const stopWait = () => {
+        stopped = true;
+        waitAborted.abort();
+        preparingSends.current.delete(nodeId);
+        rejectSend(true);
+      };
+      const previewSend = () => {
+        if (shownStop || meta?.skill || parseSlashInvocation((meta?.displayText ?? text).trim())) return;
+        showSendPreview(nodeId, sentMessages(userSend(rewriteNodeMentionsForDisplay(meta?.displayText ?? text, nodesRef.current))));
+        cancelFns.current[nodeId] = shownStop = stopWait;
       };
       if (commandsInFlightRef.current.has(nodeId) || preparingSends.current.has(nodeId)) {
         rejectSend();
@@ -1884,10 +1968,15 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       const sendConnection = backendConnectionIdForWorkspace(n.projectId);
       if (backendConnectionProvisional(sendConnection)) {
         preparingSends.current.add(nodeId);
-        try { await whenBackendConnectionConfirmed(sendConnection); }
-        finally { preparingSends.current.delete(nodeId); }
+        previewSend();
+        try { await whenBackendConnectionConfirmed(sendConnection, undefined, waitAborted.signal); }
+        finally { if (!stopped) preparingSends.current.delete(nodeId); }
+        if (stopped) return;
         n = nodesRef.current[nodeId];
-        if (!n) return;
+        if (!n) {
+          endPreview();
+          return;
+        }
         if (n.status === 'streaming') {
           rejectSend();
           return;
@@ -1903,14 +1992,20 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       }
       if ([...contextNodes].some(id => nodesRef.current[id]?.messagesLoaded === false)) {
         preparingSends.current.add(nodeId);
+        previewSend();
         try { await ensureCompleteHistory([...contextNodes]); }
         catch (error) {
+          if (stopped) return;
           rejectSend();
           toast.error((error as Error).message);
           return;
-        } finally { preparingSends.current.delete(nodeId); }
+        } finally { if (!stopped) preparingSends.current.delete(nodeId); }
+        if (stopped) return;
         n = nodesRef.current[nodeId];
-        if (!n) return;
+        if (!n) {
+          endPreview();
+          return;
+        }
         if (n.status === 'streaming') {
           rejectSend();
           return;
@@ -2096,7 +2191,6 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       }
       // Create assistant message synchronously first so status flips to 'streaming'
       // immediately, blocking concurrent submits on the same node.
-      const assistantId = `a-${nodeId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       // Rewrite @node:xxx tokens to @<title> for display so the chip the user
       // typed survives in the transcript. Raw tokens are resolved later and
       // injected as context into the outgoing prompt.
@@ -2106,23 +2200,12 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       // them (SkillInvocationRequest.args): chat mentions leave the text and
       // come along as context instead.
       const skillArgs = skillSend ? stripNodeMentionTokens(skillSend.args).trim() : '';
-      dispatch({
-        type: 'user-send',
-        nodeId,
-        userText: displayText,
-        assistantId,
-        quotedText: meta?.quotedText,
-        attachments: meta?.attachments,
-        comments: meta?.comments,
-        mentions: meta?.mentions,
-        ...(meta?.keepDraft ? { keepDraft: true } : {}),
-        ...(meta?.quoteSource ? { quoteSource: meta.quoteSource } : {}),
-        ...(skillSend ? { skill: {
-          id: skillSend.skill.id, name: skillSend.skill.name, origin: skillSend.skill.origin,
-          ...(skillSend.skill.runtimeId ? { runtimeId: skillSend.skill.runtimeId } : {}), args: skillArgs,
-        } } : {}),
-        ...(metaAgentContext !== undefined ? { metaAgentContext } : {}),
-      });
+      dispatch(userSend(displayText, skillSend ? {
+        id: skillSend.skill.id, name: skillSend.skill.name, origin: skillSend.skill.origin,
+        ...(skillSend.skill.runtimeId ? { runtimeId: skillSend.skill.runtimeId } : {}), args: skillArgs,
+      } : undefined));
+      // After the dispatch: a render between the two still has the rows.
+      endPreview();
       assistantTextBufs.current[assistantId] = '';
 
       let chatId = n.chatId;
@@ -2248,7 +2331,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           quoteSource: meta?.quoteSource,
           attachments: meta?.attachments,
           comments: meta?.comments as Array<Record<string, unknown>> | undefined,
+          ...(meta?.mentions?.length ? { mentions: meta.mentions } : {}),
           ...(metaAgentContext?.refs?.length ? { companionRefs: metaAgentContext.refs } : {}),
+          ...(meta?.blockAnswer ? { blockAnswer: meta.blockAnswer } : {}),
         },
         ...(skillSend ? { skill: { id: skillSend.skill.id, name: skillSend.skill.name, args: skillArgs } } : {}),
         ...(skillSend && slashRuntimeId ? {
@@ -2535,7 +2620,11 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         if (!completed) return;
         n = completed.node;
       }
-      const prompt = buildResumePrompt(n.messages, interruptionCauseOfKind(n.errorKind) ?? 'restart');
+      // A turn that ended early or was stopped (its answer's mark) is carried
+      // on the same way, by Continue.
+      const last = n.messages.at(-1);
+      const mark = n.status === 'idle' && last?.role === 'assistant' ? last.turnEnd : undefined;
+      const prompt = buildResumePrompt(n.messages, interruptionCauseOfKind(n.errorKind) ?? mark ?? 'restart');
       if (!prompt) return;
       turnInspections.current.get(nodeId)?.();
       turnInspections.current.delete(nodeId);
@@ -2544,6 +2633,35 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     },
     [startStream, completeNodeHistory],
   );
+
+  // A user message sent again: a retry with its stored text, or an edit with
+  // new prose. An old message's stored text is already the wire text (quote
+  // prefix and attachment sentinel baked in); a newer one keeps its quote,
+  // attachments and review comments as fields, so they go back around the
+  // prose the way the first send framed them, and the chats it mentioned go
+  // back to @node tokens (its text shows them as @title).
+  const resendOf = useCallback((n: ChatNodeState, source: ChatMessage, prose: string) => {
+    const quote = source.quotedText;
+    const attachments = source.attachments ?? [];
+    // The quote keeps the framing it was sent with. A message read back
+    // after a reload has lost it; in the assistant's conversation its
+    // attached context is recognised by how that block opens.
+    const quoteSource = source.quoteSource
+      ?? (isSystemWorkspace(projectsRef.current.find((p) => p.id === n.projectId)) ? quoteSourceOf(quote) : undefined);
+    const text = restoreNodeMentionTokens(prose, source.mentions);
+    const mentions = source.mentions?.filter((mention) => prose.includes(`@${mention.label}`));
+    return {
+      wire: appendAttachmentsSentinel(joinMessageParts(formatCommentsBlock(source.comments ?? []), quote ?? null, text, quoteSource), attachments),
+      meta: {
+        quotedText: quote,
+        ...(quote && quoteSource ? { quoteSource } : {}),
+        attachments: attachments.length > 0 ? attachments.map((a) => ({ ...a })) : undefined,
+        comments: source.comments,
+        displayText: text,
+        ...(mentions?.length ? { mentions } : {}),
+      },
+    };
+  }, []);
 
   const retryLastTurn = useCallback(
     async (nodeId: string, fromIndex?: number, binding?: SendBindingMeta, explicitRerun = false) => {
@@ -2604,31 +2722,11 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       if (!sourceMsg) return;
       cancelFns.current[nodeId]?.();
       if (!(uncertain && explicitRerun)) trimForRerun(nodeId, n, fromIndex);
-      // For retries, the stored text is already the wire-flattened payload
-      // (quote prefix + attachment sentinel are baked in for old messages).
-      // For new messages with structured fields, m.text is bare prose, so we
-      // re-flatten via joinMessageParts + appendAttachmentsSentinel so the
-      // backend gets the same shape it always has.
-      const reText = sourceMsg.text;
-      const reQuote = sourceMsg.quotedText;
-      const reAttach = sourceMsg.attachments ?? [];
-      const reComments = sourceMsg.comments;
-      // The quote keeps the framing it was sent with. A message read back
-      // after a reload has lost it; in the assistant's conversation its
-      // attached context is recognised by how that block opens.
-      const reSource = sourceMsg.quoteSource
-        ?? (isSystemWorkspace(projectsRef.current.find((p) => p.id === n.projectId)) ? quoteSourceOf(reQuote) : undefined);
-      const flattened = appendAttachmentsSentinel(
-        joinMessageParts(formatCommentsBlock(reComments ?? []), reQuote ?? null, reText, reSource), reAttach,
-      );
+      const { wire, meta } = resendOf(n, sourceMsg, sourceMsg.text);
       const resent = resendTurnContext(nodeId, sourceMsg);
       // The skill it ran runs again; where it is gone, the backend says so.
-      void startStream(nodeId, flattened, undefined, {
-        quotedText: reQuote,
-        ...(reQuote && reSource ? { quoteSource: reSource } : {}),
-        attachments: reAttach.length > 0 ? reAttach.map(a => ({ ...a })) : undefined,
-        comments: reComments,
-        displayText: reText,
+      void startStream(nodeId, wire, undefined, {
+        ...meta,
         ...(sourceMsg.skill ? { skill: sourceMsg.skill } : {}),
         // A model/effort picked after the failure applies to the retry,
         // the same way it would to a fresh send.
@@ -2636,7 +2734,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         ...(resent !== undefined ? { metaAgentContext: resent } : {}),
       });
     },
-    [dispatch, resumeLastTurn, startStream, completeNodeHistory, trimForRerun],
+    [dispatch, resumeLastTurn, startStream, completeNodeHistory, trimForRerun, resendOf],
   );
 
   // An explicit rerun of an uncertain execution appends a new attempt, keeping
@@ -2665,15 +2763,19 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
         ? edited.skill : undefined;
       // The edited message keeps what it referred to (a post it replied to, handed-over rows).
       const resent = resendTurnContext(nodeId, n.messages[fromIndex]);
+      // The edit replaces the prose; the quote, attachments, review comments
+      // and chats the message carried go with it again.
+      const { wire, meta } = edited ? resendOf(n, edited, newText) : { wire: newText, meta: {} };
       trimForRerun(nodeId, n, fromIndex);
       // A model/effort picked since applies, as it does to a retry.
-      void startStream(nodeId, newText, undefined, {
+      void startStream(nodeId, wire, undefined, {
+        ...meta,
         ...(skill ? { skill } : {}),
         ...binding,
         ...(resent !== undefined ? { metaAgentContext: resent } : {}),
       });
     },
-    [startStream, completeNodeHistory, trimForRerun],
+    [startStream, completeNodeHistory, trimForRerun, resendOf],
   );
 
   const cancelStream = useCallback((nodeId: string) => {
@@ -2760,6 +2862,21 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     if (saved?.sessionState && typeof saved.sessionState === 'object') {
       dispatch({ type: 'session-state', nodeId, state: parseSessionState({ ...(saved.sessionState as Record<string, unknown>) }) });
     }
+  }, [dispatch]);
+
+  const setChatServiceTier = useCallback(async (nodeId: string, serviceTier: string | null) => {
+    const node = nodesRef.current[nodeId];
+    const project = projectsRef.current.find((candidate) => candidate.id === node?.projectId);
+    if (!node || !project) throw new Error('Chat not found');
+    const res = await backendFetch(`${nodeBackendApiBase(nodeId)}/nodes/${encodeURIComponent(nodeId)}/service-tier`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serviceTier, graphPrerequisite: durableNodePrerequisite(project, nodesRef.current, node) }),
+    });
+    if (!res.ok) {
+      const failure = await res.json().catch(() => null) as { error?: unknown } | null;
+      throw new Error(typeof failure?.error === 'string' && res.status < 500 ? failure.error : 'Failed to save the speed');
+    }
+    dispatch({ type: 'set-service-tier', nodeId, serviceTier });
   }, [dispatch]);
 
   const resolvePermission = useCallback((nodeId: string, optionId: string) => {
@@ -2914,6 +3031,14 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     },
     [dispatch],
   );
+
+  const sendQueuedNow = useCallback((nodeId: string) => {
+    const node = nodesRef.current[nodeId];
+    if (!node || node.status === 'streaming') return;
+    dispatch({ type: 'resume-queue', nodeId });
+    const queue = queuedBatchOf(node);
+    if (queue.length > 0) sendQueuedBatch(nodeId, queue);
+  }, [dispatch, queuedBatchOf, sendQueuedBatch]);
 
   const setComposerDraft = useCallback(
     (nodeId: string, draft: ComposerDraft | null) => {
@@ -3830,6 +3955,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       retryAgentModes,
       agentStatus,
       agentStatusUnreachable,
+      agentStatusConnectionId: activeBackendConnectionId,
       warmFailedError,
       refreshAgentStatus,
       focusedNodeId,
@@ -3851,6 +3977,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       retryAgentModes,
       agentStatus,
       agentStatusUnreachable,
+      activeBackendConnectionId,
       warmFailedError,
       refreshAgentStatus,
       focusedNodeId,
@@ -3881,6 +4008,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       projects,
       activeProjectId,
       activeProject,
+      agentStatusConnectionId: activeBackendConnectionId,
       // order / edges are the LIVE projection — soft-deleted nodes and the
       // edges touching them are filtered out. Consumers that need the raw
       // list (including trash rows) read `activeProject.chatIds` / `.edges`.
@@ -3907,6 +4035,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sendMessage,
       setChatPermissionMode,
       setChatUltracode,
+      setChatServiceTier,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -4019,6 +4148,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       dequeueMessage,
       flushQueue,
       markQueueErrored,
+      sendQueuedNow,
       unreadFilterOn,
       setUnreadFilterOn,
       markAllRead,
@@ -4030,6 +4160,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       projects,
       activeProjectId,
       activeProject,
+      activeBackendConnectionId,
       theme,
       toggleTheme,
       createProject,
@@ -4049,6 +4180,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sendMessage,
       setChatPermissionMode,
       setChatUltracode,
+      setChatServiceTier,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -4161,6 +4293,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       dequeueMessage,
       flushQueue,
       markQueueErrored,
+      sendQueuedNow,
       unreadFilterOn,
       setUnreadFilterOn,
       markAllRead,
@@ -4173,6 +4306,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
   const hotActions = useMemo<ExtendedChatActionsValue>(
     () => ({
       loadOlderMessages,
+      loadOlderUntil,
       ensureCompleteHistory,
       catchUpNodes,
       createProject,
@@ -4185,6 +4319,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sendMessage,
       setChatPermissionMode,
       setChatUltracode,
+      setChatServiceTier,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -4240,6 +4375,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       steerMessage,
       queueMessage,
       dequeueMessage,
+      sendQueuedNow,
       setComposerDraft,
       createContext,
       reorderPane,
@@ -4266,6 +4402,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
     }),
     [
       loadOlderMessages,
+      loadOlderUntil,
       ensureCompleteHistory,
       catchUpNodes,
       installWorkspaceSnapshot,
@@ -4279,6 +4416,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       sendMessage,
       setChatPermissionMode,
       setChatUltracode,
+      setChatServiceTier,
       retryLastTurn,
       rerunLastTurn,
       resumeLastTurn,
@@ -4334,6 +4472,7 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
       steerMessage,
       queueMessage,
       dequeueMessage,
+      sendQueuedNow,
       setComposerDraft,
       createContext,
       reorderPane,
@@ -4366,7 +4505,9 @@ export function ChatProvider({ children, userId }: { children: React.ReactNode; 
           <ChatActionsContext.Provider value={hotActions}>
             <TreePrefetchContext.Provider value={prefetchTreeForNode}>
               <NodeMessagesContext.Provider value={ensureNodeMessages}>
-                <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+                <DeferredToolCallsContext.Provider value={deferredToolCallsRef.current}>
+                  <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+                </DeferredToolCallsContext.Provider>
               </NodeMessagesContext.Provider>
             </TreePrefetchContext.Provider>
           </ChatActionsContext.Provider>
@@ -4438,16 +4579,47 @@ export function useStructureVersion(): number {
   );
 }
 
+/**
+ * One node, re-rendering when it changes. Inside a Dashboard pane scrolled off
+ * the strip (PaneShown, MO-25) it holds still: it keeps returning the node it
+ * last returned and drops the node's notifications, and when the pane comes
+ * back it notifies once, so the pane catches up in one render.
+ */
 export function useChatNode(nodeId: string): ChatNodeState | undefined {
   const store = useContext(ChatNodeStoreContext);
   if (!store) throw new Error('useChatNode must be used within ChatProvider');
+  const shown = useContext(PaneShownContext);
+  const held = useRef<{ nodeId: string | null; node: ChatNodeState | undefined }>({ nodeId: null, node: undefined });
   const subscribe = useCallback(
-    (listener: () => void) => store.subscribeNode(nodeId, listener),
-    [store, nodeId],
+    (listener: () => void) => {
+      if (!shown) return store.subscribeNode(nodeId, listener);
+      let missed = false;
+      const offNode = store.subscribeNode(nodeId, () => {
+        if (shown.frozen) missed = true;
+        else listener();
+      });
+      const offShown = shown.subscribe(() => {
+        if (shown.frozen || !missed) return;
+        missed = false;
+        listener();
+      });
+      return () => {
+        offNode();
+        offShown();
+      };
+    },
+    [store, nodeId, shown],
   );
   const getSnapshot = useCallback(
-    () => store.getNode(nodeId),
-    [store, nodeId],
+    () => {
+      const last = held.current;
+      if (shown?.frozen && last.nodeId === nodeId) return last.node;
+      const node = store.getNode(nodeId);
+      last.nodeId = nodeId;
+      last.node = node;
+      return node;
+    },
+    [store, nodeId, shown],
   );
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
@@ -4546,7 +4718,28 @@ export function useStructuralSelector<T>(
 ): T {
   const store = useContext(ChatNodeStoreContext);
   if (!store) throw new Error('useStructuralSelector must be used within ChatProvider');
+  return useStructuralSelection(store, selector, equalityFn);
+}
 
+/**
+ * {@link useStructuralSelector} that also renders outside a ChatProvider
+ * (provider-free component tests), where its selector sees no nodes.
+ */
+export function useOptionalStructuralSelector<T>(
+  selector: (nodes: Record<string, ChatNodeState>) => T,
+  equalityFn: (a: T, b: T) => boolean = Object.is,
+): T {
+  return useStructuralSelection(useContext(ChatNodeStoreContext), selector, equalityFn);
+}
+
+const NO_NODES: Record<string, ChatNodeState> = {};
+const NO_STRUCTURE_CHANGES = () => () => {};
+
+function useStructuralSelection<T>(
+  store: ChatNodeStoreValue | null,
+  selector: (nodes: Record<string, ChatNodeState>) => T,
+  equalityFn: (a: T, b: T) => boolean,
+): T {
   const selectorRef = useRef(selector);
   const equalityRef = useRef(equalityFn);
 
@@ -4560,12 +4753,12 @@ export function useStructuralSelector<T>(
   equalityRef.current = equalityFn;
 
   const getSnapshot = useCallback(() => {
-    const version = store.getStructureVersion();
+    const version = store ? store.getStructureVersion() : 0;
     const last = lastRef.current;
     // Safe: HIGH_FREQ_ACTIONS cannot mutate structural fields, so same version
     // implies the selector output is unchanged. See chatReducers.structural.test.ts.
     if (last && last.version === version) return last.value;
-    const value = selectorRef.current(store.getNodes());
+    const value = selectorRef.current(store ? store.getNodes() : NO_NODES);
     if (last && equalityRef.current(last.value, value)) {
       lastRef.current = { value: last.value, version };
       return last.value;
@@ -4574,7 +4767,7 @@ export function useStructuralSelector<T>(
     return value;
   }, [store]);
 
-  return useSyncExternalStore(store.subscribeStructure, getSnapshot, getSnapshot);
+  return useSyncExternalStore(store ? store.subscribeStructure : NO_STRUCTURE_CHANGES, getSnapshot, getSnapshot);
 }
 
 /** Shallow array equality — convenience for `useNodesSelector` outputs that are arrays. */

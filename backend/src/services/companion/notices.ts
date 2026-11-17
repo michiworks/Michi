@@ -11,8 +11,8 @@
  *   minutes (its version `…:escalated`). Its record goes once the item is no
  *   longer open at that version (processItems). A Michi conversation the
  *   user has on screen, or viewed since the item changed, is handled.
- * - Michi's posts in its conversation (a check-in's reply: the brief, an
- *   alert, a worker report), as `agent:chat` (reason `update`), the newest
+ * - Michi's posts in its conversation (a check-in's reply: an alert, a
+ *   worker report), as `agent:chat` (reason `update`), the newest
  *   replacing the last. Never the text, only the titles of the items the run
  *   was about. Not while the agent's panel is focused, and a check-in about
  *   items just notified, or about to be, says nothing of its own.
@@ -26,7 +26,7 @@
  * proposed, and an item's version is marked notified so that resuming sends
  * nothing old. How much of it reaches the user is their one level
  * (Settings › Notifications): Needs you at "Only when something needs me",
- * posts and the brief at All.
+ * posts at All.
  *
  * The coordinator makes one CompanionNotices and calls it as it called the
  * notice gate it replaces. The attention service is the process's one, set
@@ -85,8 +85,8 @@ const REPLY_NOTICE_TITLES = 3;
 const REPLY_NOTICE_TITLE_MAX = 60;
 const SPOKEN_RUNS_KEPT = 200;
 const CHAT: CompanionTarget = Object.freeze({ kind: 'companion', tab: 'chat' }) as CompanionTarget;
-/** Turns whose reply may notify (DESIGN §7.6): never the welcome, which the user just asked for, or a catch-up. */
-const NOTIFYING_TURNS: ReadonlySet<CompanionTurnKind> = new Set<CompanionTurnKind>(['heartbeat', 'wake', 'worker_report', 'brief']);
+/** Turns whose reply may notify (DESIGN §7.6): never the welcome, which the user just asked for. */
+const NOTIFYING_TURNS: ReadonlySet<CompanionTurnKind> = new Set<CompanionTurnKind>(['heartbeat', 'wake', 'worker_report']);
 
 const ITEM_KEY_PREFIX = 'agent:item:';
 const CHAT_KEY = 'agent:chat';
@@ -104,8 +104,8 @@ export type CompanionNoticeRequest =
  * held     = not sent and counts as handled: Michi is paused or it was
  *            not welcomed yet, the user already handled it, or its subtype
  *            was demoted. An item's
- *            version is marked notified, so it never bursts out later; Today
- *            and the brief cover it;
+ *            version is marked notified, so it never bursts out later;
+ *            Today covers it;
  * dropped  = nothing to send (not open, already notified, a duplicate, a
  *            reply that does not notify).
  */
@@ -340,7 +340,7 @@ export class CompanionNotices implements CompanionMessageNotifier {
     return [...items.filter((item) => item.severity === 'now'), ...items.filter((item) => item.severity !== 'now')].map((item) => item.title);
   }
 
-  /** Held: Michi is off or paused, or the conversation is on screen (the caller leaves it to Today and the brief). */
+  /** Held: Michi is off or paused, or the conversation is on screen (the caller leaves it to Today). */
   private notifyWorker(request: Extract<CompanionNoticeRequest, { kind: 'worker_finished' }>): CompanionNotifyResult {
     const settings = getCompanionSettings();
     if (this.closed(settings) || this.paneVisible(request.nodeId)) return 'held';

@@ -1,7 +1,7 @@
 import React from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from 'motion/react';
 import type { PageChangeDto } from 'michi-shared';
-import { EASE } from '../../../motion/tokens';
+import { DUR, EASE } from '../../../motion/tokens';
 import { ChangeCard, isPageChangeRedoable, isPageChangeRevertible, type AcceptedPageEdit } from './ChangeCard';
 import type { ExactPageSource } from './SourceTrace';
 import { buildPageChangeIndex, changeTargetKey } from './changeIndex';
@@ -59,7 +59,7 @@ export interface PageChangeTargetsProps {
 
 /** The chosen action holds this long before the answered suggestion collapses, however fast Michi answers. */
 const CHOSEN_HOLD_MS = 120;
-const SETTLE = { duration: 0.22, ease: EASE.drawer };
+const SETTLE = { duration: DUR.move, ease: EASE.drawer };
 /** The gap an element sits in (its parent's row gap, whatever the CSS says now): collapsing away, it takes the gap along. */
 const rowGapOf = (el: Element | null) => {
   const parent = el?.parentElement;
@@ -74,7 +74,7 @@ const holdFor = (answers: Answers, id?: string) => {
   return Number.isFinite(latest) ? Math.max(0, CHOSEN_HOLD_MS - (performance.now() - latest)) / 1000 : 0;
 };
 const gone = (answers: Answers, id?: string) => (answers.still
-  ? { opacity: 0, transition: { duration: 0.08 } }
+  ? { opacity: 0, transition: { duration: DUR.dismiss } }
   : { height: 0, opacity: 0, overflow: 'hidden', transition: { ...SETTLE, delay: holdFor(answers, id) } });
 
 /**

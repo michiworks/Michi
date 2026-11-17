@@ -41,6 +41,13 @@ describe('companion metadata after a reload (mapMessageRow)', () => {
     expect(JSON.parse(serializeMessageRowsForNode({ v: node([plain]) }, 'v')[0]!.metadata!)).toMatchObject({ companionTurn: { startTaint: 'collector' } });
   });
 
+  it('writes back which block a user message answered, so it stays one line after a reload', () => {
+    const blockAnswer = { messageId: 'a-1', blockId: 'cb-form', title: 'Trip' };
+    const user = mapMessageRow({ id: 'u3', node_id: 'v', role: 'user', content: 'Plan it', metadata: JSON.stringify({ blockAnswer }) });
+    expect(user.blockAnswer).toEqual(blockAnswer);
+    expect(JSON.parse(serializeMessageRowsForNode({ v: node([user]) }, 'v')[0]!.metadata!)).toMatchObject({ blockAnswer });
+  });
+
   it('reads companionPost from an assistant row and companionTurn from a user row', () => {
     const post = mapMessageRow({ id: 'cmp-post-r1', node_id: 'v', role: 'assistant', content: 'Done.', metadata: JSON.stringify({ companionPost: POST }) });
     expect(post.companionPost).toEqual(POST);

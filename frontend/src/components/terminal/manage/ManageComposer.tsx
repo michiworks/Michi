@@ -3,7 +3,7 @@ import { ComposerPermissionControl } from '../ComposerPermissionControl';
 import { approveForMeRuntimeIds, chatPermissionChoiceForRuntime } from '../../../lib/chatPermissionModes';
 import { chatPermissionChoiceParts } from 'michi-shared';
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useChatStore, useStructuralSelector, shallowArrayEqual } from '../../../state/chatStore';
+import { useChatStore } from '../../../state/chatStore';
 import { appendComposerLine } from '../../../state/composerDraft';
 import { receiveHomeDraft } from '../../../state/homeDraft';
 import { resetTemporaryChatDraft } from '../../../state/temporaryChatDraft';
@@ -12,7 +12,8 @@ import LazyMentionEditor from '../../LazyMentionEditor';
 import type { MentionRecord } from '../../../lib/mentions';
 import { expandMentions } from '../../../lib/mentions';
 import { draftToDoc } from '../../mentionDoc';
-import { collectCrossTreeGroups, EMPTY_CROSS_TREE_GROUPS } from '../../crossTreeMentions';
+import { collectCrossTreeGroups } from '../../crossTreeMentions';
+import { useMentionCandidates } from '../../mentionCandidates';
 import { getElectron } from '../../../lib/electronBridge';
 import {
   copyWorkspaceFile,
@@ -621,11 +622,11 @@ function ScopedManageComposer({
   // Every conversation in the target workspace is @-mentionable from here.
   // There is no "current thread" on Home or for a digest follow-up root, so
   // nothing is excluded and all nodes flow through the cross-tree path
-  // (grouped by thread, most recently active thread first).
-  const crossTreeNodes = useStructuralSelector(useCallback((nodesMap) => {
-    if (!project) return EMPTY_CROSS_TREE_GROUPS;
-    return collectCrossTreeGroups(nodesMap, project, null);
-  }, [project]), shallowArrayEqual);
+  // (grouped by thread, most recently active thread first), built when the
+  // menu opens (useMentionCandidates).
+  const getMentionCandidates = useMentionCandidates((nodesMap) => ({
+    sameTree: [], crossTree: project ? collectCrossTreeGroups(nodesMap, project, null) : [],
+  }));
 
   // The tray names the chip in full; the toolbar shortens it as it narrows.
   const permissionControl = permissionPreferences.global ? null : (
@@ -664,8 +665,7 @@ function ScopedManageComposer({
             placeholder={temporary ? 'Ask in a temporary chat' : 'What would you like to explore?'}
             className="hide-sb"
             artifacts={artifacts}
-            sameTreeNodes={[]}
-            crossTreeNodes={crossTreeNodes}
+            getMentionCandidates={getMentionCandidates}
             currentNodeId={parentNodeId ?? '__manage__'}
             enableSlash={false}
             onSubmit={() => submit()}

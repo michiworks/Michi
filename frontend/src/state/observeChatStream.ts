@@ -14,7 +14,7 @@ interface ObserveOptions {
   lastSeqRef: Ref<number>;
   onTerminal?: () => void;
   extraHandlers?: Omit<Partial<StreamHandlers>, 'onEnvelope' | 'onTurnStart' | 'onDone' | 'onError' | 'onErrorPayload'>;
-  onTurnEnd?: (reason: 'done' | 'error', nodeId: string) => void;
+  onTurnEnd?: (reason: 'done' | 'cancel' | 'error', nodeId: string) => void;
   onStreamComplete?: () => void;
   cursor?: 'foreground' | 'background';
   /** The node's workspace, whose pages the turn's writes refresh. */
@@ -140,6 +140,16 @@ export function createBackgroundTurnBinding({
           });
         }
       },
+      onBlocks: (data) => {
+        rememberEnvelope(data.assistantId, data.turnId);
+        if (assistantId) {
+          dispatch({
+            type: 'chat-blocks', nodeId, assistantId,
+            blocks: data.blocks, ...(data.title !== undefined ? { title: data.title } : {}),
+            fallbackText: data.fallbackText, observedAt: data.observedAt,
+          });
+        }
+      },
       onHeartbeat: (idleMs) => dispatch({ type: 'heartbeat', nodeId, idleMs }),
       onTitle: (title) => dispatch({ type: 'set-title', nodeId, title }),
       onBranchOverview: (overview, seq, incomingAssistantId, incomingTurnId) => {
@@ -202,21 +212,22 @@ export function createBackgroundTurnBinding({
         const { error, aborted } = doneOutcome(stopReason, persisted);
         settleCancellationObservation(chatId, turnId, error
           ? { state: 'error', detail: 'Cancellation cleanup failed. Retry to check the original session.' }
-          : { state: 'settled' });
+          : { state: 'settled', ...(stopReason ? { stopReason } : {}) });
         effects.end(!error && !aborted);
         if (!assistantId) return;
         if (error) {
-          dispatch({ type: 'error', nodeId, assistantId, ...error, turnId });
+          dispatch({ type: 'error', nodeId, assistantId, ...error, completedAt, turnId });
           onTurnEnd?.('error', nodeId);
           onTerminal?.();
           return;
         }
         dispatch({
           type: 'done', nodeId, assistantId, completedAt, aborted,
+          ...(stopReason ? { stopReason } : {}),
           ...(turnId ? { turnId } : {}),
           ...(completion ? { completion } : {}),
         });
-        onTurnEnd?.('done', nodeId);
+        onTurnEnd?.(aborted ? 'cancel' : 'done', nodeId);
         if (!aborted) onStreamComplete?.();
         onTerminal?.();
       },

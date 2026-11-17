@@ -39,7 +39,7 @@ async function boot(page: Page, palette = 'slate') {
         { id: 'outside-tree', rootNodeId: 'outside', name: 'Outside tree', createdAt: 2, lastActiveAt: 2 }],
       activeTreeId: 'review-tree', contexts: [], createdAt: 1,
     }] }));
-    localStorage.setItem('michi:v1:prefs', JSON.stringify({ terminalPalette, paneSpawnAnimation: 'none', defaultPaneWidth: 520, sidebarExpanded: { workspaces: { 'feedback-ws': true }, threads: { 'review-tree': true }, branches: { root: true } } }));
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ terminalPalette, defaultPaneWidth: 520, sidebarExpanded: { workspaces: { 'feedback-ws': true }, threads: { 'review-tree': true }, branches: { root: true } } }));
     sessionStorage.setItem('michi:panes:open', JSON.stringify({ 'feedback-ws::review-tree': ['target', 'other', 'feedback-file'] }));
     sessionStorage.setItem('michi:panes:focus', JSON.stringify({ 'feedback-ws::review-tree': 'target' }));
     sessionStorage.setItem('michi:panes:items:v1', JSON.stringify({ 'feedback-file': {
@@ -155,7 +155,10 @@ for (const action of ['Delete subtree', 'Archive']) test(`${action} destination 
   await screenshot(page, `file-feedback-${action === 'Archive' ? 'archived' : 'deleted'}-destination`);
   await destination.selectOption('other');
   await page.getByRole('button', { name: /^Save/ }).click();
-  await expect(page.locator('.terminal-dashboard > [data-node-id="other"]').getByText('Keep this comment if its destination disappears.', { exact: true })).toBeVisible();
+  // The pane sits off the strip, where it renders nothing until it is back in view.
+  const otherPane = page.locator('.terminal-dashboard > [data-node-id="other"]');
+  await otherPane.scrollIntoViewIfNeeded();
+  await expect(otherPane.getByText('Keep this comment if its destination disappears.', { exact: true })).toBeVisible();
 });
 
 
@@ -179,7 +182,11 @@ test('selection comment restores its original identity after Home navigation unm
   await expect(page.locator('.sel-actions-term-highlight-layer')).toHaveCount(0);
   await screenshot(page, 'file-feedback-restored-after-home');
   await page.getByRole('button', { name: /^Save/ }).click();
-  await expect(page.locator('.terminal-dashboard > [data-node-id="target"]').getByText('Keep this draft while I visit Home.', { exact: true })).toBeVisible();
+  // Back from Home the strip shows the root pane; the target pane, off the
+  // strip, renders nothing until it is back in view.
+  const targetPane = page.locator('.terminal-dashboard > [data-node-id="target"]');
+  await targetPane.scrollIntoViewIfNeeded();
+  await expect(targetPane.getByText('Keep this draft while I visit Home.', { exact: true })).toBeVisible();
 });
 
 

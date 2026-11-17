@@ -26,6 +26,16 @@ describe('ComponentLibrary insertion', () => {
     api.listPageComponentReferences.mockResolvedValue([]);
   });
 
+  it('says the library is loading until it is read, and empty only after', async () => {
+    let answer!: (value: { revision: number; items: PageComponent[] }) => void;
+    api.listPageComponents.mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    render(<ComponentLibrary workspaceId="workspace-1" connectionId="local" />);
+    expect(screen.getByRole('status').textContent).toBe('Loading components…');
+    expect(screen.queryByText('No components saved yet.')).toBeNull();
+    await act(async () => { answer({ revision: 1, items: [] }); });
+    expect(screen.getByText('No components saved yet.')).toBeTruthy();
+  });
+
   it('shows isolated sample preview and inserts the selected enabled active version', async () => {
     const onInsert = vi.fn().mockResolvedValue(undefined);
     render(<ComponentLibrary workspaceId="workspace-1" connectionId="local" onInsert={onInsert} />);

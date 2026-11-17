@@ -66,7 +66,7 @@ import { turnCompanionOn } from './helpers/backgroundWork';
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
-/** Thursday 2026-11-05, 12:00 local: a workday outside the default quiet hours, after the brief's time. */
+/** Thursday 2026-11-05, 12:00 local: a workday outside the default quiet hours. */
 const T0 = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
 const localAt = (day: number, hour: number, minute = 0) => new Date(2026, 10, day, hour, minute, 0, 0).getTime();
 
@@ -178,7 +178,7 @@ describe('Companion engine: polls, notices and the lease', () => {
   /** The welcome as the coordinator records it: cursors from here on. */
   function welcomed(when: number): void {
     markCompanionWelcomeDone(when);
-    for (const key of ['companion:wake_cursor', 'companion:heartbeat_cursor', 'companion:brief_cursor'] as const) setCompanionMetaNumber(key, latestEventSeq());
+    for (const key of ['companion:wake_cursor', 'companion:heartbeat_cursor'] as const) setCompanionMetaNumber(key, latestEventSeq());
     setCompanionMetaNumber('companion:last_heartbeat_at', when);
   }
 
@@ -513,14 +513,14 @@ describe('Companion engine: polls, notices and the lease', () => {
     assert.equal(getItemByKey(`reminder:${daily.id}`)!.version, 'daily:2026-11-09');
   });
 
-  test('the service hands the snapshot the latest "Since you left"', async () => {
+  test('a look is recorded and answers nothing: since 2026-11-17 nothing is summarized for the return', async () => {
     recordCompanionView(T0 - 2 * HOUR);
     const view = recordCompanionView(T0);
-    assert.ok(view.catchUp);
+    assert.deepEqual(view, { previousViewedAt: T0 - 2 * HOUR, hadUnread: false });
+    assert.equal('catchUp' in coordinator.service, false, 'the service hands the snapshot no "Since you left" any more');
     now = T0 + 5 * MINUTE;
-    assert.deepEqual(coordinator.service.catchUp!(), view.catchUp);
     assert.equal(await coordinator.service.onPresence({ active: true, companionFocused: false, lastInputAt: null, composing: false }), undefined,
-      'a beacon answers nothing: "Since you left" comes from the view');
+      'a beacon answers nothing');
   });
 
   test('sources on different MCP servers poll at the same time, those sharing one in turn; the tick (and Check now) waits for all (H#2)', async () => {

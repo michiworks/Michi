@@ -2,10 +2,11 @@ import {
   cloneElement,
   useEffect,
   useId,
+  useRef,
   useState,
   type ReactElement,
 } from 'react';
-import { ChevronRight, Ellipsis, Pencil, RefreshCw, Trash2 } from 'lucide-react';
+import { ChevronRightIcon, EditIcon, MonitorIcon, MoreIcon, RetryIcon, ServerIcon, TrashIcon } from '../../icons';
 import {
   deleteBackendConnection,
   listBackendConnections,
@@ -22,6 +23,7 @@ import { backendEntityId } from '../../../../config/backendIdentity';
 import type { Project } from '../../../../state/chatTypes';
 import { Button } from '../../../ui/controls';
 import { ActionMenu, type ActionMenuEntry } from '../../../ui/ActionMenu';
+import { MenuPresence } from '../../../ContextMenu';
 import '../../../RemoteConnection.css';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { RemoteDesktopConnect } from '../../../RemoteDesktopConnect';
@@ -30,6 +32,7 @@ import { useRemoteWorkspaces, type RemoteWorkspacesState } from './useRemoteWork
 import { MobileAccessPanel } from './MobileAccessPanel';
 import { describeConnectionProblem, plainConnectionLog } from './connectionProblem';
 import { SettingsSection } from './SettingsSection';
+import { useFocusAfterChange } from './useFocusAfterChange';
 
 type ConnectionDraft = {
   id?: string;
@@ -78,9 +81,21 @@ function draftInput(draft: ConnectionDraft) {
 export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Project[]; onOpenWorkspace?: (projectId: string) => void }) {
   const [connections, setConnections] = useState<BackendConnectionSummary[]>([]);
   const [draft, setDraft] = useState<ConnectionDraft | null>(null);
-  const [busy, setBusy] = useState(false);
+  /** The draft's request in flight: its check, or its check and save. */
+  const [busy, setBusy] = useState<'test' | 'save' | null>(null);
   const [quickConnect, setQuickConnect] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
+  const connectRef = useRef<HTMLButtonElement>(null);
+  const manualRef = useRef<HTMLButtonElement>(null);
+  const quickRef = useRef<HTMLElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  // A form opens on its first field; closing one, by Cancel or a save, puts focus on the button that opens it.
+  const panel = quickConnect ? 'quick' : draft ? 'draft' : null;
+  useFocusAfterChange(panel, (now, before) => {
+    if (now === 'quick') return quickRef.current?.querySelector('input');
+    if (now === 'draft') return nameRef.current;
+    return before === 'quick' ? connectRef.current : manualRef.current;
+  });
 
   const refresh = async () => {
     const remote = await listBackendConnections();
@@ -93,8 +108,8 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
   }, []);
 
   const runTest = async () => {
-    if (!draft) return;
-    setBusy(true);
+    if (!draft || busy) return;
+    setBusy('test');
     setMessage(null);
     try {
       const result = await testBackendConnection(draftInput(draft));
@@ -104,13 +119,13 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
     } catch (err) {
       setMessage({ kind: 'error', text: (err as Error).message });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
   const save = async () => {
-    if (!draft) return;
-    setBusy(true);
+    if (!draft || busy) return;
+    setBusy('save');
     setMessage(null);
     try {
       const input = draftInput(draft);
@@ -127,7 +142,7 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
     } catch (err) {
       setMessage({ kind: 'error', text: (err as Error).message });
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
@@ -186,17 +201,17 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
 
       {!quickConnect && !draft && <>
         <div className="remote-connections__actions">
-          <Button variant="primary" onClick={() => { setQuickConnect(true); setMessage(null); }}>
+          <Button ref={connectRef} variant="primary" onClick={() => { setQuickConnect(true); setMessage(null); }}>
             Connect remote
           </Button>
-          <Button onClick={() => { setDraft({ ...EMPTY_DRAFT }); setMessage(null); }}>
+          <Button ref={manualRef} onClick={() => { setDraft({ ...EMPTY_DRAFT }); setMessage(null); }}>
             Manual setup
           </Button>
         </div>
         <p className="remote-connections__hint">Connect a Linux machine over SSH.</p>
       </>}
 
-      {quickConnect && <section className="remote-connection-panel" aria-label="Connect remote">
+      {quickConnect && <section ref={quickRef} className="remote-connection-panel" aria-label="Connect remote">
         <div className="remote-connection-panel__heading">
           <h2>Connect remote</h2>
           <Button variant="ghost" size="sm" onClick={() => setQuickConnect(false)}>Cancel</Button>
@@ -216,7 +231,7 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
             For a machine already running Michi. Enter its connection details below.
           </p>}
           <Field label="Name">
-            <input value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="build-server" />
+            <input ref={nameRef} value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })} placeholder="build-server" />
           </Field>
           <Field label="Connection type">
             <select aria-label="Connection transport" value={draft.transport}
@@ -261,9 +276,11 @@ export function ConnectionsPane({ projects, onOpenWorkspace }: { projects: Proje
             {draft.id ? 'Leave blank to keep the saved token.' : 'Use the token from your remote Michi server.'} Saved securely on this computer.
           </p>
           <div className="remote-connection-form__actions">
-            <Button disabled={busy} onClick={() => { void runTest(); }}>{busy ? 'Checking…' : 'Test connection'}</Button>
-            <Button variant="primary" disabled={busy} onClick={() => { void save(); }}>Save</Button>
-            <Button variant="ghost" disabled={busy} onClick={() => setDraft(null)}>Cancel</Button>
+            <Button busy={busy === 'test'} busyLabel="Checking…" aria-disabled={busy === 'save' || undefined}
+              onClick={() => { void runTest(); }}>Test connection</Button>
+            <Button variant="primary" busy={busy === 'save'} busyLabel="Saving…" aria-disabled={busy === 'test' || undefined}
+              onClick={() => { void save(); }}>Save</Button>
+            <Button variant="ghost" aria-disabled={!!busy || undefined} onClick={() => { if (!busy) setDraft(null); }}>Cancel</Button>
           </div>
         </div>
       </section>}
@@ -341,24 +358,21 @@ function ConnectionRow({
   const count = `${workspaces.length} ${workspaces.length === 1 ? 'workspace' : 'workspaces'}`;
   // Retry and Edit sit with the problem while a machine is unreachable, so its menu does not repeat them.
   const actions: ActionMenuEntry[] = local ? [] : [
-    ...(onRefresh && failure === null ? [{ id: 'refresh', label: 'Refresh workspaces', icon: <RefreshCw size={14} aria-hidden="true" />, disabled: loading, onSelect: onRefresh }] : []),
-    ...(onEdit && failure === null ? [{ id: 'edit', label: 'Edit', icon: <Pencil size={14} aria-hidden="true" />, onSelect: onEdit }] : []),
-    ...(onRemove ? [{ id: 'remove', label: 'Remove', icon: <Trash2 size={14} aria-hidden="true" />, danger: true, disabled: loading, dividerBefore: failure === null, onSelect: onRemove }] : []),
+    ...(onRefresh && failure === null ? [{ id: 'refresh', label: 'Refresh workspaces', icon: <RetryIcon aria-hidden="true" />, disabled: loading, onSelect: onRefresh }] : []),
+    ...(onEdit && failure === null ? [{ id: 'edit', label: 'Edit', icon: <EditIcon aria-hidden="true" />, onSelect: onEdit }] : []),
+    ...(onRemove ? [{ id: 'remove', label: 'Remove', icon: <TrashIcon aria-hidden="true" />, danger: true, disabled: loading, dividerBefore: failure === null, onSelect: onRemove }] : []),
   ];
   return (
     <li className="remote-machine" aria-label={connection.name}>
-      <svg className="remote-machine__icon" width="18" height="18" viewBox="0 0 18 18" fill="none"
-        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        {local ? <><rect x="2" y="3" width="14" height="10" rx="1.5" /><path d="M6 16h6M9 13v3" /></>
-          : <><rect x="3" y="2" width="12" height="14" rx="1.5" /><path d="M3 9h12M6 5.5h.01M6 12.5h.01M9 5.5h3M9 12.5h3" /></>}
-      </svg>
+      {local ? <MonitorIcon className="remote-machine__icon" size="lg" aria-hidden="true" />
+        : <ServerIcon className="remote-machine__icon" size="lg" aria-hidden="true" />}
       <span className="remote-machine__name">{connection.name}</span>
       <span className="remote-machine__sub">
         <span className="remote-machine__address" title={address}>{address}</span>
         {!local && failure === null && (loading
           ? <span className="remote-machine__count">Reading workspaces…</span>
           : workspaceState?.status === 'ready' && <button type="button" className="remote-machine__count" aria-expanded={listOpen} aria-controls={listId}
-            onClick={() => setListOpen(open => !open)}>{count}<ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" /></button>)}
+            onClick={() => setListOpen(open => !open)}>{count}<ChevronRightIcon size="sm" aria-hidden="true" /></button>)}
       </span>
       <span className="remote-machine__status" data-state={ssh ? tunnelState : undefined}>
         {ssh && <span className="remote-machine__dot" aria-hidden="true" />}
@@ -367,10 +381,11 @@ function ConnectionRow({
       {actions.length > 0
         ? <button type="button" className="remote-machine__more" aria-label={`More actions for ${connection.name}`} aria-haspopup="menu"
           aria-expanded={!!menu} onClick={event => setMenu(menu ? null : event.currentTarget)}>
-          <Ellipsis size={15} aria-hidden="true" />
+          <MoreIcon aria-hidden="true" />
         </button>
         : <span className="remote-machine__more" aria-hidden="true" />}
-      {menu && <ActionMenu anchor={menu} onClose={() => setMenu(null)} label={`${connection.name} actions`} items={actions} />}
+      <MenuPresence>{menu && <ActionMenu key="actions" anchor={menu} liftTarget={menu.closest<HTMLElement>('.remote-machine')}
+        onClose={() => setMenu(null)} label={`${connection.name} actions`} items={actions} />}</MenuPresence>
       {!local && <RemoteUpdateNotice connectionId={connection.id} name={connection.name} onUpdated={onRefresh} unreachable={failure !== null} />}
       {failure !== null && <ConnectionProblemNotice name={connection.name} log={failureLog} onRetry={onRefresh} onEdit={onEdit} />}
       {/* Hidden rather than removed while unreachable, so an open list is open again after a retry. */}

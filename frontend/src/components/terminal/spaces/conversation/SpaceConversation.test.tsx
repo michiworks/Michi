@@ -107,17 +107,24 @@ describe('Start a task sheet', () => {
     expect(readSpaceConversations().pending[0]).toMatchObject({ workspaceId: 'w1', startedFromPageId: 'home' });
   });
 
-  it('takes a next step’s text and closes on Escape or ×', async () => {
-    render(<NewChatSheetSlot scope={pageScope} />);
+  it('takes a next step’s text and closes on Escape or ×, giving focus back to what opened it', async () => {
+    render(<><button type="button">Start a task from this page</button><NewChatSheetSlot scope={pageScope} /></>);
+    const opener = screen.getByRole('button', { name: 'Start a task from this page' });
+    opener.focus();
     act(() => { openNewChatSheet({ text: '跑完增量读取的事务回滚、跨工作区移动两个用例' }); });
     const sheet = await screen.findByRole('region', { name: 'Start a task' });
     const input = await within(sheet).findByRole('textbox') as HTMLTextAreaElement;
     expect(input.value).toBe('跑完增量读取的事务回滚、跨工作区移动两个用例');
+    input.focus();
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(screen.queryByRole('region', { name: 'Start a task' })).toBeNull();
+    expect(document.activeElement).toBe(opener);
     act(() => { openNewChatSheet(); });
-    fireEvent.click(within(await screen.findByRole('region', { name: 'Start a task' })).getByRole('button', { name: 'Close' }));
+    const close = within(await screen.findByRole('region', { name: 'Start a task' })).getByRole('button', { name: 'Close' });
+    close.focus();
+    fireEvent.click(close);
     expect(screen.queryByRole('region', { name: 'Start a task' })).toBeNull();
+    expect(document.activeElement).toBe(opener);
   });
 });
 
@@ -132,6 +139,16 @@ describe('Progress cards', () => {
     expect(item.textContent).toContain('Every step shows on the chat page.');
     expect(item.textContent).not.toContain('SECRET');
     expect(within(item).queryByRole('button', { name: /Continue chatting/ })).toBeNull();
+  });
+
+  it('announces a conversation ending once, and none of its running lines', () => {
+    mocks.nodes = { n1: streaming };
+    const view = render(<SpaceProgressCardList scope={pageScope} cards={[card()]} />);
+    const live = () => within(screen.getByRole('article')).getByRole('status');
+    expect(live().textContent).toBe('');
+    mocks.nodes = {};
+    view.rerender(<SpaceProgressCardList scope={pageScope} cards={[card({ status: 'done', summary: 'ok' })]} />);
+    expect(live().textContent).toBe('Done: 把 Intel 机器手测的步骤写出来');
   });
 
   it('shows what a finished one concluded and Continue chatting', () => {

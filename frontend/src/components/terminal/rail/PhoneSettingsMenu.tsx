@@ -1,5 +1,5 @@
 import React, { useId } from 'react';
-import { ChevronRight, type LucideIcon } from 'lucide-react';
+import { ChevronRightIcon, type IconComponent } from '../icons';
 import { useChatProjects } from '../../../state/chatStore';
 import { usePrefs } from '../../../state/prefs';
 import { useBackendConnections } from '../../../state/useBackendConnections';
@@ -41,7 +41,7 @@ interface PhoneRowProps {
   label: string;
   /** A second line under the label. */
   sub?: string;
-  icon?: LucideIcon;
+  icon?: IconComponent;
   value?: string | number;
   tone?: Tone;
   /** Appended to the accessible name, e.g. "needs attention". */
@@ -60,13 +60,13 @@ function PhoneRow({ id, label, sub, icon: Icon, value, tone, status, onClick, ro
       aria-label={status ? `${label}, ${status}` : label}
       aria-describedby={hasValue ? valueId : undefined}
       onClick={onClick}>
-      {children ?? (Icon && <span className="settings-phone__icon" aria-hidden="true"><Icon size={16} strokeWidth={1.75} /></span>)}
+      {children ?? (Icon && <span className="settings-phone__icon" aria-hidden="true"><Icon size="lg" /></span>)}
       {sub ? <span className="settings-phone__text"><span className="settings-phone__label">{label}</span><span className="settings-phone__sub">{sub}</span></span>
         : <span className="settings-phone__label">{label}</span>}
       {hasValue && <span id={valueId} className="settings-phone__value" data-tone={tone}>
         {tone && <span className="settings-phone__dot" aria-hidden="true" />}{value}
       </span>}
-      <ChevronRight className="settings-phone__chevron" size={16} strokeWidth={1.75} aria-hidden="true" />
+      <ChevronRightIcon className="settings-phone__chevron" size="lg" aria-hidden="true" />
     </button>
   );
 }
@@ -108,7 +108,6 @@ export function PhoneSettingsMenu({ name, onOpen, history, metaAgentAlert, rowRe
     machines: { ...machines, status: machines.tone === 'error' ? 'connection issue' : undefined },
     appearance: { value: appearance },
     notifications: { value: NOTIFICATION_OPTIONS.find((option) => option.value === prefs.notifications)?.label },
-    links: { value: prefs.linkOpenTarget === 'external' ? 'System browser' : 'Michi Browser' },
     trash: { value: history.trash || undefined },
     archived: { value: history.archived || undefined },
   };
@@ -123,7 +122,7 @@ export function PhoneSettingsMenu({ name, onOpen, history, metaAgentAlert, rowRe
         </PhoneRow>
       </div>}
       {SETTINGS_GROUPS.map((group) => {
-        const pages = group.pages.filter((item) => item !== 'account' && SETTINGS_PAGES[item].only !== 'window');
+        const pages = group.pages.filter((item) => item !== 'account' && SETTINGS_PAGES[item].only !== 'window' && SETTINGS_PAGES[item].only !== 'app');
         return <PhoneGroup key={group.title} title={group.title}>
           {pages.map((item) => <PhoneRow key={item} id={item} label={settingsPageLabel(item, name)} icon={SETTINGS_PAGES[item].icon}
             onClick={() => onOpen(item)} rowRef={rowRef} {...values[item]} />)}

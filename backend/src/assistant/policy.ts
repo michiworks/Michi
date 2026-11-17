@@ -83,7 +83,7 @@ export const META_AGENT_CHAT_TOOL_NAMES: readonly string[] = Object.freeze([
 /**
  * The agent's own tools (services/companion/tools.ts COMPANION_OWN_TOOLS):
  * its feed, a fresh check, item, name and notification level changes, notes,
- * goal readings and edits, cards, today's brief, the allow-listed deep reads, reading what its
+ * goal readings and edits, cards, the allow-listed deep reads, reading what its
  * check-ins wrote (companion_read), follow-ups into the conversations it
  * started (companion_session_send, §4: V only, asking the user for the exact
  * text itself) and the quiet end of a check-in. Every one enforces its own
@@ -98,7 +98,6 @@ export const COMPANION_OWN_TOOL_NAMES = Object.freeze([
   'companion_goal_progress',
   'companion_edit_goal',
   'companion_propose',
-  'companion_publish_brief',
   'companion_set_name',
   'companion_set_notifications',
   'companion_read',
@@ -167,7 +166,6 @@ export const CHECKIN_TOOL_NAMES: readonly string[] = Object.freeze([
   'companion_goal_progress',
   'companion_edit_goal',
   'companion_propose',
-  'companion_publish_brief',
   'companion_headline',
   'nothing_to_do',
 ]);

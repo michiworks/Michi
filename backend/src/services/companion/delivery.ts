@@ -9,7 +9,7 @@
  *
  * Notices are not sent from here any more: what Michi has to tell the user
  * goes to the attention service (notices.ts), the one notification path
- * (DESIGN P4). The notice gate, its quiet hours, workdays and caps, and the
+ * (DESIGN P4). The notice gate, its quiet hours and caps, and the
  * notice outbox with its replay, fold and wake are gone.
  */
 
@@ -87,8 +87,6 @@ export interface CompanionTrayInput {
   now: number;
   /** The conversation V waits on the user: an approval or a question in its running turn. */
   conversationWaiting: boolean;
-  /** When the user last viewed the panel (`companion:last_viewed_at`): a brief made after it is "ready". */
-  lastViewedAt: number | null;
 }
 
 /**
@@ -115,7 +113,6 @@ export function companionTrayDto(snapshot: CompanionSnapshotDto, input: Companio
       id: item.id, title: item.title, isNew: item.status === 'new', target: companionItemTarget(item),
     })),
     needsYouTotal: Math.max(snapshot.counts.needsYou, needsYou.length),
-    briefReady: snapshot.brief !== null && snapshot.brief.createdAt > (input.lastViewedAt ?? 0),
     revision: snapshot.revision,
   };
 }

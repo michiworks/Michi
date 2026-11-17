@@ -1,17 +1,16 @@
 import { useId, useState, type CSSProperties } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { ChevronRightIcon } from '../../icons';
 import {
   usePrefs, CORNER_RADIUS_MAX, DEFAULT_PREFS, UI_FONT_OPTS,
-  type AgentBlockStyle, type CodeBlockStyle, type PhoneTextSize, type SidebarDensity, type TerminalPalette,
+  type CodeBlockStyle, type PhoneTextSize, type SidebarDensity, type TerminalPalette,
 } from '../../../../state/prefs';
-import type { VibrancyMaterial } from '../../../../lib/electronBridge';
 import { Button, Switch } from '../../../ui/controls';
 import { ACCENT_HUES, DARK_PALETTES, PALETTES, resolveAccent } from '../../tokens';
 import { Radio, Segmented, type RadioOption } from './controls';
 import { DIM_STRENGTH_MIN, dimStrength, rememberDimStrength, toggleFocusDim } from './focusDim';
 import { SettingsRow, SettingsSection } from './SettingsSection';
-import { useSettingsLayout, useSettingsTarget } from './settingsPhone';
-import { PANE_MOTION_OPTIONS, type PaneMotion } from '../../paneMotion';
+import { SETTINGS_PREVIEW_WIDTH, useSettingsAside, useSettingsAsideRoom, useSettingsLayout, useSettingsTarget } from './settingsPhone';
 import { getElectron } from '../../../../lib/electronBridge';
 import {
   SIDEBAR_ROW_STYLES,
@@ -59,10 +58,10 @@ function CornerRadiusPreview() {
  * one of them opens Advanced (settingsSearch.ts lists them under 'Advanced').
  */
 const ADVANCED_SETTINGS: ReadonlySet<string> = new Set([
-  'Interface font', 'Message font', 'Composer size', 'Code blocks', 'Code wrap', 'Agent blocks', 'Corner radius',
-  'Sidebar row style', 'Sidebar edge padding', 'Sidebar timestamps', 'Window glass', 'Sidebar glass', 'Glass blur',
-  'Glass saturation', 'Sidebar material', 'Glass defaults', 'Dim strength', 'Pane width mode',
-  'Pane animation', 'Default pane width', 'Single-pane reading width', 'Chrome rules',
+  'Interface font', 'Message font', 'Composer size', 'Code blocks', 'Code wrap', 'Corner radius',
+  'Sidebar row style', 'Sidebar timestamps', 'Window glass', 'Sidebar glass',
+  'Glass defaults', 'Dim strength', 'Pane width mode',
+  'Default pane width', 'Single-pane reading width', 'Chrome rules',
 ]);
 
 /**
@@ -70,8 +69,8 @@ const ADVANCED_SETTINGS: ReadonlySet<string> = new Set([
  * radius and N more"): those on every screen, and the rows a desktop adds:
  * Composer size (a phone's Text size covers it) and pane layout.
  */
-const ADVANCED_UNNAMED = ['Code wrap', 'Agent blocks', 'Sidebar row style', 'Sidebar edge padding', 'Sidebar timestamps'];
-const ADVANCED_UNNAMED_DESKTOP = ['Composer size', 'Dim strength', 'Pane width mode', 'Pane animation', 'Default pane width',
+const ADVANCED_UNNAMED = ['Code wrap', 'Sidebar row style', 'Sidebar timestamps'];
+const ADVANCED_UNNAMED_DESKTOP = ['Composer size', 'Dim strength', 'Pane width mode', 'Default pane width',
   'Single-pane reading width', 'Chrome rules'];
 
 const PALETTE_CHOICES: ReadonlyArray<{ value: TerminalPalette; label: string }> = [
@@ -105,22 +104,8 @@ const CODE_BLOCK_STYLES: ReadonlyArray<RadioOption<CodeBlockStyle>> = [
   { value: 'header', label: 'Header' },
 ];
 
-const AGENT_BLOCK_STYLES: ReadonlyArray<RadioOption<AgentBlockStyle>> = [
-  { value: 'line', label: 'Line', description: 'One line per run of work that says what it did. The default.' },
-  { value: 'plain', label: 'Plain', description: 'Bare text rows with small arrows and dots.' },
-  { value: 'card', label: 'Card', description: 'A card per run, with icons and a status column on the right.' },
-  { value: 'terminal', label: 'Terminal', description: 'Terminal-style marks (❯ ✓ ×) and small-capital headers.' },
-];
-
-const VIBRANCY_MATERIALS: ReadonlyArray<{ value: VibrancyMaterial; label: string }> = [
-  { value: 'under-window', label: 'Under window (lightest)' },
-  { value: 'sidebar', label: 'Sidebar' },
-  { value: 'menu', label: 'Menu' },
-  { value: 'hud', label: 'HUD (densest)' },
-];
-
-/** The glass material's settings, which Glass defaults puts back. Window glass is a fix for flicker, so it stays as set. */
-const GLASS_PREFS = ['sidebarTranslucency', 'glassBlur', 'glassSaturate', 'sidebarVibrancy'] as const;
+/** What Glass defaults puts back. Window glass is a fix for flicker, so it stays as set. */
+const GLASS_PREFS = ['sidebarTranslucency'] as const;
 
 /** Text size choices, in px of message text (messageFontSize). */
 const TEXT_SIZES = [14, 15, 16, 18] as const;
@@ -239,6 +224,10 @@ export function AppearancePane() {
   const layout = useSettingsLayout();
   const phone = layout === 'phone';
   const target = useSettingsTarget();
+  // In the window the preview sits beside it when the screen has room, under the settings when not.
+  const aside = useSettingsAside();
+  const previewRoom = useSettingsAsideRoom(SETTINGS_PREVIEW_WIDTH);
+  const previewHost = layout === 'window' && previewRoom ? aside : null;
   const currentAccent = resolveAccent(prefs.terminalAccentOverrides, prefs.terminalPalette);
   const [advancedOpen, setAdvancedOpen] = useState(() => !!target && ADVANCED_SETTINGS.has(target));
   const id = useId();
@@ -258,7 +247,7 @@ export function AppearancePane() {
   };
 
   return (
-    <div className="appearance-pane" data-preview={layout === 'window' || undefined}>
+    <div className="appearance-pane" data-preview={(layout === 'window' && !previewHost) || undefined}>
     <div className="appearance-pane__settings">
       <SettingsSection title="Theme">
         <SettingsRow label="Palette" description="Pick the current palette again to reset its accent.">
@@ -274,12 +263,14 @@ export function AppearancePane() {
           <Radio label="Text size" opts={PHONE_TEXT_SIZES} value={prefs.phoneTextSize}
             onChange={(value) => setPref('phoneTextSize', value)} />
         </SettingsRow> : <>
-          <SettingsRow label="Density" description="Row height and spacing in the sidebar."
+          <SettingsRow label="Density" description="Spacing of sidebar rows and messages."
             control={<Segmented label="Density" opts={DENSITIES} value={prefs.sidebarDensity} onChange={(value) => setPref('sidebarDensity', value)} />} />
           <SettingsRow label="Text size" description="Message text, in pixels."
             control={<Segmented label="Text size" opts={textSizeOptions(prefs.messageFontSize)} value={sizeLabel(prefs.messageFontSize)}
               onChange={(value) => setPref('messageFontSize', Number(value))} />} />
         </>}
+        <SettingsRow label="Show thoughts" description="Thinking and plan blocks in replies, on this device."
+          control={<Switch on={prefs.showThoughts} aria-label="Show thoughts" onChange={(value) => setPref('showThoughts', value)} />} />
       </SettingsSection>
 
       <SettingsSection title="Panes">
@@ -288,7 +279,7 @@ export function AppearancePane() {
             onChange={(on) => setPref('focusDim', toggleFocusDim(prefs.focusDim, on))} />} />}
         {!phone && <SettingsRow label="Single-page mode" description="One pane at a time; the thread’s other panes become tabs."
           control={<Switch on={prefs.singlePageMode} aria-label="Single-page mode" onChange={(value) => setPref('singlePageMode', value)} />} />}
-        <SettingsRow label="Reduce motion" description="Turns off drawer slides and pane transitions."
+        <SettingsRow label="Reduce motion" description="Turns off drawer slides and pane transitions, and shows streamed text as it arrives."
           control={<Switch on={prefs.reduceMotion} aria-label="Reduce motion" onChange={(value) => setPref('reduceMotion', value)} />} />
       </SettingsSection>
 
@@ -320,7 +311,7 @@ export function AppearancePane() {
             aria-labelledby={`${id}-advanced ${id}-advanced-summary`}
             onClick={() => setAdvancedOpen((open) => !open)}>
             <span id={`${id}-advanced-summary`}>{advancedSummary({ desktop: !phone })}</span>
-            <ChevronRight className="appearance-advanced__chevron" size={14} strokeWidth={1.75} aria-hidden="true" />
+            <ChevronRightIcon className="appearance-advanced__chevron" aria-hidden="true" />
           </button>
           {advancedOpen && <div className="appearance-advanced__rows" id={`${id}-advanced-body`}>
           <SettingsRow label="Interface font" description="Everything but message text."
@@ -337,10 +328,6 @@ export function AppearancePane() {
               onChange={(value) => setPref('codeBlockStyle', value)} />} />
           <SettingsRow label="Code wrap" description="Wrap long lines in code blocks instead of scrolling sideways."
             control={<Switch on={prefs.codeWrap} aria-label="Code wrap" onChange={(value) => setPref('codeWrap', value)} />} />
-          <SettingsRow label="Agent blocks" description="How thinking, tool calls and subagents show in a reply.">
-            <Radio label="Agent blocks" opts={AGENT_BLOCK_STYLES} value={prefs.agentBlockStyle}
-              onChange={(value) => setPref('agentBlockStyle', value)} />
-          </SettingsRow>
           <SettingsRow label="Corner radius" labelFor={`${id}-radius`} description="Menus, dialogs, buttons and cards."
             control={<Range id={`${id}-radius`} value={prefs.cornerRadius} min={0} max={CORNER_RADIUS_MAX} step={1}
               onChange={(value) => setPref('cornerRadius', value)} />}>
@@ -348,7 +335,7 @@ export function AppearancePane() {
           </SettingsRow>
           <SettingsRow label="Sidebar row style" description={<>
             {SIDEBAR_ROW_STYLE_LABELS[prefs.sidebarRowStyle]}. The three card styles share one text spine (20 / 36 / 52) and
-            differ only in corner radius and fill width; they set their own edge padding.
+            differ only in corner radius and fill width.
           </>}>
             <Radio
               label="Sidebar row style"
@@ -357,9 +344,6 @@ export function AppearancePane() {
               onChange={(value) => setPref('sidebarRowStyle', value)}
             />
           </SettingsRow>
-          <SettingsRow label="Sidebar edge padding" labelFor={`${id}-inset`} description="Space beside the sidebar’s rows, for the classic row style."
-            control={<Range id={`${id}-inset`} value={prefs.sidebarInset} min={0} max={24} step={1}
-              onChange={(value) => setPref('sidebarInset', value)} />} />
           <SettingsRow label="Sidebar timestamps" description="Show last-active time on thread rows."
             control={<Switch on={prefs.showSidebarTimestamps} aria-label="Sidebar timestamps" onChange={(value) => setPref('showSidebarTimestamps', value)} />} />
           {glass && <SettingsRow label="Window glass" description="See the desktop through the sidebar. Turn off if drawers or ⌘K flicker."
@@ -367,18 +351,7 @@ export function AppearancePane() {
           <SettingsRow label="Sidebar glass" labelFor={`${id}-translucency`} description="How much shows through the sidebar."
             control={<Range id={`${id}-translucency`} value={prefs.sidebarTranslucency} min={0} max={100} step={2} unit="%"
               onChange={(value) => setPref('sidebarTranslucency', value)} />} />
-          <SettingsRow label="Glass blur" labelFor={`${id}-blur`} description="Blur behind the sidebar."
-            control={<Range id={`${id}-blur`} value={prefs.glassBlur} min={0} max={40} step={1}
-              onChange={(value) => setPref('glassBlur', value)} />} />
-          <SettingsRow label="Glass saturation" labelFor={`${id}-saturate`} description="How vivid what shows through the sidebar is."
-            control={<Range id={`${id}-saturate`} value={prefs.glassSaturate} min={100} max={220} step={5} unit="%"
-              onChange={(value) => setPref('glassSaturate', value)} />} />
-          {glass && <SettingsRow label="Sidebar material" labelFor={`${id}-material`} description="How dense the macOS frost behind the sidebar is."
-            control={<select id={`${id}-material`} className="ui-select settings-row__select" value={prefs.sidebarVibrancy}
-              onChange={(event) => setPref('sidebarVibrancy', event.target.value as VibrancyMaterial)}>
-              {VIBRANCY_MATERIALS.map(({ value, label }) => <option key={value} value={value}>{label}</option>)}
-            </select>} />}
-          <SettingsRow label="Glass defaults" description="Puts the glass settings above back to the tuned look."
+          <SettingsRow label="Glass defaults" description="Puts Sidebar glass back to the tuned look."
             control={<Button size="sm" disabled={glassIsDefault} onClick={resetGlass}>Reset</Button>} />
           {!phone && <>
             <SettingsRow label="Dim strength" labelFor={`${id}-dim`} description="How much Dim unfocused panes lowers the other panes. Moving it turns dimming on."
@@ -390,11 +363,6 @@ export function AppearancePane() {
                 <option value="fixed">Fixed width</option>
                 <option value="half">Half viewport</option>
                 <option value="adaptive">Half at 2, fixed at 3+</option>
-              </select>} />
-            <SettingsRow label="Pane animation" labelFor={`${id}-motion`} description="How a pane enters and leaves."
-              control={<select id={`${id}-motion`} className="ui-select settings-row__select" value={prefs.paneSpawnAnimation}
-                onChange={(event) => setPref('paneSpawnAnimation', event.target.value as PaneMotion)}>
-                {PANE_MOTION_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>} />
             <SettingsRow label="Default pane width" labelFor={`${id}-pane-width`} description="For new panes that have no width of their own."
               control={<Range id={`${id}-pane-width`} value={prefs.defaultPaneWidth} min={360} max={1200} step={20}
@@ -418,7 +386,7 @@ export function AppearancePane() {
         </div>
       </section>
     </div>
-    {layout === 'window' && <AppearancePreview />}
+    {previewHost ? createPortal(<AppearancePreview />, previewHost) : layout === 'window' && <AppearancePreview />}
     </div>
   );
 }

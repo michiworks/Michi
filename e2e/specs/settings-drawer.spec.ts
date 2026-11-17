@@ -39,7 +39,7 @@ for (const palette of ['bone', 'monokai']) test(`global Settings opens as a wind
   expect(await page.locator('.terminal-topbar-breadcrumb').allTextContents()).toEqual(originalCrumb);
   // A window centred over the page, not a drawer at its edge.
   const bounds = (await drawer.boundingBox())!;
-  expect(bounds.width).toBe(1080);
+  expect(bounds.width).toBe(880);
   expect(Math.abs(bounds.x + bounds.width / 2 - 720)).toBeLessThanOrEqual(1);
   expect(bounds.y).toBeGreaterThan(0);
   expect(bounds.y + bounds.height).toBeLessThan(1000);

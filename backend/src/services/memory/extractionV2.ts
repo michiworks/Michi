@@ -9,8 +9,8 @@ import { buildExtractionInstructions } from './extractionPolicy';
 import { MEMORY_EXTRACTION_TOOL_NAMES } from './extractionProfile';
 import { extractionIdempotencyKey, getCommittedProposal, insertCommittedProposal, memoryBodyHash, tombstoneBlocks } from './extractionRepository';
 import {
-  activeMemoriesFromTurn, activeMemoryBodies, memoryTransaction, michiNotesFromConversation, storedMemoryByRowId, topicsInUse, workspaceAccessible,
-  type StoredMemory,
+  activeMemoriesFromTurn, activeMemoryBodies, activeMemoryIdsWithBody, markMemoriesConfirmed, memoryTransaction, michiNotesFromConversation,
+  storedMemoryByRowId, topicsInUse, workspaceAccessible, type StoredMemory,
 } from './memoryRepository';
 import { memoryDay, memoryRef, parseRef } from './memoryRefs';
 import { createMemory, forgetMemory, getMemorySettings, MemoryError } from './memoryService';
@@ -18,6 +18,7 @@ import { normalizeText, profileKeywords, segmentTerms } from './memoryTerms';
 import { recallSearch, setTurnKeys } from './recallIndex';
 import { containsCredential } from './secrets';
 import { typedTextBacks } from './typedText';
+import { endOfDay } from './validity';
 
 /**
  * Automatic memory extraction v2 (spec §4): one model answer per batch, the
@@ -120,6 +121,7 @@ export const EXTRACTION_PAYLOAD_SCHEMA: Readonly<Record<string, unknown>> = froz
           keywords: { type: 'array', minItems: 1, maxItems: KEYWORDS_MAX, items: string(MEMORY_KEYWORD_MAX_CHARS) },
           topic: { type: ['string', 'null'], maxLength: MEMORY_TOPIC_MAX_CHARS },
           event_date: { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+          valid_until: { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
           quote: string(QUOTE_MAX),
           source_turn: string(TURN_ID_MAX),
           explicit: { type: ['boolean', 'null'] },
@@ -160,6 +162,8 @@ export interface ExtractionPayloadMemory {
   topic?: string;
   /** A real calendar day, YYYY-MM-DD. */
   event_date?: string;
+  /** The last day it is true (a real calendar day, YYYY-MM-DD), when the user said it ends (validity.ts). */
+  valid_until?: string;
   /** The user's own words it comes from. */
   quote: string;
   source_turn: string;
@@ -243,7 +247,7 @@ function realDate(value: string): boolean {
 
 interface WireMemory {
   op: ExtractionOp; target?: string | null; kind: MemoryKind; about: ExtractionAbout; body: string; keywords: string[];
-  topic?: string | null; event_date?: string | null; quote: string; source_turn: string; explicit?: boolean | null;
+  topic?: string | null; event_date?: string | null; valid_until?: string | null; quote: string; source_turn: string; explicit?: boolean | null;
 }
 
 /** Fenced and inline code: it does not say which language the user writes. */
@@ -282,7 +286,7 @@ function withDefaults(value: unknown): unknown {
 /**
  * Checks an answer against EXTRACTION_PAYLOAD_SCHEMA and normalizes it:
  * strings trimmed (a body on one line), keywords and keyphrases distinct,
- * target kept only on an update, event_date a real calendar day, explicit
+ * target kept only on an update, event_date and valid_until real calendar days, explicit
  * only when true, turn_keys merged per turn, exclude_turns and forget each
  * once. A list left out reads as empty (withDefaults). Throws
  * ExtractionPayloadError listing every problem.
@@ -304,6 +308,8 @@ export function validateExtractionPayload(value: unknown): ExtractionPayload {
     if (!sourceTurn) problems.push(`${where}.source_turn must not be blank`);
     const eventDate = typeof memory.event_date === 'string' ? memory.event_date : undefined;
     if (eventDate !== undefined && !realDate(eventDate)) problems.push(`${where}.event_date must be a real date (YYYY-MM-DD)`);
+    const validUntil = typeof memory.valid_until === 'string' ? memory.valid_until : undefined;
+    if (validUntil !== undefined && !realDate(validUntil)) problems.push(`${where}.valid_until must be a real date (YYYY-MM-DD)`);
     const target = memory.op === 'update' ? memory.target?.trim() : undefined;
     const topic = typeof memory.topic === 'string' ? collapse(memory.topic) : '';
     return {
@@ -315,6 +321,7 @@ export function validateExtractionPayload(value: unknown): ExtractionPayload {
       keywords: distinct(memory.keywords, KEYWORDS_MAX),
       ...(topic ? { topic } : {}),
       ...(eventDate !== undefined ? { event_date: eventDate } : {}),
+      ...(validUntil !== undefined ? { valid_until: validUntil } : {}),
       quote,
       source_turn: sourceTurn,
       ...(memory.explicit === true ? { explicit: true as const } : {}),
@@ -795,7 +802,9 @@ function forgetNote(ownerUserId: string, memoryId: string): boolean {
  * (memoryService.forgetMemory) as the agent would delete it; what the user
  * saved stays theirs to delete. Then each memory as an active memory,
  * extracted unless marked explicit, with its keywords (and the quote),
- * event_at and observed_at (the user's send time); then each turn's
+ * event_at, valid_until (the next local midnight after its last day) and
+ * observed_at (the user's send time); a body a note already holds confirms
+ * that note (last_confirmed_at) instead; then each turn's
  * keyphrases on its recall document. Nothing comes from a turn of
  * exclude_turns. Never writes anything the rules in this module's header
  * drop. Throws MemoryError not_found when the workspace is not the owner's.
@@ -827,7 +836,9 @@ export function commitExtractionPayload(payload: ExtractionPayload, ctx: Extract
       if (note && forgetNote(ctx.ownerUserId, note.record.id)) result.forgotten += 1;
     }
     const turns: KeyedTurn[] = ctx.turns.map((turn) => ({ turn, key: quoteKey(turn.userText) }));
-    const stored = new Set(activeMemoryBodies(ctx.ownerUserId, ctx.workspaceId).map(memoryBodyHash));
+    const confirmedAt = Number.isFinite(ctx.now) ? Number(ctx.now) : Date.now();
+    // A note past its end (validity.ts) is no duplicate: the user saying it again is a new statement.
+    const stored = new Set(activeMemoryBodies(ctx.ownerUserId, ctx.workspaceId, confirmedAt).map(memoryBodyHash));
     const perTurn = new Map<string, number>();
     memories.forEach((memory, index) => {
       const drop = (reason: ExtractionDropReason) => { result.dropped.push({ index, reason }); };
@@ -844,7 +855,11 @@ export function commitExtractionPayload(payload: ExtractionPayload, ctx: Extract
       const hash = memoryBodyHash(body);
       // An automatic memory the user asked to remember becomes theirs, its text unchanged: not a second copy of itself.
       const madeTheirs = !!target && memory.explicit === true && target.record.origin === 'extracted' && memoryBodyHash(target.record.body) === hash;
-      if (stored.has(hash) && !madeTheirs) return drop('duplicate');
+      if (stored.has(hash) && !madeTheirs) {
+        // The user said again what a note holds: that confirms the note (validity.ts).
+        markMemoriesConfirmed(ctx.ownerUserId, activeMemoryIdsWithBody(ctx.ownerUserId, ctx.workspaceId, body, confirmedAt), confirmedAt);
+        return drop('duplicate');
+      }
       const fromTurn = activeMemoriesFromTurn(ctx.ownerUserId, turn.turnId).filter((other) => other.id !== target?.record.id);
       if (restated(body, fromTurn)) return drop('duplicate');
       // A user-scope target stays there; about 'user' widens a workspace target, never the other way round.
@@ -862,6 +877,7 @@ export function commitExtractionPayload(payload: ExtractionPayload, ctx: Extract
       const origin = memory.explicit === true || target?.record.origin === 'explicit' ? 'explicit' as const : 'extracted' as const;
       const input = {
         scope, kind: memory.kind, body, keywords: keywordsOf(memory), topic: memory.topic ?? target?.record.topic ?? null, eventAt: dayStart(memory.event_date),
+        validUntil: memory.valid_until ? endOfDay(memory.valid_until) : null,
         observedAt: Number.isInteger(turn.userAt) ? turn.userAt : null,
         source: { ...(turn.nodeId ? { nodeId: turn.nodeId } : {}), turnId: turn.turnId },
         status: 'active' as const, origin, sourceRisk: sourceRiskOf(turn, memory.body),

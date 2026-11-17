@@ -45,6 +45,23 @@ export function requestScheduledRun(jobId: string, runId: string): void {
   window.dispatchEvent(new CustomEvent(OPEN_SCHEDULED_JOB_EVENT, { detail: { jobId, runId } }));
 }
 
+export const NEW_SCHEDULED_JOB_EVENT = 'michi:new-scheduled-job';
+let newJobRequested = false;
+
+/** New job, asked for outside the page (the sidebar's empty list): the page opens its editor, now or once it shows. */
+export function requestNewScheduledJob(): void {
+  setScheduledRoute(SCHEDULED_HOME);
+  newJobRequested = true;
+  window.dispatchEvent(new CustomEvent(NEW_SCHEDULED_JOB_EVENT));
+}
+
+/** Whether New job was asked for since the page last took the request. */
+export function takeNewScheduledJobRequest(): boolean {
+  const requested = newJobRequested;
+  newJobRequested = false;
+  return requested;
+}
+
 /** The top bar's title for a page inside Scheduled (a run's conversation); null: none. */
 let crumb: string | null = null;
 const crumbListeners = new Set<() => void>();

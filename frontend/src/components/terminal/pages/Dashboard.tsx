@@ -1,4 +1,5 @@
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
+import { createPaneShownStore, PaneShownContext, type PaneShownStore } from '../../../hooks/paneShown';
 import { prefersReducedMotion } from '../../../hooks/useReducedMotion';
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useChatActions, useChatPanes, useChatProjects, useStructuralSelector, shallowArrayEqual } from '../../../state/chatStore';
@@ -38,6 +39,7 @@ import { PaneArrivalTabs, usePaneArrivals } from '../PaneArrivals';
 import { RetainedPaneContent, usePresentedPanes, usePresentedPaneFocus } from '../PanePresentation';
 
 const PANE_ZOOM_FADE_MS = 180;
+const SCROLL_THUMB_LINGER_MS = 600;
 
 const FilePane = lazy(() => import('../FilePane'));
 const TerminalPane = lazy(() => import('../TerminalPane'));
@@ -96,6 +98,13 @@ export function centeredPaneScrollLeft({
   return Math.max(0, Math.min(desired, maxScrollLeft));
 }
 
+/** The pane wrapper (a direct child of the strip) holding `target`, by its id. */
+function stripPaneId(strip: HTMLElement | null, target: EventTarget | null): string | null {
+  let el = target instanceof Node ? (target instanceof HTMLElement ? target : target.parentElement) : null;
+  while (el && el.parentElement !== strip) el = el.parentElement;
+  return el?.dataset.nodeId ?? null;
+}
+
 // A chat pane takes a drop inside it itself (its root does not stop the
 // event, so the strip's handlers see it too).
 function insideChatPane(e: React.DragEvent): boolean {
@@ -140,6 +149,16 @@ export default function TerminalDashboard() {
   const widths = useMemo(() => withPaneDragWidth(savedWidths, openPanes, dragWidth), [savedWidths, openPanes, dragWidth]);
   const stripRef = useRef<HTMLDivElement>(null);
   const paneRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // One stable store per pane wrapper (hooks/paneShown.ts), outside React
+  // state, so hiding a pane or freezing one scrolled off the strip (MO-25)
+  // renders nothing.
+  const paneShownRef = useRef(new Map<string, PaneShownStore>());
+  const paneShownFor = (id: string): PaneShownStore => {
+    let store = paneShownRef.current.get(id);
+    if (!store) paneShownRef.current.set(id, store = createPaneShownStore());
+    return store;
+  };
+  const offStrip = useRef(new Set<string>());
   const layout = usePaneLayout(stripRef, {
     paneIds: openPanes, customWidths: phone ? [] : widths, mode: phone ? 'fixed' : prefs.paneWidthMode, exitingIds,
     defaultPaneWidth: phone ? 100_000 : prefs.defaultPaneWidth,
@@ -150,6 +169,15 @@ export default function TerminalDashboard() {
     onExitStart: holdExits,
     onExitComplete: finishExit,
   });
+  // A pane hidden in place (a phone pane that is not the visible one, one
+  // behind a zoom) snaps its typewriter like a backgrounded window (MO-17).
+  const zoomHiddenIds = layout.zoomHiddenIds;
+  useLayoutEffect(() => {
+    for (const [id, store] of paneShownRef.current) {
+      if (!openPanes.includes(id)) paneShownRef.current.delete(id);
+      else store.setHidden((phone && id !== visiblePhonePane) || zoomHiddenIds.has(id));
+    }
+  }, [openPanes, phone, visiblePhonePane, zoomHiddenIds]);
   const paneOnScreen = (id: string) => {
     const strip = stripRef.current;
     const index = openPanes.indexOf(id);
@@ -167,7 +195,8 @@ export default function TerminalDashboard() {
   // Overlay scrollbar — native scrollbar is hidden via .hide-sb on the
   // strip; we render our own thumb as a sibling and reposition it from the
   // strip's onScroll. Idle thumb is opacity 0; we set opacity 1 while the
-  // user is actively scrolling, then fade out 600ms after the last event.
+  // user is actively scrolling, then fade out SCROLL_THUMB_LINGER_MS after
+  // the last event.
   const thumbRef = useRef<HTMLDivElement>(null);
   const scrollIdleTimerRef = useRef<number | null>(null);
   // Pane-scoped selection isolation. On mousedown inside a pane we mark the
@@ -291,6 +320,50 @@ export default function TerminalDashboard() {
     }
   }, []);
 
+  // One observer on the strip freezes each pane with no pixel inside it and
+  // thaws it as it comes back, in its callback, never through React state.
+  // A pane holding focus stays live: what is typed there meets its current
+  // node. Phone and zoom-hidden panes keep rendering (c:d7), so neither
+  // layout freezes anything. The same callback marks the pane, and its
+  // top-bar caption, which scrolls off with it, data-offstrip: CSS pauses
+  // the loops inside both (MO-13), as it does in inert phone and
+  // zoom-hidden panes.
+  const freezesOffStrip = !phone && !zoomedId;
+  useEffect(() => {
+    const strip = stripRef.current;
+    const stores = paneShownRef.current;
+    const off = offStrip.current;
+    const captions = () => strip?.closest('.terminal-shell')?.querySelector<HTMLElement>('[data-pane-captions]') ?? null;
+    if (!freezesOffStrip || !strip || typeof IntersectionObserver === 'undefined') {
+      off.clear();
+      for (const shown of stores.values()) shown.setFrozen(false);
+      for (const marked of [strip, captions()]) {
+        marked?.querySelectorAll('[data-offstrip]').forEach((el) => el.removeAttribute('data-offstrip'));
+      }
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      const cells = captions()?.children;
+      for (const entry of entries) {
+        const pane = entry.target as HTMLElement;
+        const id = pane.dataset.nodeId;
+        if (!id) continue;
+        if (entry.isIntersecting) off.delete(id);
+        else off.add(id);
+        pane.toggleAttribute('data-offstrip', !entry.isIntersecting);
+        for (const cell of cells ?? []) {
+          if ((cell as HTMLElement).dataset.paneCaptionId === id) cell.toggleAttribute('data-offstrip', !entry.isIntersecting);
+        }
+        stores.get(id)?.setFrozen(!entry.isIntersecting && !pane.contains(document.activeElement));
+      }
+    }, { root: strip, threshold: 0 });
+    for (const id of openPanes) {
+      const pane = paneRefs.current[id];
+      if (pane) observer.observe(pane);
+    }
+    return () => observer.disconnect();
+  }, [freezesOffStrip, openPanes]);
+
   useLayoutEffect(() => {
     const strip = stripRef.current;
     const captions = strip?.closest('.terminal-shell')?.querySelector<HTMLElement>('[data-pane-captions]');
@@ -378,7 +451,6 @@ export default function TerminalDashboard() {
   const previousEntrance = useRef({ scope: '', ids: openPanes });
   const entrances = useRef(new Map<string, Animation>());
   const previousExits = useRef<ReadonlySet<string>>(new Set());
-  const focusBeforeRef = useRef(focusedPane);
   useLayoutEffect(() => {
     const scope = paneScope;
     const previous = previousEntrance.current;
@@ -406,12 +478,7 @@ export default function TerminalDashboard() {
         entrance?.pause();
         continue;
       }
-      // A branch just made from a pane here is pulled out of its parent; the
-      // content comes in from the side of the pane the user was on.
-      const branch = !reopening && isFreshBranch(activeProject?.edges, id);
-      const anchor = focusBeforeRef.current ? openPanes.indexOf(focusBeforeRef.current) : -1;
-      const side = anchor >= 0 && openPanes.indexOf(id) < anchor ? 'left' : 'right';
-      const { frames, duration } = paneEntrance(prefs.paneSpawnAnimation, { branch, from: side });
+      const { frames, duration } = paneEntrance();
       const current = reopening ? getComputedStyle(surface) : null;
       const from = current ? { opacity: current.opacity, transform: current.transform } : frames[0];
       entrances.current.get(id)?.cancel();
@@ -425,9 +492,7 @@ export default function TerminalDashboard() {
       };
     }
     previousExits.current = exitingIds;
-  }, [openPanes, exitingIds, paneScope, prefs.paneSpawnAnimation, phone, prefs.reduceMotion, activeProject?.edges]);
-  // After the entrance above: it reads the focus of the commit before.
-  useLayoutEffect(() => { focusBeforeRef.current = focusedPane; });
+  }, [openPanes, exitingIds, paneScope, phone, prefs.reduceMotion]);
   useLayoutEffect(() => {
     const running = entrances.current;
     return () => { for (const animation of running.values()) animation.cancel(); running.clear(); };
@@ -524,7 +589,7 @@ export default function TerminalDashboard() {
         scrollIdleTimerRef.current = window.setTimeout(() => {
           if (thumb) thumb.style.opacity = '0';
           scrollIdleTimerRef.current = null;
-        }, 600);
+        }, SCROLL_THUMB_LINGER_MS);
         // Notify native overlay surfaces (BrowserPane) that the strip
         // scrolled so they can re-sync their bounds. The DOM scroll event
         // on this container does not bubble to `window`.
@@ -532,6 +597,16 @@ export default function TerminalDashboard() {
         recheckArrivals();
       }}
       onMouseDown={handlePaneSelectionMouseDown}
+      onFocus={(e) => {
+        const id = stripPaneId(stripRef.current, e.target);
+        if (id) paneShownRef.current.get(id)?.setFrozen(false);
+      }}
+      onBlur={(e) => {
+        const id = stripPaneId(stripRef.current, e.target);
+        if (id && offStrip.current.has(id) && stripPaneId(stripRef.current, e.relatedTarget) !== id) {
+          paneShownRef.current.get(id)?.setFrozen(true);
+        }
+      }}
       onDragEnter={handleDashDragEnter}
       onDragOver={handleDashDragOver}
       onDragLeave={handleDashDragLeave}
@@ -583,6 +658,7 @@ export default function TerminalDashboard() {
             style={wrapStyle}
           >
             <div className="pane-entry-surface" style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+            <PaneShownContext.Provider value={paneShownFor(id)}>
             <RetainedPaneContent exiting={exitingIds.has(id)}>
             <PaneErrorBoundary paneId={id}>
               {paneItems[id] ? (
@@ -604,9 +680,11 @@ export default function TerminalDashboard() {
               )}
             </PaneErrorBoundary>
             </RetainedPaneContent>
+            </PaneShownContext.Provider>
             </div>
             {!phone && !layout.zoomed && <ResizeHandle
                 paneRef={{ current: paneRefs.current[id] ?? null }}
+                label={`Resize pane ${i + 1}`}
                 onResize={(w) => { dragWidthRef.current = { id, width: w }; setPaneDragWidth(dragWidthRef.current); }}
                 onResizeEnd={() => {
                   const committed = dragWidthRef.current;

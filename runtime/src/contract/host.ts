@@ -81,6 +81,12 @@ export interface RuntimeConfigPort {
      */
     ultracode?(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): boolean;
     /**
+     * The chat's speed tier (AgentModelInfo.serviceTiers): a tier id, or null
+     * for standard. Read at each turn; undefined for an owner that is not a
+     * chat, whose runtime config decides. Absent: undefined.
+     */
+    serviceTier?(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): string | null | undefined;
+    /**
      * Whether a session may keep the runtime's own memory: Claude Code's auto
      * memory, Codex memories. False keeps it out of the session both ways,
      * nothing read into it and nothing written from it, for a host that keeps
@@ -399,6 +405,18 @@ export interface ReadClaudeForkAnchorInput {
   ownerUserId?: string | null;
 }
 
+/**
+ * When a chat's Claude session was forked from its parent's: the copied
+ * history ends there, and what it launched before then runs in the parent.
+ */
+export interface ClaudeForkBoundary {
+  nodeId: string;
+  /** The child's own native session id, pinned before its first spawn. */
+  nativeSessionId: string;
+  /** ISO 8601. */
+  boundaryAt: string;
+}
+
 /** Native fork points recorded per message, owned by the host's store. */
 export interface ForkAnchorStore {
   saveKiroForkAnchor(input: SaveKiroForkAnchorInput): void;
@@ -406,6 +424,13 @@ export interface ForkAnchorStore {
   saveClaudeForkAnchor(input: SaveClaudeForkAnchorInput): void;
   /** The native message id, or null when the anchor is missing or the node is no longer the caller's. */
   readClaudeForkAnchor(input: ReadClaudeForkAnchorInput): string | null;
+  /**
+   * Saved and read before the child is bound to its native session (at its
+   * first spawn), so only the chat is checked, not its binding.
+   */
+  saveClaudeForkBoundary(input: ClaudeForkBoundary): void;
+  /** The boundary, or null when none was saved or the chat is gone. */
+  readClaudeForkBoundary(nodeId: string, nativeSessionId: string): string | null;
 }
 
 export interface CrewMemoryStore {

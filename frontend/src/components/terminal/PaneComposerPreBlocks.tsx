@@ -1,12 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
-import { AnimatePresence, motion, useIsPresent, type TargetAndTransition } from 'motion/react';
-import type { ChatNodeState, PendingQueuedMessage } from '../../state/chatTypes';
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type TargetAndTransition } from 'motion/react';
+import type { ChatNodeState, PendingComment, PendingQueuedMessage } from '../../state/chatTypes';
 import { buildSlashEntries, resolveSlashRun, type SlashEntry } from '../../state/slashEntries';
 import { artifactHasImagePreview } from 'michi-shared';
 import { attachmentImageUrl } from '../../services/api/artifacts';
-import { EASE } from '../../motion/tokens';
+import { DUR, EASE } from '../../motion/tokens';
+import { useFresh } from '../../motion/useFresh';
 import { AssistantAttachmentsPreBlock } from './assistant/AssistantAttachments';
-import { isImeComposing } from '../../lib/ime';
+import { CloseIcon, FileIcon } from './icons';
+import { sourceMeta } from './ContextItem';
+import { ContextTray } from './ContextTray';
+
+const QUEUED_FADE_OUT = { duration: DUR.dismiss, ease: 'linear' } as const;
 
 /** A queued block leaving folds away; its bubble fades in in the transcript. */
 const QUEUED_EXIT: TargetAndTransition = {
@@ -16,10 +21,14 @@ const QUEUED_EXIT: TargetAndTransition = {
   paddingTop: 0,
   paddingBottom: 0,
   overflow: 'hidden',
-  transition: { duration: 0.2, ease: EASE.drawer, opacity: { duration: 0.08, ease: 'linear' } },
+  transition: { duration: 0.2, ease: EASE.drawer, opacity: QUEUED_FADE_OUT },
 };
 
+/** Reduced motion snaps the height but would still fold the margin and padding, so the block only fades. */
+const QUEUED_EXIT_REDUCED: TargetAndTransition = { opacity: 0, transition: QUEUED_FADE_OUT };
+
 const NO_QUEUE: readonly PendingQueuedMessage[] = [];
+const NO_COMMENTS: readonly PendingComment[] = [];
 const LOCAL_SLASH_ENTRIES = buildSlashEntries({});
 
 export interface PanePendingAttachment {
@@ -47,6 +56,8 @@ interface PaneComposerPreBlocksProps {
   steeringQueueId: string | null;
   onSteerQueued: (queueId: string) => void;
   onRestoreQueued: (queueId: string) => void;
+  /** Send a paused queue now. */
+  onSendQueuedNow: () => void;
   onEditPendingComment: (commentId: string, body: string) => void;
   onRemovePendingComment: (commentId: string) => void;
   onDismissQuote: () => void;
@@ -64,6 +75,7 @@ export function PaneComposerPreBlocks({
   steeringQueueId,
   onSteerQueued,
   onRestoreQueued,
+  onSendQueuedNow,
   onEditPendingComment,
   onRemovePendingComment,
   onDismissQuote,
@@ -71,6 +83,10 @@ export function PaneComposerPreBlocks({
 }: PaneComposerPreBlocksProps) {
   const queued = node.pendingQueued ?? NO_QUEUE;
   const runOf = (entry: PendingQueuedMessage) => resolveSlashRun(entry.value, slashEntries ?? LOCAL_SLASH_ENTRIES, entry.slash?.entry)?.kind;
+  // A quote has no timestamp: it is new when it appears after the composer mounted.
+  const mountedRef = useRef(false);
+  useEffect(() => { mountedRef.current = true; }, []);
+  const quoteMeta = sourceMeta(node.composerDraft?.quoteSource, false);
 
   return (
     <>
@@ -85,6 +101,8 @@ export function PaneComposerPreBlocks({
               entry={q}
               index={i}
               errored={isErrored}
+              stopped={!!node.queueStopped}
+              onSendNow={isErrored && i === 0 && node.status !== 'streaming' ? onSendQueuedNow : undefined}
               steerable={canSteerQueued && !isErrored && runOf(q) !== 'skill'}
               steerDisabled={steeringQueueId !== null || queued.some((entry) => entry.steering)}
               steering={steeringQueueId === q.id || !!q.steering}
@@ -95,44 +113,16 @@ export function PaneComposerPreBlocks({
         })}
       </AnimatePresence>
 
-      {(node.pendingComments ?? []).map((c, i) => (
-        <EditableCommentChip
-          key={c.id}
-          index={i}
-          quotedText={c.quotedText}
-          body={c.body}
-          source={c.source}
-          onEdit={(body) => onEditPendingComment(c.id, body)}
-          onRemove={() => onRemovePendingComment(c.id)}
-        />
-      ))}
-
-      {quotedText && (
-        <div className="t-pre-block tone-accent">
-          <div className="t-pre-block-col">
-            <div className="t-pre-block-cap">
-              replying to <b>selection</b>
-              {node.composerDraft?.quoteSource?.type === 'artifact' ? (
-                <span> · {node.composerDraft.quoteSource.name || node.composerDraft.quoteSource.filePath} · {node.composerDraft.quoteSource.snapshot?.contentHash.slice(0, 8) || 'version unknown'}</span>
-              ) : null}
-            </div>
-            <div
-              className={quoteMaxLines > 1 ? 't-pre-block-body is-multi' : 't-pre-block-body'}
-              style={quoteMaxLines > 1 ? { WebkitLineClamp: quoteMaxLines } : undefined}
-            >
-              {quotedText.replace(/\s+/g, ' ').trim()}
-            </div>
-          </div>
-          <button
-            type="button"
-            aria-label="Dismiss quote"
-            className="t-pre-block-x"
-            onClick={onDismissQuote}
-          >
-            ×
-          </button>
-        </div>
-      )}
+      <ContextTray
+        comments={node.pendingComments ?? NO_COMMENTS}
+        quotedText={quotedText}
+        quoteMeta={quoteMeta}
+        quoteMaxLines={quoteMaxLines}
+        afterMount={mountedRef}
+        onEditComment={onEditPendingComment}
+        onRemoveComment={onRemovePendingComment}
+        onDismissQuote={onDismissQuote}
+      />
 
       <PendingAttachmentRow items={pendingAttachments} workspaceId={workspaceId} onRemove={onRemovePendingAttachment} />
     </>
@@ -167,7 +157,7 @@ export function PendingAttachmentRow({ items, workspaceId, onRemove }: {
                 aria-label={`Remove ${p.name}`}
                 onClick={() => onRemove(p.id)}
               >
-                ×
+                <CloseIcon size="sm" />
               </button>
             </span>
           );
@@ -175,7 +165,7 @@ export function PendingAttachmentRow({ items, workspaceId, onRemove }: {
 
         return (
           <span key={p.id} className="t-att-pending-item t-att-pending-file t-reveal-host" title={p.absPath}>
-            <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }}>📄</span>
+            <FileIcon size="sm" style={{ opacity: 0.7, flexShrink: 0 }} />
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
               {p.name}
             </span>
@@ -185,7 +175,7 @@ export function PendingAttachmentRow({ items, workspaceId, onRemove }: {
               aria-label={`Remove ${p.name}`}
               onClick={() => onRemove(p.id)}
             >
-              ×
+              <CloseIcon size="sm" />
             </button>
           </span>
         );
@@ -195,10 +185,13 @@ export function PendingAttachmentRow({ items, workspaceId, onRemove }: {
 }
 
 /** One queued message. While it leaves it is out of the a11y tree and inert. */
-function QueuedBlock({ entry, index, errored, steerable, steerDisabled, steering, onSteer, onRestore }: {
+function QueuedBlock({ entry, index, errored, stopped, onSendNow, steerable, steerDisabled, steering, onSteer, onRestore }: {
   entry: PendingQueuedMessage;
   index: number;
+  /** The queue is paused: its turn errored, or was stopped (stopped). */
   errored: boolean;
+  stopped: boolean;
+  onSendNow?: () => void;
   steerable: boolean;
   steerDisabled: boolean;
   steering: boolean;
@@ -206,14 +199,17 @@ function QueuedBlock({ entry, index, errored, steerable, steerDisabled, steering
   onRestore: (queueId: string) => void;
 }) {
   const present = useIsPresent();
+  const fresh = useFresh(entry.queuedAt);
+  const reduced = useReducedMotionConfig() === true;
   const queueId = entry.id;
   const captionSuffix = index === 0
-    ? (errored ? ' · paused, review and send manually' : ' · sends when stream ends')
+    ? (errored ? (stopped ? ' · paused after Stop' : ' · paused after an error') : ' · sends when stream ends')
     : '';
   return (
     <motion.div
-      exit={QUEUED_EXIT}
-      className={`t-pre-block ${errored ? 'tone-danger' : 'tone-select'}`}
+      exit={reduced ? QUEUED_EXIT_REDUCED : QUEUED_EXIT}
+      className={`t-pre-block ${errored && !stopped ? 'tone-danger' : 'tone-select'}`}
+      data-fresh={fresh || undefined}
       aria-hidden={present ? undefined : true}
       inert={!present}
     >
@@ -226,6 +222,11 @@ function QueuedBlock({ entry, index, errored, steerable, steerDisabled, steering
         </div>
       </div>
       <div className="t-pre-block-actions">
+        {onSendNow && (
+          <button type="button" className="t-pre-block-steer" onClick={onSendNow}>
+            Send now
+          </button>
+        )}
         {steerable && (
           <button
             type="button"
@@ -243,98 +244,9 @@ function QueuedBlock({ entry, index, errored, steerable, steerDisabled, steering
           className="t-pre-block-x"
           onClick={() => onRestore(queueId)}
         >
-          ×
+          <CloseIcon size="sm" />
         </button>
       </div>
     </motion.div>
-  );
-}
-
-function EditableCommentChip({
-  index,
-  quotedText,
-  body,
-  source,
-  onEdit,
-  onRemove,
-}: {
-  index: number;
-  quotedText: string;
-  body: string;
-  source?: NonNullable<ChatNodeState['pendingComments']>[number]['source'];
-  onEdit: (body: string) => void;
-  onRemove: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(body);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    if (editing && textareaRef.current) {
-      textareaRef.current.focus();
-      textareaRef.current.selectionStart = textareaRef.current.value.length;
-    }
-  }, [editing]);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed && trimmed !== body) onEdit(trimmed);
-    setEditing(false);
-  };
-
-  const cancel = () => {
-    setDraft(body);
-    setEditing(false);
-  };
-
-  return (
-    <div
-      className="t-pre-block tone-select"
-      title={`"${quotedText}"\n\n${body}`}
-    >
-      <div className="t-pre-block-col">
-        <div className="t-pre-block-cap">
-          comment <b>{index + 1}</b>{index === 0 ? ' · pending on next send' : ''}
-          {source ? <span> · {source.name || source.filePath} · {source.snapshot?.contentHash.slice(0, 8) || 'version unknown'}</span> : null}
-        </div>
-        <div className="t-pre-block-quoted">
-          "{quotedText.replace(/\s+/g, ' ').trim()}"
-        </div>
-        {editing ? (
-          <textarea
-            ref={textareaRef}
-            className="t-pre-block-edit-textarea"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !isImeComposing(e)) {
-                e.preventDefault();
-                commit();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                cancel();
-              }
-            }}
-            onBlur={commit}
-            rows={2}
-          />
-        ) : (
-          <div
-            className="t-pre-block-reply is-editable"
-            onClick={() => { setDraft(body); setEditing(true); }}
-          >
-            {body.replace(/\s+/g, ' ').trim()}
-          </div>
-        )}
-      </div>
-      <button
-        type="button"
-        aria-label="Remove pending comment"
-        className="t-pre-block-x"
-        onClick={onRemove}
-      >
-        ×
-      </button>
-    </div>
   );
 }

@@ -303,6 +303,9 @@ npm run test:runtime
 - Use theme tokens from frontend/src/index.css and Tailwind's @theme mapping
   (bg-app, bg-surface, text-fg, border-line, etc.), not hardcoded surface/text hex
   colors. Workspace badge palette colors are an intentional decorative exception.
+- Frontend design rules are binding for UI work: DESIGN.md (core rules and a
+  self-check list) and docs/design/ (tokens, motion, transitions, states, with
+  sources). Read them before changing UI.
 
 ## Electron and production
 

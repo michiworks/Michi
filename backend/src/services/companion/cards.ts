@@ -18,7 +18,7 @@ import { assertPublicCompanionCard } from './publicAvailability';
  *
  * The payload is the full change, exactly as Apply makes it (a goal's or a
  * reminder's whole text, the rules' every line, a conversation's whole
- * brief): the card the user reads before Apply shows it from the payload,
+ * summary): the card the user reads before Apply shows it from the payload,
  * while the summary is Michi's one-line headline and may clip long text.
  *
  * A reminder's `at` takes a local "YYYY-MM-DD HH:MM" or a time from now

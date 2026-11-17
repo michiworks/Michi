@@ -12,6 +12,8 @@
 import { parseMultiModelRunView, trimMultiModelRunView, type MultiModelRunView } from "./multiModel";
 import { parseSubagentEnds, type SubagentEnd } from "./subagents";
 import { clampText } from "./text";
+import { clampWorkflowResult } from "./workflowResultClamp";
+import { parseWorkflowRunPatch, type WorkflowRunPatchV1 } from "./workflowRunPatch";
 
 export type WorkflowRuntime = "claude" | "kiro" | "michi";
 export type WorkflowRunStatus = "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -237,12 +239,15 @@ export interface BackgroundSubagentsEndedV1 {
 /**
  * The workflow-runs feed also carries `background_subagents` and
  * `background_subagents_ended` (backends from before them never send
- * them; old clients ignore them).
+ * them; old clients ignore them), and `workflow_run_patch` to subscribers
+ * that ask for it (`patches=1`).
  */
 export interface WorkflowRunSseEnvelopeV1 {
   version: 1;
-  event: "workflow_run" | "heartbeat" | "background_subagents" | "background_subagents_ended";
+  event: "workflow_run" | "workflow_run_patch" | "heartbeat" | "background_subagents" | "background_subagents_ended";
   run: WorkflowRunDtoV1 | null;
+  /** `workflow_run_patch`: a change against the run this feed sent last (subscribers that ask for them). */
+  patch?: WorkflowRunPatchV1;
   backgroundSubagents?: BackgroundSubagentsUpdateV1;
   backgroundSubagentsEnded?: BackgroundSubagentsEndedV1;
   emittedAt: number;
@@ -255,7 +260,10 @@ export const WORKFLOW_LIMITS = {
   log: 80,
   definition: 12_000,
   prompt: 4_000,
+  /** A step's or an agent's result. */
   result: 8_000,
+  /** The run's own result: written once, when it ends; cut by structure (clampWorkflowResult). */
+  runResult: 32_000,
   error: 2_000,
   title: 300,
   line: 400,
@@ -536,7 +544,7 @@ export function parseWorkflowRunDto(value: unknown): WorkflowRunDtoV1 | null {
   const statusDetail = clampWorkflowText(raw.statusDetail, WORKFLOW_LIMITS.line);
   if (statusDetail) run.statusDetail = statusDetail;
   if (raw.interrupted === true && run.status === "cancelled") run.interrupted = true;
-  const result = clampWorkflowText(raw.result, WORKFLOW_LIMITS.result);
+  const result = typeof raw.result === "string" ? clampWorkflowResult(raw.result, WORKFLOW_LIMITS.runResult) : undefined;
   if (result) run.result = result;
   const usage = parseUsage(raw.usage);
   if (usage) run.usage = usage;
@@ -635,6 +643,10 @@ export function parseWorkflowRunSseEnvelope(value: unknown): WorkflowRunSseEnvel
       ? { version: 1, event: "background_subagents_ended", run: null, backgroundSubagentsEnded, emittedAt: num(raw.emittedAt) ?? Date.now() }
       : null;
   }
+  if (raw.event === "workflow_run_patch") {
+    const patch = parseWorkflowRunPatch(raw.patch);
+    return patch ? { version: 1, event: "workflow_run_patch", run: null, patch, emittedAt: num(raw.emittedAt) ?? Date.now() } : null;
+  }
   if (raw.event !== "workflow_run") return null;
   const run = parseWorkflowRunDto(raw.run);
   return run ? { version: 1, event: "workflow_run", run, emittedAt: num(raw.emittedAt) ?? Date.now() } : null;
@@ -679,7 +691,7 @@ function trimWorkflowRun(run: WorkflowRunDtoV1, max: number, logEntries: number)
   };
   setText("definition", max === 0 ? undefined : clampOptional(run.definition, max * 2));
   setText("statusDetail", clampOptional(run.statusDetail, Math.max(max, WORKFLOW_LIMITS.line)));
-  setText("result", clampOptional(run.result, Math.max(max * 4, 400)));
+  setText("result", clampWorkflowResult(run.result, Math.max(max * 4, 400)));
   // Approvals are never trimmed: the user must see the whole request they
   // allow. They are already bounded (WORKFLOW_LIMITS.approvals × prompt).
   if (out.multiModel) out.multiModel = trimMultiModelRunView(out.multiModel, max);
@@ -708,6 +720,40 @@ export function boundWorkflowRun(
   }
   // Only node skeletons are left; that is the smallest correct snapshot.
   return trimmed;
+}
+
+/** Characters of its result a run summary keeps: enough for a card's first view. */
+const SUMMARY_RESULT = 1_200;
+
+/**
+ * A finished run as a bulk snapshot sends it when it is large, marked
+ * `partial` (`GET /workflow-runs/:id` has the rest): what its cards show
+ * before they are read in full. Nodes keep their place, status, times,
+ * model and usage, and a failure its first line; the result is a preview
+ * cut by structure; the script and the log are left to the full copy.
+ */
+export function summarizeWorkflowRun(run: WorkflowRunDtoV1): WorkflowRunDtoV1 {
+  const nodes = run.nodes.map((node) => {
+    const out: WorkflowNodeDto = { ...node };
+    for (const key of ["prompt", "result", "statusMessage", "currentTool", "error"] as const) delete out[key];
+    const failure = clampWorkflowText(node.error?.split("\n", 1)[0], WORKFLOW_LIMITS.line);
+    if (failure) out.error = failure;
+    if (node.rounds) {
+      out.rounds = node.rounds.map((round) => {
+        const kept: WorkflowNodeRoundDto = { ...round };
+        delete kept.result;
+        delete kept.error;
+        return kept;
+      });
+    }
+    return out;
+  });
+  const out: WorkflowRunDtoV1 = { ...run, nodes, log: [], partial: true };
+  delete out.definition;
+  delete out.result;
+  const preview = clampWorkflowResult(run.result, SUMMARY_RESULT);
+  if (preview) out.result = preview;
+  return out;
 }
 
 /** Progress counts over the leaf nodes that do work (agents/steps), omitted ones included. */

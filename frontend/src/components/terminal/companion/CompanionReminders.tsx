@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { toast } from 'sonner';
-import { Pause, Play, X } from 'lucide-react';
 import { COMPANION_LIMITS, isCompanionClock, type CompanionItemDto, type CompanionReminderDto } from 'michi-shared';
 import { Button } from '../../ui/controls';
 import { MichiSectionLabel } from '../content/MichiSectionLabel';
+import { CloseIcon, PauseIcon, PlayIcon } from '../icons';
 import { addCompanionReminder, removeCompanionReminder, setCompanionReminderStatus } from '../../../services/api/companion';
 import { updateCompanionSnapshot } from '../../../state/companion/companionStore';
 import { companionReminderWhen, companionSnoozeTimes } from '../../../state/companion/companionView';
@@ -84,10 +84,10 @@ export function CompanionReminders({ reminders, items, clock }: {
           </span>
           <button type="button" className="companion-icon-btn" onClick={() => { void toggle(reminder); }}
             aria-label={`${reminder.status === 'paused' ? 'Resume' : 'Pause'}: ${reminder.text}`}>
-            {reminder.status === 'paused' ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}
+            {reminder.status === 'paused' ? <PlayIcon size="sm" /> : <PauseIcon size="sm" />}
           </button>
           <button type="button" className="companion-icon-btn" onClick={() => { void remove(reminder); }} aria-label={`Delete: ${reminder.text}`}>
-            <X size={12} aria-hidden="true" />
+            <CloseIcon size="sm" />
           </button>
         </div>
       ))}

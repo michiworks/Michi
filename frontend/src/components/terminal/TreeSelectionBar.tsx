@@ -1,6 +1,23 @@
 import React from 'react';
 import { useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
-import { confirmMoveThreadsToTrash } from '../../lib/threadRowContextMenu';
+import type { ChatNodeState } from '../../state/chatTypes';
+import { selectableTreeIds } from '../../state/sidebarSelectors';
+import { BusyLabel } from '../ui/controls';
+import { CloseIcon } from './icons';
+
+/** Select all's box: checked when the selection holds every thread it takes, mixed when it holds some. */
+function SelectAllBox({ held, onChange }: { held: 'all' | 'some' | 'none'; onChange: (on: boolean) => void }) {
+  const ref = React.useRef<HTMLInputElement>(null);
+  React.useLayoutEffect(() => {
+    if (ref.current) ref.current.indeterminate = held === 'some';
+  }, [held]);
+  return (
+    <label className="tree-selection-bar__all">
+      <input ref={ref} type="checkbox" checked={held === 'all'} onChange={(event) => onChange(event.currentTarget.checked)} />
+      Select all
+    </label>
+  );
+}
 
 export default function TreeSelectionBar() {
   const {
@@ -14,6 +31,7 @@ export default function TreeSelectionBar() {
     bulkDeleteTrees,
     createMergedChat,
   } = useChatActions();
+  const [merging, setMerging] = React.useState(false);
 
   // Map selected tree IDs → root node IDs (createMergedChat takes node IDs).
   const count = treeSelection.size;
@@ -30,6 +48,13 @@ export default function TreeSelectionBar() {
       [rootNodeIds],
     ),
   );
+  const held = useStructuralSelector(
+    React.useCallback((nodes: Record<string, ChatNodeState>) => {
+      const ids = activeProject ? selectableTreeIds(activeProject, nodes) : [];
+      const selected = ids.filter((id) => treeSelection.has(id)).length;
+      return selected === 0 ? 'none' : selected === ids.length ? 'all' : 'some';
+    }, [activeProject, treeSelection]),
+  );
   if (count === 0) return null;
 
   // Merge works within one workspace, the active one; a selected thread from
@@ -37,14 +62,19 @@ export default function TreeSelectionBar() {
   const outsideWorkspace = rootNodeIds.length < count;
   const showMerge = count >= 2;
   const mergeDisabled = outsideWorkspace || anyStreaming;
+  // While a merge runs, Merge keeps focus and takes no second press.
+  const mergeBlocked = mergeDisabled || merging;
 
   const onMerge = async () => {
-    if (mergeDisabled) return;
+    if (mergeBlocked) return;
+    setMerging(true);
     try {
       await createMergedChat(rootNodeIds);
       clearTreeSelection();
     } catch {
       // createMergedChat already surfaced a toast on validation failure.
+    } finally {
+      setMerging(false);
     }
   };
 
@@ -63,13 +93,15 @@ export default function TreeSelectionBar() {
     >
       <span style={{ color: 'var(--term-fg)', fontWeight: 600 }}>{count} selected</span>
       <div style={{ flex: 1 }} />
-      <span onClick={selectAllTrees} style={{ cursor: 'pointer', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-        Select all
-      </span>
+      <SelectAllBox held={held} onChange={(on) => (on ? selectAllTrees() : clearTreeSelection())} />
       {showMerge && (
-        <span
-          role="button"
-          aria-disabled={mergeDisabled}
+        // aria-disabled, not disabled, so focus and the hint stay reachable.
+        <button
+          type="button"
+          className="tree-selection-bar__action"
+          data-strong=""
+          aria-disabled={mergeBlocked || undefined}
+          aria-busy={merging || undefined}
           title={
             outsideWorkspace
               ? 'Only threads of the current workspace can be merged.'
@@ -78,30 +110,24 @@ export default function TreeSelectionBar() {
                 : 'Merge selected threads into a new chat'
           }
           onClick={onMerge}
-          style={{
-            cursor: mergeDisabled ? 'not-allowed' : 'pointer',
-            color: mergeDisabled ? 'var(--term-muted)' : 'var(--term-fg)',
-            fontSize: 'var(--fs-xs)',
-            opacity: mergeDisabled ? 0.5 : 1,
-          }}
         >
-          Merge
-        </span>
+          <BusyLabel busy={merging} label="Merging…">Merge</BusyLabel>
+        </button>
       )}
-      <span onClick={bulkArchiveTrees} style={{ cursor: 'pointer', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
+      <button type="button" className="tree-selection-bar__action" onClick={bulkArchiveTrees}>
         Archive
-      </span>
-      <span
-        onClick={() => {
-          void confirmMoveThreadsToTrash(count).then((ok) => { if (ok) bulkDeleteTrees(); });
-        }}
-        style={{ cursor: 'pointer', color: 'var(--term-danger, #e55)', fontSize: 'var(--fs-xs)' }}
+      </button>
+      <button
+        type="button"
+        className="tree-selection-bar__action"
+        data-danger=""
+        onClick={bulkDeleteTrees}
       >
         Delete
-      </span>
-      <span onClick={clearTreeSelection} style={{ cursor: 'pointer', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
-        ✕
-      </span>
+      </button>
+      <button type="button" className="tree-selection-bar__action" onClick={clearTreeSelection} aria-label="Clear selection">
+        <CloseIcon size="sm" />
+      </button>
     </div>
   );
 }

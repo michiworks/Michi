@@ -12,6 +12,7 @@ import {
   setCompanionTarget,
   takeCompanionFocusMessage,
   takeCompanionRequests,
+  takeCompanionReturnFocus,
   toggleCompanionPanel,
   closeCompanionPanel,
   useCompanionPanelShownNodeIds,
@@ -79,6 +80,21 @@ describe('⌘J and ⇧⌘J (DESIGN-v2 §1.2)', () => {
     composer.focus();
     closeCompanionPanel();
     expect(document.activeElement).toBe(button);
+  });
+
+  it('closing keeps focus for a page made inert until the shell takes it, once', () => {
+    const { composer, outside } = mountPanel();
+    const page = document.createElement('div');
+    page.append(outside);
+    document.body.append(page);
+    outside.focus();
+    openCompanionPanel();
+    page.setAttribute('inert', '');
+    composer.focus();
+    closeCompanionPanel();
+    expect(document.activeElement).not.toBe(outside);
+    expect(takeCompanionReturnFocus()).toBe(outside);
+    expect(takeCompanionReturnFocus()).toBeNull();
   });
 
   it('closing leaves alone a focus the user moved out of the panel', () => {

@@ -224,7 +224,7 @@ describe("Michi's notices", () => {
     assert.equal(spoke('r-1', 'heartbeat'), 0, 'once per run: the runner and the coordinator may both report it');
     assert.equal(spoke('r-2', 'welcome'), 0, 'the welcome is what the user just asked for');
     assert.equal(spoke('r-3', 'catch_up'), 0);
-    assert.equal(spoke('r-5', 'brief'), 1, 'the brief is an update: the user\'s level All shows it');
+    assert.equal(spoke('r-5', 'brief'), 0, 'neither kind runs any more (2026-11-17): a post one of them left notifies nothing');
     focused = true;
     assert.equal(spoke('r-6', 'worker_report'), 0, 'the panel is focused: the user sees it');
     focused = false;
@@ -241,7 +241,7 @@ describe("Michi's notices", () => {
     applyItemAction(muted.id, { action: 'mute' }, T0);
     const email = upsertItem(draft('email:1', { source: 'email', subtype: 'email_unread', title: 'Re: salary review' }), T0).item;
     patchCompanionSettings({ sources: { email: { enabled: false } } });
-    const reply = (runId: string, runKind: 'heartbeat' | 'wake' | 'brief' | 'worker_report', itemIds: string[]) => {
+    const reply = (runId: string, runKind: 'heartbeat' | 'wake' | 'worker_report', itemIds: string[]) => {
       assert.equal(gate.notify({ kind: 'message', runId, runKind, itemIds }, T0), 'sent', runId);
       return notices.at(-1)!;
     };
@@ -249,7 +249,7 @@ describe("Michi's notices", () => {
     assert.deepEqual([many.title, many.body], ['Nova', `Nova: pipeline:A is blocked · pipeline:B is blocked · C ${'x'.repeat(57)}… +3`],
       'items rated now first, each title clipped; never a muted item or one of a source turned off');
     assert.equal(reply('r-none', 'worker_report', []).body, 'Nova has an update');
-    assert.equal(reply('r-hidden', 'brief', [muted.id, email.id]).body, 'Nova has an update');
+    assert.equal(reply('r-hidden', 'heartbeat', [muted.id, email.id]).body, 'Nova has an update');
     gate.expectReply('r-started', [urgent[1]!.id]);
     assert.equal(reply('r-started', 'wake', []).body, 'Nova: pipeline:B is blocked', 'the items the run started with');
     assert.doesNotMatch(JSON.stringify(notices), /salary/);

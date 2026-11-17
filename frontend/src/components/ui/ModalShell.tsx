@@ -7,6 +7,7 @@ import { useFrozenGlass } from './useFrozenGlass';
 import { getElectron } from '../../lib/electronBridge';
 import { useBackLayer } from '../../lib/backStack';
 import { isImeComposing } from '../../lib/ime';
+import { CloseIcon } from '../terminal/icons';
 import './OverlaySurface.css';
 import './ModalShell.css';
 
@@ -31,7 +32,7 @@ export interface ModalShellProps {
   onBack?: () => void;
   /** Header tag text, uppercased via CSS. Omit for a chrome-less modal. */
   title?: React.ReactNode;
-  /** Optional glyph before the title (e.g. ⎇ for move, ⊕ for digest). */
+  /** Optional glyph before the title: an icon (BranchIcon for move, CompanionGlyph for Michi's own) or a pane-kind mark (± for a diff). */
   titleGlyph?: React.ReactNode;
   /** Accent color for the title tag + glyph (role color). */
   accent?: string;
@@ -360,7 +361,7 @@ function ModalLayers({
               id={titleId}
               style={{ color: accent, display: 'inline-flex', alignItems: 'center', gap: 6 }}
             >
-              {titleGlyph ? <span aria-hidden>{titleGlyph}</span> : null}
+              {titleGlyph ? <span aria-hidden style={{ display: 'inline-flex' }}>{titleGlyph}</span> : null}
               {title}
             </span>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
@@ -373,7 +374,7 @@ function ModalLayers({
                   title="Close (esc)"
                   aria-label="Close"
                 >
-                  ×
+                  <CloseIcon aria-hidden="true" />
                 </button>
               )}
             </span>

@@ -46,7 +46,7 @@ describe('sidebar drag-resize', () => {
 
     // jsdom has no layout or PointerEvent; a MouseEvent carries the pointer's x.
     aside.getBoundingClientRect = () => ({ width: 252 } as DOMRect);
-    const handle = screen.getByTitle('Drag to resize · Double-click to reset');
+    const handle = screen.getByRole('separator', { name: 'Resize sidebar' });
     handle.setPointerCapture = vi.fn();
     fireEvent(handle, new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 300 }));
     for (const x of [320, 340, 360]) {

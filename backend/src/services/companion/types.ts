@@ -12,7 +12,6 @@ import type {
   CompanionBucket,
   CompanionCardDto,
   CompanionCheckinKind,
-  CompanionCatchUpDto,
   CompanionConfigurableSource,
   CompanionGoalDto,
   CompanionItemDto,
@@ -196,9 +195,6 @@ export interface CompanionMaterial {
   /** Cards decided since the Companion's last turn, not yet reported to it. */
   cardResults: CompanionCardDto[];
   reports: CompanionWorkerReport[];
-  catchUp: CompanionCatchUpDto | null;
-  /** The user's "Tomorrow, focus on…" text for the morning brief. */
-  briefCurate: string | null;
   /**
    * The first welcome (B23): enabled sources whose first look (the baseline
    * poll) had not landed when the note was built: `running` while it is
@@ -211,7 +207,11 @@ export interface CompanionMaterial {
   following?: CompanionDelegationRecord[];
 }
 
-/** A turn of the agent's own: a check-in (DESIGN-v2 §3.1), never a poll or a follow-up `send`. */
+/**
+ * A turn of the agent's own: a check-in (DESIGN-v2 §3.1), never a poll or a
+ * follow-up `send`. 'brief' and 'catch_up' stay in the type for the runs they
+ * left; nothing starts one (2026-11-17).
+ */
 export type CompanionTurnKind = CompanionCheckinKind;
 
 export interface CompanionTurnRequest {
@@ -228,7 +228,7 @@ export interface CompanionTurnOutcome {
    * `superseded`: the user wrote in the conversation after the check-in began, so its reply was not posted (DESIGN-v2 §3.3).
    * `error` also when its results were withdrawn (D5: what its Michi Memory pack showed changed while it ran): nothing
    * of its own posted (a follow-up it sent itself still gets Michi's receipt), its changes undone, its material left to
-   * the next check-in and a brief to Michi's fallback.
+   * the next check-in.
    */
   outcome: 'spoke' | 'quiet' | 'error' | 'skipped' | 'preempted' | 'superseded';
   detail?: string;
@@ -268,7 +268,7 @@ export interface CompanionMessageNotifier {
 
 /**
  * The Companion's live side, as routes/companion.ts reaches it. Storage
- * (items, goals, notes, cards, briefs, settings) is read and written through
+ * (items, goals, notes, cards, settings) is read and written through
  * repository.ts / settings.ts / cards.ts directly; this is what needs the
  * running coordinator. service.ts's no-op stands in until it is wired.
  */
@@ -279,8 +279,8 @@ export interface CompanionService {
    * A renderer beacon (POST /companion/presence answers 204): whether the
    * user is active, looks at the Companion or types to it. A composing
    * beacon stops a running hidden turn first (R2.8); it resolves once that
-   * is done. It answers nothing: "Since you left" comes from POST
-   * /companion/view (repository.recordCompanionView).
+   * is done. It answers nothing: the panel's messages become read through
+   * POST /companion/view (repository.recordCompanionView).
    */
   onPresence(input: CompanionPresenceInput): Promise<void>;
   /** Starts the first welcome turn when the Companion is eligible for one. */
@@ -289,10 +289,4 @@ export interface CompanionService {
   isBusy(): boolean;
   /** The live status (sources, next checks); without it the snapshot builds one from storage (repository.defaultCompanionStatus). */
   status?(): CompanionStatusDto;
-  /**
-   * The "Since you left" the snapshot shows (null: none now). Without it the
-   * snapshot shows the latest one POST /companion/view stored, while it is
-   * recent (repository.latestCatchUp).
-   */
-  catchUp?(): CompanionCatchUpDto | null;
 }

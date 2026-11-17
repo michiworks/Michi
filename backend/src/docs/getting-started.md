@@ -65,7 +65,7 @@ Create a branch for another direction with inherited context. For example:
 
 > Create two research branches: one for a simple implementation and one for an extensible design. Compare the findings here before editing anything.
 
-Explicitly ask when you want split work. `spawn_branches` fans out at most five child threads, each with this chat's permission setting. Conversation branches do not automatically isolate project files. See `concepts-and-context` and `common-workflows` before parallel implementation.
+Explicitly ask when you want split work. `spawn_branches` fans out at most five child threads, each with this chat's permission setting. A spawned branch can fan out once more, and at most 20 agent-spawned branches grow from one conversation; past that, branch by hand. Conversation branches do not automatically isolate project files. See `concepts-and-context` and `common-workflows` before parallel implementation.
 
 ## 5. Keep useful results
 

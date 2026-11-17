@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     IMAGE_PLACEHOLDER_PATTERN, TOOL_PAYLOAD_MAX, hasInlineImageMarker, imagePlaceholder, omitInlineImages, omitInlineImagesInText,
-    truncateToolPayload,
+    truncateToolOutput, truncateToolPayload,
 } from '../src/contract/toolPayload';
 
 /** base64 of `bytes` bytes that starts with the PNG signature. */
@@ -166,5 +166,23 @@ describe('truncateToolPayload on a value JSON cannot encode', () => {
         cyclic.self = cyclic;
         assert.equal(truncateToolPayload(cyclic), '[object Object]');
         assert.equal(truncateToolPayload(10n), '10');
+    });
+});
+
+describe('truncateToolOutput', () => {
+    it('keeps a long output\'s start and end around the omitted-chars marker, within the cap', () => {
+        const log = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n') + '\nError: the build failed';
+        const cut = truncateToolOutput(log)!;
+        assert.ok(cut.length <= TOOL_PAYLOAD_MAX);
+        assert.ok(cut.startsWith('line 0\nline 1\n'));
+        assert.ok(cut.endsWith('\nError: the build failed'));
+        assert.match(cut, /\n… \[\d+ chars omitted\] …\n/);
+        assert.equal(truncateToolOutput('short'), 'short');
+    });
+
+    it('splits no surrogate pair at either cut', () => {
+        const cut = truncateToolOutput('😀'.repeat(TOOL_PAYLOAD_MAX))!;
+        assert.ok(cut.length <= TOOL_PAYLOAD_MAX);
+        assert.doesNotMatch(cut, /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/);
     });
 });

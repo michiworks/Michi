@@ -147,33 +147,45 @@ describe('WorkspaceRow unread ring', () => {
     );
   }
 
-  const headerDot = () =>
-    screen.getByText('Ring Workspace').closest('.t-row-hover')!.querySelector('.sb-unread-dot') as HTMLElement | null;
+  const header = () => screen.getByText('Ring Workspace').closest('.t-row-hover')!;
+  const headerDot = () => header().querySelector('.sb-unread-dot') as HTMLElement | null;
+  // Card rows (the default) mark unread on the header's own rail, not a dot.
+  const headerRail = () => header().querySelector(':scope > [data-rail]') as HTMLElement | null;
 
-  it('rings a collapsed workspace that holds an unread thread', async () => {
+  it('paints a collapsed workspace that holds an unread thread a green rail', async () => {
     renderHeader(false);
-    await waitFor(() => expect(headerDot()?.dataset.unread).toBe('within'));
+    await waitFor(() => expect(headerRail()?.dataset.rail).toBe('unread'));
+    expect(headerDot()).toBeNull();
   });
 
   // Expanded, the workspace would list no row with a dot: nothing to open.
   it.each([
     ['archived', { archivedAt: BEFORE }, {}],
     ['in Trash', {}, { deletedAt: BEFORE, deletionGroupId: 'del-r1' }],
-  ])('rings no collapsed workspace whose only unread thread is %s', async (_label, treeExtra, nodeExtra) => {
+  ])('marks no collapsed workspace whose only unread thread is %s', async (_label, treeExtra, nodeExtra) => {
     renderHeader(false, {
       project: { ...project, trees: [{ ...project.trees[0], ...treeExtra }] },
       nodes: { r1: { ...nodes.r1, ...nodeExtra } },
     });
     await screen.findByTestId('hydrated');
+    expect(headerRail()).toBeNull();
+  });
+
+  // Mounted only while unread, it appeared in one frame; mounted, it scales in.
+  it('keeps the classic row ring mounted while read, so a reply scales it in', async () => {
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ sidebarRowStyle: 'classic' }));
+    renderHeader(false, { project: { ...project, trees: [{ ...project.trees[0], archivedAt: BEFORE }] }, nodes });
+    await screen.findByTestId('hydrated');
+    expect(headerDot()?.className).toBe('sb-unread-dot sb-unread-dot--inline');
     expect(headerDot()?.dataset.unread).toBe('none');
   });
 
-  it('drops the ring once the workspace is open and its threads show their own dots', async () => {
+  it('drops the mark once the workspace is open and its threads show their own', async () => {
     renderHeader(true);
     const title = await screen.findByText('Unread thread');
-    const threadDot = title.closest('[data-sidebar-row]')!.querySelector('.sb-unread-dot') as HTMLElement;
-    await waitFor(() => expect(threadDot.dataset.unread).toBe('self'));
-    expect(headerDot()?.dataset.unread).toBe('none');
+    const threadRail = () => title.closest('[data-sidebar-row]')!.querySelector('[data-rail]') as HTMLElement | null;
+    await waitFor(() => expect(threadRail()?.dataset.rail).toBe('unread'));
+    expect(headerRail()).toBeNull();
   });
 });
 

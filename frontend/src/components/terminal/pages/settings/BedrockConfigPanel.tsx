@@ -3,6 +3,7 @@ import type { AgentProviderInfo, VerifyProviderKeyResult, BedrockCredentialSourc
 import { getBedrockConfig, saveBedrockConfig as saveBedrock, clearBedrockConfig, verifyBedrockConfig } from '../../../../services/api';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { Button } from '../../../ui/controls';
+import { CheckIcon, ErrorIcon } from '../../icons';
 
 const BEDROCK_REGIONS = [
   'us-east-1',
@@ -27,6 +28,9 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
   fontFamily: 'var(--ui-font)',
 };
+
+/** The mark before the verify result, on the line of its text. */
+const STATUS_ICON: React.CSSProperties = { verticalAlign: -2, marginRight: 4 };
 
 export function BedrockConfigPanel({
   provider,
@@ -164,7 +168,7 @@ export function BedrockConfigPanel({
         <div
           style={{
             fontSize: 'var(--fs-sm)',
-            color: 'var(--term-accent)',
+            color: 'var(--term-accent-text)',
             marginBottom: 14,
             padding: '8px 10px',
             background: 'var(--term-alt)',
@@ -306,6 +310,7 @@ export function BedrockConfigPanel({
       {/* Status */}
       {verifyResult && (
         <div
+          role={verifyResult.ok ? 'status' : 'alert'}
           style={{
             fontSize: 'var(--fs-sm)',
             color: verifyResult.ok ? 'var(--term-accent)' : 'var(--term-danger-text)',
@@ -313,12 +318,12 @@ export function BedrockConfigPanel({
           }}
         >
           {verifyResult.ok
-            ? `✅ Verified${verifyResult.model ? ` — ${verifyResult.model}` : ''}${verifyResult.latencyMs ? ` in ${verifyResult.latencyMs}ms` : ''}`
-            : `❌ ${verifyResult.error ?? 'Verification failed'}`}
+            ? <><CheckIcon size="sm" style={{ ...STATUS_ICON, color: 'var(--term-digest)' }} />{`Verified${verifyResult.model ? ` — ${verifyResult.model}` : ''}${verifyResult.latencyMs ? ` in ${verifyResult.latencyMs}ms` : ''}`}</>
+            : <><ErrorIcon size="sm" style={STATUS_ICON} />{verifyResult.error ?? 'Verification failed'}</>}
         </div>
       )}
       {error && (
-        <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', marginTop: 6 }}>{error}</div>
+        <div role="alert" style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', marginTop: 6 }}>{error}</div>
       )}
       {config?.configured && !verifyResult && (
         <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', marginTop: 8 }}>

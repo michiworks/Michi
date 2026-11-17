@@ -1,9 +1,10 @@
 import { vi } from 'vitest';
-import { buildThreadRowContextMenu, confirmMoveThreadsToTrash } from './threadRowContextMenu';
+import { toast } from 'sonner';
+import { buildThreadRowContextMenu } from './threadRowContextMenu';
+import { recordUndo, resetUndoStackForTests, undoLatest } from '../state/undoStack';
 
-const confirmDialog = vi.hoisted(() => vi.fn(async (_opts: { message: string }) => true));
-vi.mock('../components/ui/ConfirmDialog', () => ({ confirmDialog }));
-beforeEach(() => confirmDialog.mockClear());
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn((_message: string, options?: { id?: string }) => options?.id), { error: vi.fn(), dismiss: vi.fn() }) }));
+beforeEach(() => { resetUndoStackForTests(); vi.mocked(toast).mockClear(); });
 
 function baseArgs(overrides: Partial<Parameters<typeof buildThreadRowContextMenu>[0]> = {}) {
   const actions = {
@@ -22,35 +23,13 @@ function baseArgs(overrides: Partial<Parameters<typeof buildThreadRowContextMenu
   };
 }
 
-describe('confirmMoveThreadsToTrash', () => {
-  it('asks once, in the same words, for one thread or several', async () => {
-    await confirmMoveThreadsToTrash(1);
-    await confirmMoveThreadsToTrash(3);
-    expect(confirmDialog.mock.calls.map(([opts]) => opts)).toEqual([
-      { title: 'Move to trash', message: 'Move this thread to trash?', confirmLabel: 'Move' },
-      { title: 'Move to trash', message: 'Move 3 threads to trash?', confirmLabel: 'Move' },
-    ]);
-  });
-});
-
 describe('buildThreadRowContextMenu', () => {
 
-  it('asks in the app’s confirm dialog, then wires Delete to actions.deleteTree', async () => {
-    const native = vi.spyOn(window, 'confirm');
+  it('moves the thread to Trash at once from Delete thread', () => {
     const args = baseArgs();
     const sections = buildThreadRowContextMenu(args);
-    const del = sections.flatMap((s) => s.items).find((i) => i.label === 'Delete thread…')!;
-    confirmDialog.mockResolvedValueOnce(false);
-    del.run();
-    await vi.waitFor(() => expect(confirmDialog).toHaveBeenCalledOnce());
-    expect(confirmDialog.mock.calls[0][0]).toMatchObject({ message: 'Move this thread to trash?' });
-    await Promise.resolve();
-    expect(args.actions.deleteTree).not.toHaveBeenCalled();
-
-    del.run();
-    await vi.waitFor(() => expect(args.actions.deleteTree).toHaveBeenCalledWith('t1'));
-    expect(native).not.toHaveBeenCalled();
-    native.mockRestore();
+    sections.flatMap((s) => s.items).find((i) => i.label === 'Delete thread')!.run();
+    expect(args.actions.deleteTree).toHaveBeenCalledWith('t1');
   });
 
   it('names each action, following the thread’s pinned and archived state', () => {
@@ -118,20 +97,21 @@ describe('buildThreadRowContextMenu', () => {
       expect(clearTreeSelection).toHaveBeenCalled();
     });
 
-    it('batch Delete calls deleteTree for each selected tree after confirm', async () => {
+    it('batch Delete moves every selected thread to Trash at once, with one Undo toast for them all', async () => {
       const clearTreeSelection = vi.fn();
-      const args = baseArgs({
-        treeId: 't1',
-        treeSelection: new Set(['t1', 't2']),
-        clearTreeSelection,
-      });
-      const sections = buildThreadRowContextMenu(args);
-      const del = sections.flatMap((s) => s.items).find((i) => i.label === 'Delete 2 threads…')!;
-      del.run();
-      await vi.waitFor(() => expect(clearTreeSelection).toHaveBeenCalled());
-      expect(confirmDialog.mock.calls[0][0]).toMatchObject({ message: 'Move 2 threads to trash?' });
-      expect(args.actions.deleteTree).toHaveBeenCalledWith('t1');
-      expect(args.actions.deleteTree).toHaveBeenCalledWith('t2');
+      const restored: string[] = [];
+      // As the app's deleteTree does, each move records its own Undo toast.
+      const deleteTree = vi.fn((id: string) => { recordUndo({ label: `Moved ${id} to Trash`, toast: true, undo: () => { restored.push(id); } }); });
+      const args = baseArgs({ treeId: 't1', treeSelection: new Set(['t1', 't2']), clearTreeSelection });
+      const sections = buildThreadRowContextMenu({ ...args, actions: { ...args.actions, deleteTree } });
+      sections.flatMap((s) => s.items).find((i) => i.label === 'Delete 2 threads')!.run();
+      expect(deleteTree).toHaveBeenCalledWith('t1');
+      expect(deleteTree).toHaveBeenCalledWith('t2');
+      expect(clearTreeSelection).toHaveBeenCalled();
+      expect(toast).toHaveBeenCalledTimes(1);
+      expect(toast).toHaveBeenCalledWith('Moved 2 threads to Trash', expect.anything());
+      expect(await undoLatest()).toBe('undone');
+      expect(restored).toEqual(['t2', 't1']);
     });
   });
 });

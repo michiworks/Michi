@@ -1,4 +1,5 @@
 import { kbd } from '../lib/platform';
+import { Button } from './ui/controls';
 
 export default function EmptyThreads() {
   return (
@@ -19,19 +20,9 @@ export default function EmptyThreads() {
       <div style={{ fontSize: 'var(--fs-md)', marginBottom: 16 }}>
         Start a new thread or unarchive one.
       </div>
-      <button
-        onClick={() => window.dispatchEvent(new CustomEvent('michi:goto-home'))}
-        style={{
-          padding: '6px 14px',
-          border: '1px solid var(--term-accent)',
-          color: 'var(--term-accent)',
-          background: 'transparent',
-          fontFamily: 'var(--ui-font)',
-          cursor: 'pointer',
-        }}
-      >
+      <Button variant="primary" onClick={() => window.dispatchEvent(new CustomEvent('michi:goto-home'))}>
         + new thread ({kbd('mod', 'T')})
-      </button>
+      </Button>
     </div>
   );
 }

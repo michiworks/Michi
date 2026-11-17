@@ -48,7 +48,11 @@ function cached(sql: string): StatementSync {
 function runInTransaction<T>(fn: () => T): T {
   const maxRetries = 3;
   for (let attempt = 0; ; attempt++) {
-    db.exec('BEGIN');
+    // Every transaction here writes. A deferred BEGIN reads first and fails
+    // with SQLITE_BUSY, without waiting on busy_timeout, when the main
+    // connection commits before it upgrades to a write; IMMEDIATE takes the
+    // write lock up front and waits for it instead.
+    db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
       db.exec('COMMIT');
@@ -507,8 +511,9 @@ function workerBeginTurn(snapshot: DurableTurnSnapshot): CoreTurnRow {
   return coreBeginTurn(workerDb, snapshot);
 }
 
-function workerCheckpointTurn(snapshot: DurableTurnSnapshot): CoreTurnRow {
-  return coreCheckpointTurn(workerDb, snapshot);
+/** Only the size goes back: the main thread paces the turn's checkpoints by it and reads no row. */
+function workerCheckpointTurn(snapshot: DurableTurnSnapshot): { payloadBytes: number | null } {
+  return { payloadBytes: coreCheckpointTurn(workerDb, snapshot).payloadBytes };
 }
 
 function workerFinalizeTurn(snapshot: DurableTurnSnapshot): CoreTurnRow {

@@ -9,7 +9,8 @@
  */
 
 import { buildTopology } from "./topologyBuilder";
-import { keywordSearch } from "../routes/search";
+import type { SearchResult } from "../routes/search";
+import { runSearch, SearchLimitError } from "./searchReader";
 import { getDb } from "./db";
 import { getAiGlobalContext, getWorkspace } from "./dbRepository";
 import { hiddenTemporaryChat, isTemporaryChat } from "./memory/temporaryChat";
@@ -74,7 +75,8 @@ export interface ListThreadsResult {
 }
 
 export interface SearchMessagesResult {
-    status: "ok" | "disabled" | "no_workspace";
+    /** too_broad / busy: the search worker's wait limit or queue (searchReader.ts). */
+    status: "ok" | "disabled" | "no_workspace" | "too_broad" | "busy";
     /** Pre-formatted summary suitable for tool output. */
     text: string;
     matchCount?: number;
@@ -151,14 +153,14 @@ export function listThreads(
  * Temporary chats are never searched: a temporary chat's own tools refuse to
  * search (temporaryChatRefuses), and no other reader may find one.
  */
-export function searchMessages(
+export async function searchMessages(
     sessionWorkspaceId: string | null,
     ownerUserId: string | null | undefined,
     query: string,
     scope: "current" | "all" = "current",
     limit = 10,
     options: { includeScheduledRuns?: boolean } = {},
-): SearchMessagesResult {
+): Promise<SearchMessagesResult> {
     if (!sessionWorkspaceId) {
         return { status: "no_workspace", text: NO_WORKSPACE_MESSAGE };
     }
@@ -177,11 +179,20 @@ export function searchMessages(
     const wsArg = scope === "all" ? undefined : sessionWorkspaceId;
     // Pass ownerUserId so keywordSearch's cloud-mode owner filter applies.
     // Across workspaces, leave out those in Trash and those AI navigation may not read.
-    const results = keywordSearch(trimmed, wsArg, clampedLimit, ownerUserId ?? undefined, {
-        excludeTemporaryChats: true,
-        ...(options.includeScheduledRuns === true ? { includeScheduledRuns: true } : {}),
-        ...(wsArg === undefined ? { excludeDeletedWorkspaces: true, excludeNavigationDisabled: true } : {}),
-    });
+    let results: SearchResult[];
+    try {
+        results = await runSearch({
+            kind: "keyword", query: trimmed, workspaceId: wsArg, limit: clampedLimit, userId: ownerUserId ?? undefined,
+            options: {
+                excludeTemporaryChats: true,
+                ...(options.includeScheduledRuns === true ? { includeScheduledRuns: true } : {}),
+                ...(wsArg === undefined ? { excludeDeletedWorkspaces: true, excludeNavigationDisabled: true } : {}),
+            },
+        });
+    } catch (error) {
+        if (!(error instanceof SearchLimitError)) throw error;
+        return { status: error.code === "search_too_broad" ? "too_broad" : "busy", text: error.message };
+    }
     if (results.length === 0) {
         return {
             status: "ok",

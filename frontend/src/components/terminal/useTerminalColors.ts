@@ -20,17 +20,10 @@ export function useTerminalColors(): Record<string, string> {
     getElectron()?.setDarkMaterial?.(isDark, colors['--term-bg']);
   }, [colors, isDark]);
 
-  // Window glass on/off. Runs before the material below, so turning glass back
-  // on picks up the chosen material. No-op where the bridge lacks the method.
+  // Window glass on/off. No-op where the bridge lacks the method.
   useEffect(() => {
     getElectron()?.setWindowGlass?.(prefs.windowGlass);
   }, [prefs.windowGlass]);
-
-  // Apply the chosen native sidebar vibrancy material. No-op in the browser and
-  // on builds without the bridge method (older Electron / web / Win / Linux).
-  useEffect(() => {
-    getElectron()?.setVibrancy?.(prefs.sidebarVibrancy);
-  }, [prefs.sidebarVibrancy]);
 
   return colors;
 }

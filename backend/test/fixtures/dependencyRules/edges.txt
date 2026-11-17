@@ -18,6 +18,5 @@ routes-to-db	backend/src/routes/search.ts	backend/src/services/db.ts
 state-to-components	frontend/src/state/chatStore.tsx	frontend/src/components/mentions.ts
 state-to-components	frontend/src/state/chatStore.tsx	frontend/src/components/terminal/tokens.ts
 state-to-components	frontend/src/state/chatTypes.ts	frontend/src/components/mentions.ts
-state-to-components	frontend/src/state/prefs.tsx	frontend/src/components/terminal/paneMotion.ts
 state-to-components	frontend/src/state/prefs.tsx	frontend/src/components/terminal/sidebarRowStyle.ts
 state-to-components	frontend/src/state/prefs.tsx	frontend/src/components/terminal/tokens.ts

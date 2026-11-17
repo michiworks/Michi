@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { formatTokenCount } from 'michi-shared';
 import type { SubagentActivity, SubagentInfo } from '../../../state/chatTypes';
 import MarkdownContent from '../../MarkdownContent';
@@ -8,6 +8,8 @@ import {
   subagentToolCount,
   subagentTone,
 } from './subagentPresentation';
+import { CloseIcon } from '../icons';
+import { DisclosureChevron } from '../primitives';
 
 /**
  * The expanded body of a subagent in the Background work drawer, opened in
@@ -25,11 +27,10 @@ const TASK_PREVIEW_CHARS = 600;
 
 const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
+/** On .t-hover-fg .t-rest-ink buttons: the resting muted ink is the class's, so hover can step it to fg. */
 const textButtonStyle: React.CSSProperties = {
   border: 0,
   padding: 0,
-  background: 'transparent',
-  color: 'var(--term-muted)',
   font: 'inherit',
   fontSize: 'var(--fs-xs)',
   cursor: 'pointer',
@@ -85,7 +86,7 @@ function ActivityRow({ item, running }: { item: SubagentActivity; running: boole
         className={hasOutput ? 't-hover-fg' : undefined}
         style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 20, minWidth: 0, cursor: hasOutput ? 'pointer' : 'default' }}
       >
-        {failed && <span aria-hidden style={{ width: 8, flexShrink: 0, color: 'var(--term-danger)', fontSize: 'var(--fs-xs)', lineHeight: 1 }}>×</span>}
+        {failed && <CloseIcon size={8} style={{ flexShrink: 0, color: 'var(--term-danger)' }} />}
         {item.kind === 'message' && <span aria-hidden style={{ width: 8, flexShrink: 0, color: 'var(--term-faint)', fontSize: 'var(--fs-xs)', lineHeight: 1 }}>›</span>}
         <StepLine item={item} now={now} />
         {(now || duration !== undefined) && (
@@ -93,7 +94,7 @@ function ActivityRow({ item, running }: { item: SubagentActivity; running: boole
             {now ? 'now' : formatDurationMs(duration!)}
           </span>
         )}
-        {hasOutput && <span aria-hidden style={{ flexShrink: 0, fontSize: 'var(--fs-2xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>}
+        {hasOutput && <DisclosureChevron open={open} style={{ flexShrink: 0, fontSize: 'var(--fs-2xs)', color: 'var(--term-faint)' }} />}
       </div>
       {open && hasOutput && (
         <pre
@@ -132,7 +133,7 @@ function ActivityList({ subagent, running }: { subagent: SubagentInfo; running: 
       {(hidden > 0 || dropped > 0) && (
         <div style={{ marginBottom: 2, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
           {hidden > 0 ? (
-            <button type="button" className="t-hover-fg" style={textButtonStyle} onClick={() => setShowAll(true)}>
+            <button type="button" className="t-hover-fg t-rest-ink" style={textButtonStyle} onClick={() => setShowAll(true)}>
               Show {hidden} earlier {hidden === 1 ? 'step' : 'steps'}
             </button>
           ) : (
@@ -149,13 +150,21 @@ function ActivityList({ subagent, running }: { subagent: SubagentInfo; running: 
 
 function TaskText({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
+  const taskId = useId();
   const long = text.length > TASK_PREVIEW_CHARS;
   const shown = expanded || !long ? text : `${text.slice(0, TASK_PREVIEW_CHARS).trimEnd()}…`;
   return (
     <>
-      <div data-testid="subagent-task" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{shown}</div>
+      <div id={taskId} data-testid="subagent-task" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{shown}</div>
       {long && (
-        <button type="button" className="t-hover-fg" style={{ ...textButtonStyle, marginTop: 3 }} onClick={() => setExpanded((value) => !value)}>
+        <button
+          type="button"
+          className="t-hover-fg t-rest-ink"
+          aria-expanded={expanded}
+          aria-controls={taskId}
+          style={{ ...textButtonStyle, marginTop: 3 }}
+          onClick={() => setExpanded((value) => !value)}
+        >
           {expanded ? 'Show less' : 'Show full task'}
         </button>
       )}

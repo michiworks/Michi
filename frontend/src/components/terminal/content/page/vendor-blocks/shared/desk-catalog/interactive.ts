@@ -1,4 +1,5 @@
 import {z} from 'zod';
+import {FORM_FIELD_LIMITS,FORM_FIELD_RULES,FORM_FIELD_TYPES,formFieldRuleBreaks,type FormField} from 'michi-shared';
 import {L} from '../i18n.ts';
 import {COLUMN_TYPES,FILTER_OPS,OPTION_COLORS,VIEW_TYPES,convertValue,type CellValue,type Column,type ColumnOption,type DatabaseBlock,type View} from '../desk-db.ts';
 import {ID,LIST,SCAN,SHORT,arr,block,blockId,cell,clip,codeFits,entry,height,idOf,isObj,list,maybe,num,opt,or,scalar,stext,str,text,unique,type PageBlockMeta} from './fields.ts';
@@ -62,10 +63,21 @@ function buildDatabase(cols:z.output<typeof dbColumn>[],rawRows:unknown[],rawVie
 const database:z.ZodType<DatabaseBlock&PageBlockMeta,z.ZodTypeDef,unknown>=block('database',{title:opt(str),columns:list(dbColumn,DB_COLS),rows:or(arr,[] as unknown[]),views:or(arr,[] as unknown[])})
   .transform(({columns,rows,views,...b})=>({...b,...buildDatabase(columns,rows,views)}));
 
-const FIELD_TYPES=['text','number','select','date','checkbox'] as const;
-/** A select without options has nothing to pick, so it asks for words instead; options mean nothing to any other field. */
-const field=z.object({key:stext.transform(s=>clip(s.trim(),ID)),label:stext,type:or(z.enum(FIELD_TYPES),'text' as const),options:opt(list(stext,LIST,1,true)),required:opt(z.boolean())})
-  .transform(({options,...f})=>f.type!=='select'?f:options?{...f,options}:{...f,type:'text' as const});
+/** A select or multiselect without options has nothing to pick, so it asks for words instead; options mean nothing to any other field.
+ * A slider without a range it can slide over is a number box; min, max, step and unit mean nothing to the other types, and a default
+ * that does not fit its field is left out. The write schema refuses all of these (shared/src/formField.ts); this reads what is stored. */
+const field=z.object({key:stext.transform(s=>clip(s.trim(),ID)),label:stext,type:or(z.enum(FORM_FIELD_TYPES),'text' as const),options:opt(list(stext,LIST,1,true)),
+  required:opt(z.boolean()),min:opt(num),max:opt(num),step:opt(num.positive()),unit:opt(stext.transform(s=>clip(s,FORM_FIELD_LIMITS.unit))),
+  default:opt(z.union([str,num,z.boolean(),z.array(z.string())])),help:opt(stext.transform(s=>clip(s,FORM_FIELD_LIMITS.help)))})
+  .transform(({options,min,max,step,unit,default:value,...f}):FormField=>{
+    const choice=f.type==='select'||f.type==='multiselect',range=min!==undefined&&max!==undefined?max>min:true;
+    const type=choice&&!options?'text' as const:f.type==='slider'&&!(min!==undefined&&max!==undefined&&range)?'number' as const:f.type;
+    const numeric=type==='number'||type==='slider',out:FormField={...f,type};
+    if(options&&(type==='select'||type==='multiselect'))out.options=options;
+    if(numeric){if(range){if(min!==undefined)out.min=min;if(max!==undefined)out.max=max}if(step!==undefined)out.step=step;if(unit!==undefined)out.unit=unit}
+    if(value!==undefined&&!formFieldRuleBreaks({...out,default:value}).some(b=>b.rule===FORM_FIELD_RULES.default))out.default=value;
+    return out;
+  });
 /** A component name as the library stores it (spec 4.3). */
 const COMPONENT=/^[a-z][a-z0-9-]{1,40}$/;
 const jsonSize=(v:unknown)=>{try{return JSON.stringify(v).length}catch{return Infinity}};
@@ -74,7 +86,7 @@ export const INTERACTIVE=[
   entry({type:'actions',category:'interactive',get label(){return L('按钮组','Buttons')},describe:'1-6 buttons; a click sends its prompt to the Desk assistant.',
     schema:block('actions',{buttons:list(z.object({label:stext,prompt:text}),BUTTONS)}),example:{type:'actions',buttons:[{label:'Draft reply',prompt:'Draft a reply to the vendor'}]}}),
   // Values are sent under their keys, so a second field with a key already taken would overwrite the first.
-  entry({type:'form',category:'interactive',get label(){return L('表单','Form')},describe:'Fields (text, number, select with options, date, checkbox; required?) sent with prompt on submit.',
+  entry({type:'form',category:'interactive',get label(){return L('表单','Form')},describe:'Fields (text, textarea, number, slider, select or multiselect with options, date, time, checkbox; required?, default?, help?; min, max, step and unit for number and slider) sent with prompt on submit.',
     schema:block('form',{title:text,fields:list(field,FIELDS).transform(a=>{const seen=new Set<string>();return a.filter(f=>!seen.has(f.key)&&!!seen.add(f.key))}),submitLabel:opt(stext),prompt:text}),
     example:{type:'form',title:'Trip',fields:[{key:'city',label:'City',type:'text',required:true}],prompt:'Plan a trip with these answers'}}),
   entry({type:'poll',category:'interactive',get label(){return L('投票','Poll')},describe:'A question with 2+ options, multi for several; the vote goes to the assistant.',

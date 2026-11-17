@@ -2,6 +2,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createKeyedListenerSets } from 'michi-shared';
 import { spawnAgentProcess, killProcessTree } from '../../core/processTree';
 import { withDeadline } from '../../core/runtimeLifecycle';
+import { utf8LineReader } from '../../core/lineReader';
 import { findCodexBinary, invalidateCodexBinaryCache, warnIfCodexVersionBelowMinimum } from './codexBinary';
 import type { CodexIncoming, CodexRpcId } from './codexProtocol';
 
@@ -87,7 +88,6 @@ export class CodexAppServerClient {
   private readonly serverRequests = new Map<CodexRpcId, { threadId?: string; cancel: () => void }>();
   private readonly exitHandlers = new Set<() => void>();
   private readonly startHandlers = new Set<() => Promise<void>>();
-  private lineBuf = '';
   private readonly rpcTimeoutMs: number;
   private readonly initTimeoutMs: number;
   private readonly spawnFn: () => ChildProcessWithoutNullStreams;
@@ -130,9 +130,8 @@ export class CodexAppServerClient {
   private async start(timeoutMs: number): Promise<void> {
     const child = this.spawnFn();
     this.child = child;
-    this.lineBuf = '';
 
-    child.stdout.on('data', (chunk: Buffer) => { if (this.child === child) this.onStdout(chunk.toString('utf8')); });
+    child.stdout.on('data', utf8LineReader((line) => { if (this.child === child) this.onStdoutLine(line); }));
     child.stderr.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8').trim();
       if (text) console.warn('[codex app-server stderr]', text.slice(0, 500));
@@ -186,21 +185,16 @@ export class CodexAppServerClient {
     }
   }
 
-  private onStdout(text: string): void {
-    this.lineBuf += text;
-    let nl: number;
-    while ((nl = this.lineBuf.indexOf('\n')) >= 0) {
-      const line = this.lineBuf.slice(0, nl).trim();
-      this.lineBuf = this.lineBuf.slice(nl + 1);
-      if (!line) continue;
-      let obj: CodexIncoming;
-      try {
-        obj = JSON.parse(line) as CodexIncoming;
-      } catch {
-        continue; // tolerate non-JSON noise (e.g. banner lines)
-      }
-      this.dispatch(obj);
+  private onStdoutLine(raw: string): void {
+    const line = raw.trim();
+    if (!line) return;
+    let obj: CodexIncoming;
+    try {
+      obj = JSON.parse(line) as CodexIncoming;
+    } catch {
+      return; // tolerate non-JSON noise (e.g. banner lines)
     }
+    this.dispatch(obj);
   }
 
   private dispatch(obj: CodexIncoming): void {

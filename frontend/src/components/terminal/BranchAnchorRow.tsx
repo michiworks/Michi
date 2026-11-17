@@ -1,11 +1,10 @@
 import React from 'react';
 import { motion } from 'motion/react';
-import { Circle, CircleAlert, LoaderCircle } from 'lucide-react';
 import { relativeTime } from '../../lib/relativeTime';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { EASE } from '../../motion/tokens';
 import { LabelSwap } from './agentBlockMotion';
-import { BranchIcon } from './icons';
+import { BranchIcon, CircleIcon, ErrorIcon, SpinnerIcon, type IconSize } from './icons';
 
 /** A branch made just now grows into its list (180ms). */
 export const ANCHOR_GROW_FROM = { height: 0, opacity: 0, overflow: 'hidden' } as const;
@@ -33,9 +32,9 @@ export interface BranchAnchorRowProps {
 }
 
 const branchStatuses = {
-  idle: { label: 'Idle', Icon: Circle },
-  streaming: { label: 'Running', Icon: LoaderCircle },
-  error: { label: 'Needs attention', Icon: CircleAlert },
+  idle: { label: 'Idle', Icon: CircleIcon },
+  streaming: { label: 'Running', Icon: SpinnerIcon },
+  error: { label: 'Needs attention', Icon: ErrorIcon },
 } as const;
 
 /**
@@ -43,12 +42,12 @@ const branchStatuses = {
  * A change of state cross-fades the word in place (the first one renders
  * settled); the outgoing one is aria-hidden.
  */
-export function BranchStatusLabel({ status, size = 13 }: { status: ChatNodeState['status']; size?: number }): React.JSX.Element {
+export function BranchStatusLabel({ status, size }: { status: ChatNodeState['status']; size?: IconSize }): React.JSX.Element {
   const { label, Icon } = branchStatuses[status];
   return (
     <LabelSwap k={status} style={{ justifyItems: 'end' }}>
       <span className={`t-branch-anchor-status is-${status}`}>
-        <Icon size={size} aria-hidden />{label}
+        <Icon size={size} />{label}
       </span>
     </LabelSwap>
   );
@@ -76,7 +75,7 @@ export const BranchAnchorRow = React.memo(function BranchAnchorRow({
       aria-describedby={metaId}
       onClick={onOpen}
     >
-      <span className="t-branch-anchor-glyph" aria-hidden><BranchIcon size={18} /></span>
+      <span className="t-branch-anchor-glyph" aria-hidden><BranchIcon size="lg" /></span>
       <span className="t-branch-anchor-name">{title}</span>
       <span className="t-branch-anchor-meta" id={metaId}>
         <BranchStatusLabel status={status} />

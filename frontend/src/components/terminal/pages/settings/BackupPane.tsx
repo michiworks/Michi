@@ -1,6 +1,9 @@
 import { useRef, useState } from 'react';
 import { Button } from '../../../ui/controls';
 import { downloadBackup, exportBackup, MAX_BACKUP_BYTES, parseBackup, restoreBackup, type PortableBackup } from '../../../../services/api/backup';
+import { useFocusAfterChange } from './useFocusAfterChange';
+
+const RESTORING = 'Restoring backup…';
 
 export function BackupPane() {
   const input = useRef<HTMLInputElement>(null);
@@ -9,6 +12,12 @@ export function BackupPane() {
   const [pending, setPending] = useState<{ name: string; backup: PortableBackup } | null>(null);
   const [notice, setNotice] = useState<{ error?: boolean; text: string } | null>(null);
   const [restored, setRestored] = useState(false);
+  const chooseRef = useRef<HTMLButtonElement>(null);
+  const restoreRef = useRef<HTMLButtonElement>(null);
+  const reloadRef = useRef<HTMLButtonElement>(null);
+  // The preview takes over from Choose backup…; Cancel returns to it, a restore goes on to Reload Michi.
+  const previewing = !!pending && !restored;
+  useFocusAfterChange(previewing, (now) => now ? restoreRef.current : restored ? reloadRef.current : chooseRef.current);
 
   async function run(label: string, action: () => Promise<void>) {
     if (locked.current) return;
@@ -32,7 +41,7 @@ export function BackupPane() {
         downloadBackup(await exportBackup());
         setNotice({ text: 'Backup download started.' });
       })}>Export backup</Button>
-      <Button disabled={!!busy || restored} onClick={() => input.current?.click()}>Choose backup…</Button>
+      <Button ref={chooseRef} disabled={!!busy || restored} onClick={() => input.current?.click()}>Choose backup…</Button>
       <input ref={input} type="file" accept=".json,application/json" aria-label="Backup file" hidden
         onChange={event => {
           const file = event.target.files?.[0];
@@ -53,18 +62,18 @@ export function BackupPane() {
           ? ` · Exported ${new Date(pending.backup.exportedAt).toLocaleString()}` : ''}</p>
       <p>Restore creates new copies. Existing workspaces are kept. Importing the same backup again creates duplicates.</p>
       <div className="settings-backup__actions">
-        <Button variant="primary" disabled={!!busy} onClick={() => void run('Restoring backup…', async () => {
+        <Button ref={restoreRef} variant="primary" busy={busy === RESTORING} aria-disabled={!!busy || undefined} onClick={() => void run(RESTORING, async () => {
           const result = await restoreBackup(pending.backup);
           setRestored(true);
           setPending(null);
           setNotice({ text: `Restored ${result.workspaceCount} workspace(s). Reload when you are ready to open them.` });
         })}>Restore backup</Button>
-        <Button variant="ghost" disabled={!!busy} onClick={() => setPending(null)}>Cancel</Button>
+        <Button variant="ghost" aria-disabled={!!busy || undefined} onClick={() => { if (!busy) setPending(null); }}>Cancel</Button>
       </div>
     </div>}
     {busy && <p role="status">{busy}</p>}
     {notice && <p role={notice.error ? 'alert' : 'status'}>{notice.text}</p>}
-    {restored && <Button onClick={() => window.location.reload()}>Reload Michi</Button>}
+    {restored && <Button ref={reloadRef} onClick={() => window.location.reload()}>Reload Michi</Button>}
     </div>
   </section>;
 }

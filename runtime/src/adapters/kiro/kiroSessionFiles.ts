@@ -77,7 +77,10 @@ export function trackKiroStoreProcess(configDir: string, kiroCli: KiroStoreProce
 /**
  * The kiro-cli processes started here on `configDir` that may still run,
  * stopping ones included: a check-in discard removes no session files under
- * a running kiro-cli (Kiro keeps no lock that would say so).
+ * a running kiro-cli. Kiro's own lease cannot say so: kiro-cli 3.2.0 and later
+ * keep `session-leases/<id>.lease` only for the session a process drives,
+ * while a discard also rewrites the bucket's shared index, and earlier
+ * versions keep none.
  */
 export function runningKiroStoreProcesses<T extends KiroStoreProcess>(configDir: string): T[] {
   const key = path.resolve(configDir);
@@ -107,8 +110,8 @@ export interface KiroSessionFilesDiscard {
  * Removes one released session's record from Kiro's store the way Kiro's
  * own session/delete does: its session directory goes, its entry leaves the
  * bucket's index cache, and the index log gets a remove op. Only for a store
- * no kiro-cli process is using (the caller makes sure none runs; Kiro keeps
- * no lock that would say so). Answers:
+ * no kiro-cli process is using (the caller makes sure none runs, with
+ * runningKiroStoreProcesses). Answers:
  * - `unsupported`: an id that is not `sess_<uuid>`; a session this store
  *   has no trace of (it lives elsewhere, e.g. `~/.kiro`); or one whose
  *   `session.json` or cached entry is unreadable or names a directory the

@@ -7,6 +7,7 @@ import {
 import { LOCAL_AGENT_OWNER_ID, requestAgentOwnerOrNull } from '../services/agentOwner';
 import { attentionFeed as defaultFeed, type AttentionFeed } from '../services/attention/attentionFeed';
 import { beginSse } from '../services/httpSse';
+import { readPrefs } from '../services/prefsConfig';
 import { localOnlyGuard } from './middleware/localOnly';
 import { requireRequestAccess } from './middleware/sessionAccess';
 
@@ -37,6 +38,15 @@ const KEEPALIVE_MS = 15_000;
  */
 const desktopLocalOnly = localOnlyGuard('The desktop notifier feed is only for the Michi app on this machine');
 
+/** Sounds is off (the `notificationSounds` pref in config.json): the desktop app's own banner keeps quiet. A config that cannot be read keeps the sound. */
+function desktopBannerSilent(): boolean {
+  try {
+    return readPrefs()?.notificationSounds === false;
+  } catch {
+    return false;
+  }
+}
+
 /** No desktop notifier in the cloud: answered as if the routes did not exist. */
 const desktopOnly: RequestHandler = (_req, res, next) => {
   if (process.env.MICHI_CLOUD === '1') {
@@ -64,7 +74,7 @@ function attentionOwner(req: Request): string | null {
  * the persistence routes.
  *
  * GET  /api/attention/desktop/stream                      (ATTENTION_DESKTOP_STREAM_PATH)
- * POST /api/attention/desktop/notifications/:id/claim     → AttentionClaimResultV1
+ * POST /api/attention/desktop/notifications/:id/claim     → AttentionClaimResultV1 & { silent }
  *
  * Electron main's one subscription (electron/attentionNotifications.ts): the
  * local owner's attention_* frames, a snapshot first, notifications only as
@@ -72,7 +82,9 @@ function attentionOwner(req: Request): string | null {
  * resolution; and `companion_changed` for the tray. While it is connected no
  * record wakes the app. Electron main claims a record for the desktop
  * notifier before it shows its banner, so a window that opens later does not
- * raise it again. Loopback and local control only; not in the cloud.
+ * raise it again; the claim's `silent` says the banner makes no sound
+ * (Settings › Notifications › Sounds off), read when it is claimed, as main
+ * may have no window to ask. Loopback and local control only; not in the cloud.
  */
 export function setupAttentionRoutes(service: AttentionRouteService, options: AttentionRouteOptions = {}): express.Router {
   const router = express.Router();
@@ -107,7 +119,7 @@ export function setupAttentionRoutes(service: AttentionRouteService, options: At
       res.status(404).json({ error: 'not_found' });
       return;
     }
-    res.status(200).json(result);
+    res.status(200).json({ ...result, silent: desktopBannerSilent() });
   });
 
   router.post('/attention/notifications/:id/claim', requireRequestAccess, (req, res) => {

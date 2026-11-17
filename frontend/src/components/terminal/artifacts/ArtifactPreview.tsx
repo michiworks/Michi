@@ -30,6 +30,10 @@ export function ArtifactPreview({ workspaceId, artifact, label, knownMissing, on
   const [view, setView] = useState<View>(() => (knownMissing ? { kind: 'missing' } : { kind: 'loading' }));
   const [attempt, setAttempt] = useState(0);
   const loads = useRef(0);
+  // The page on screen. An agent's rewrite keeps it until the new text is in, which then
+  // replaces it in one frame (TR-30); the same text leaves the frame, and its load count, as it is.
+  const shown = useRef<string | null>(null);
+  shown.current = view.kind === 'ready' ? view.srcdoc : null;
   const { filePath, updatedAt } = artifact;
 
   useEffect(() => {
@@ -38,12 +42,14 @@ export function ArtifactPreview({ workspaceId, artifact, label, knownMissing, on
       return;
     }
     const controller = new AbortController();
-    setView({ kind: 'loading' });
+    if (shown.current === null) setView({ kind: 'loading' });
     fetchArtifactContent(workspaceId, filePath, false, controller.signal).then(
       (file) => {
         if (controller.signal.aborted) return;
+        const srcdoc = artifactPreviewSrcdoc(file.content);
+        if (srcdoc === shown.current) return;
         loads.current = 0;
-        setView({ kind: 'ready', srcdoc: artifactPreviewSrcdoc(file.content) });
+        setView({ kind: 'ready', srcdoc });
       },
       (error: unknown) => {
         if (controller.signal.aborted) return;

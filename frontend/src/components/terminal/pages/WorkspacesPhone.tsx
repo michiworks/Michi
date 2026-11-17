@@ -2,21 +2,21 @@ import React from 'react';
 import { flushSync } from 'react-dom';
 import { plural } from 'michi-shared';
 import {
-  Archive,
-  ChevronDown,
-  ChevronRight,
-  Ellipsis,
-  Pin,
-  Plus,
-  Search,
-  Server,
-  Trash2,
-  X,
-} from 'lucide-react';
+  ArchiveIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CloseIcon,
+  MoreIcon,
+  PinIcon,
+  PlusIcon,
+  SearchIcon,
+  ServerIcon,
+  TrashIcon,
+} from '../icons';
 import type { BackendConnectionSummary } from '../../../config/backendConnections';
 import type { PageId } from '../../../state/commands';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
-import { useChatNode, useNodesSelector } from '../../../state/chatStore';
+import { useNodesSelector, useStructuralSelector } from '../../../state/chatStore';
 import { isVisibleConversationNode } from '../../../state/conversationVisibility';
 import { useWaitingWorkflowNodeIds } from '../../../state/workflowDomain';
 import { nodeAwaiting, nodeWaitingFor, progressStatusLine, threadTitle } from '../../../state/spaceConversations/liveStatus';
@@ -99,32 +99,41 @@ function rowState(card: WorkspaceCardData, live: WorkspaceLive): RowState {
 
 // ── Rows ──────────────────────────────────────────────────────────────────
 
+/** Its words come from structural fields (the request, the title), so a streaming reply leaves the row alone. */
 function WaitingLine({ nodeId }: { nodeId: string }) {
-  const node = useChatNode(nodeId);
-  if (!node) return null;
-  const detail = nodeWaitingFor(node) ?? threadTitle(node);
+  const label = useStructuralSelector(React.useCallback((nodes: Record<string, ChatNodeState>) => {
+    const node = nodes[nodeId];
+    return node && (nodeAwaiting(node) === 'question' ? 'Needs your answer' : 'Needs approval');
+  }, [nodeId]));
+  const detail = useStructuralSelector(React.useCallback((nodes: Record<string, ChatNodeState>) => {
+    const node = nodes[nodeId];
+    return node && (nodeWaitingFor(node) ?? threadTitle(node));
+  }, [nodeId]));
+  if (!label) return null;
   return (
     <>
       <i className="ws-phone__mark" data-tone="waiting" aria-hidden="true" />
-      <span className="ws-phone__label" data-tone="waiting">
-        {nodeAwaiting(node) === 'question' ? 'Needs your answer' : 'Needs approval'}
-      </span>
+      <span className="ws-phone__label" data-tone="waiting">{label}</span>
       <span className="ws-phone__sep" aria-hidden="true">·</span>
       <span className="ws-phone__detail">{detail}</span>
     </>
   );
 }
 
-/** Subscribes to the one running conversation, so its line follows each tool call. */
+/** Follows the one running conversation's line through each tool call, and renders only when that line or the title changes. */
 function RunningLine({ nodeId }: { nodeId: string }) {
-  const node = useChatNode(nodeId);
-  if (!node) return null;
+  const line = useNodesSelector(React.useCallback((nodes: Record<string, ChatNodeState>) => {
+    const node = nodes[nodeId];
+    return node && progressStatusLine(node);
+  }, [nodeId]), Object.is);
+  const title = useStructuralSelector(React.useCallback((nodes: Record<string, ChatNodeState>) => threadTitle(nodes[nodeId]), [nodeId]));
+  if (line === undefined) return null;
   return (
     <>
       <Dot color="var(--term-run)" size={7} pulse />
-      <span className="ws-phone__label" data-tone="running">{progressStatusLine(node)}</span>
+      <span className="ws-phone__label" data-tone="running">{line}</span>
       <span className="ws-phone__sep" aria-hidden="true">·</span>
-      <span className="ws-phone__detail">{threadTitle(node)}</span>
+      <span className="ws-phone__detail">{title}</span>
     </>
   );
 }
@@ -178,7 +187,7 @@ function MetaLine({ card, query, machine }: { card: WorkspaceCardData; query: st
         <>
           <span className="ws-phone__sep" aria-hidden="true">·</span>
           <span className="ws-phone__machine">
-            <Server size={12} aria-hidden="true" />
+            <ServerIcon size="sm" aria-hidden="true" />
             <Highlight text={machine} q={query} />
           </span>
         </>
@@ -201,6 +210,7 @@ function WorkspaceRow({
   query,
   machine,
   archived = false,
+  menuOpen,
   onOpen,
   onMenu,
 }: {
@@ -209,6 +219,7 @@ function WorkspaceRow({
   query: string;
   machine: string | null;
   archived?: boolean;
+  menuOpen: boolean;
   onOpen: (event: React.MouseEvent) => void;
   onMenu: (row: HTMLElement, point: { x: number; y: number }) => void;
 }) {
@@ -234,7 +245,7 @@ function WorkspaceRow({
         <span className="ws-phone__text">
           <span className="ws-phone__line1">
             <span className="ws-phone__name"><Highlight text={card.name} q={query} /></span>
-            {card.pinnedAt !== null && <span className="ws-phone__pin" role="img" aria-label="Pinned"><Pin size={13} aria-hidden="true" /></span>}
+            {card.pinnedAt !== null && <span className="ws-phone__pin" role="img" aria-label="Pinned"><PinIcon aria-hidden="true" /></span>}
             <span className="ws-phone__age">{formatRelative(card.lastTs)}</span>
           </span>
           <span className="ws-phone__line2">
@@ -247,13 +258,15 @@ function WorkspaceRow({
         type="button"
         className="ws-phone__more"
         aria-label="More actions"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
           const row = event.currentTarget.closest('li');
           if (row) onMenu(row, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
         }}
       >
-        <Ellipsis size={20} aria-hidden="true" />
+        <MoreIcon size={20} aria-hidden="true" />
       </button>
     </li>
   );
@@ -396,6 +409,7 @@ export default function PhoneWorkspaces({
       query={trimmed}
       machine={machineOf(card)}
       archived={isArchived}
+      menuOpen={menu?.id === card.id}
       // An archived workspace opens to what can be done with it.
       onOpen={isArchived
         ? (event) => {
@@ -420,7 +434,7 @@ export default function PhoneWorkspaces({
           Workspaces <span className="ws-phone__count">{cards.length}</span>
         </h1>
         <Button className="ws-phone__new" onClick={onNew} aria-label="New workspace">
-          <Plus size={16} aria-hidden="true" />
+          <PlusIcon size="lg" aria-hidden="true" />
           New
         </Button>
       </header>
@@ -455,7 +469,7 @@ export default function PhoneWorkspaces({
       )}
 
       <label className="ws-phone__search">
-        <Search size={18} aria-hidden="true" />
+        <SearchIcon size="lg" aria-hidden="true" />
         <input
           ref={searchRef}
           type="search"
@@ -472,7 +486,7 @@ export default function PhoneWorkspaces({
         />
         {query && (
           <button type="button" aria-label="Clear" onClick={() => { onQueryChange(''); searchRef.current?.focus(); }}>
-            <X size={18} aria-hidden="true" />
+            <CloseIcon size="lg" aria-hidden="true" />
           </button>
         )}
       </label>
@@ -519,11 +533,11 @@ export default function PhoneWorkspaces({
                   aria-expanded={showArchived}
                   onClick={() => setShowArchived((open) => !open)}
                 >
-                  <Archive size={16} aria-hidden="true" />
+                  <ArchiveIcon size="lg" aria-hidden="true" />
                   Archived workspaces
                   <span className="ws-phone__link-end">
                     {trimmed ? `${archived.length}/${archivedCards.length}` : archivedCards.length}
-                    <ChevronDown size={15} aria-hidden="true" data-open={showArchived || undefined} className="ws-phone__chevron" />
+                    <ChevronDownIcon aria-hidden="true" data-open={showArchived || undefined} className="ws-phone__chevron" />
                   </span>
                 </button>
                 {showArchived && archived.length > 0 && (
@@ -532,9 +546,9 @@ export default function PhoneWorkspaces({
               </>
             )}
             <button type="button" className="ws-phone__link" onClick={() => onNav('trash')}>
-              <Trash2 size={16} aria-hidden="true" />
+              <TrashIcon size="lg" aria-hidden="true" />
               Trash
-              <span className="ws-phone__link-end"><ChevronRight size={15} aria-hidden="true" /></span>
+              <span className="ws-phone__link-end"><ChevronRightIcon aria-hidden="true" /></span>
             </button>
           </nav>
         </>
@@ -585,7 +599,7 @@ export default function PhoneWorkspaces({
         {sheet && sheetCard && sheet.view === 'delete' && (
           <>
             <div className="ui-sheet__section">
-              <span className="ws-phone__danger-icon" aria-hidden="true"><Trash2 size={22} /></span>
+              <span className="ws-phone__danger-icon" aria-hidden="true"><TrashIcon size={22} /></span>
               <h2 className="ui-sheet__title" id={SHEET_TITLE_ID}>Delete “{sheetCard.name}”?</h2>
               <p className="ui-sheet__body">{deleteExplanation(sheetCard)}</p>
             </div>

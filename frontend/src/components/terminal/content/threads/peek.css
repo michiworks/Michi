@@ -261,7 +261,7 @@
 /* Its app can't resume this conversation: still focusable, its title says why. */
 .michi-peek__ghost[aria-disabled='true'] {
   color: var(--term-muted);
-  cursor: default;
+  cursor: not-allowed;
 }
 .michi-peek__ghost[aria-disabled='true']:hover {
   background: transparent;

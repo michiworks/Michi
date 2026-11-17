@@ -8,6 +8,7 @@ export { createMcpHost } from './host';
 export { createMcpSlotProvider } from './slotProvider';
 export type { McpSlotProviderOptions } from './slotProvider';
 export type {
+  AskUserAnswers,
   AskUserOption,
   AskUserQuestion,
   CreateSlotOptions,

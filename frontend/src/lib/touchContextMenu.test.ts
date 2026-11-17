@@ -87,6 +87,27 @@ describe('touch long press → context menu', () => {
     expect(menus).toHaveLength(0);
   });
 
+  it('leaves a control with a press of its own to it: it shows the press, and the row gets no fill and no menu', () => {
+    const caret = document.createElement('span');
+    caret.setAttribute('data-own-press', '');
+    row.append(caret);
+    fireEvent.pointerDown(caret, touch);
+    expect(caret.hasAttribute('data-press')).toBe(true);
+    vi.advanceTimersByTime(LONG_PRESS_MS * 2);
+    expect(row.hasAttribute('data-press')).toBe(false);
+    // Not even the browser's own long press opens it.
+    const browsers = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    caret.dispatchEvent(browsers);
+    expect(menus).toHaveLength(0);
+    expect(browsers.defaultPrevented).toBe(true);
+
+    fireEvent.pointerUp(caret, touch);
+    expect(caret.hasAttribute('data-press')).toBe(false);
+    // Once the finger lifts, a right-click there opens the row's menu as before.
+    caret.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+    expect(menus).toHaveLength(1);
+  });
+
   it('drops the click that ends a long press, wherever it lands, and only that one', () => {
     const clicks = vi.fn();
     document.body.addEventListener('click', clicks);

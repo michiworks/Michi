@@ -27,8 +27,10 @@ test('the Pages Home says how many things need you and opens Today; it lists no 
   const companion = createCompanionMock({
     conversation: { workspaceId: 'ws-assistant', nodeId: 'companion-node', assistant },
     items: [
-      companionItem('cmi-cr', 'CR-123456 needs attention'),
-      companionItem('cmi-pipe', 'MyService pipeline is blocked', { source: 'pipeline', subtype: 'pipeline_blocked', itemKey: 'pipeline:MyService' }),
+      companionItem('cmi-cr', 'CR-123456 needs attention', { facts: { cr: 'CR-123456', threadsAwaitingYou: 2 } }),
+      companionItem('cmi-pipe', 'Pipeline MyService is blocked', {
+        source: 'pipeline', subtype: 'pipeline_blocked', itemKey: 'pipeline:MyService', facts: { pipeline: 'MyService', failing: true, failingProd: true },
+      }),
     ],
   });
   await page.addInitScript(() => {
@@ -54,6 +56,6 @@ test('the Pages Home says how many things need you and opens Today; it lists no 
   await line.getByRole('button', { name: 'Open Today' }).click();
   const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
   await expect(panel.getByRole('tab', { name: /Today/ })).toHaveAttribute('aria-selected', 'true');
-  await expect(panel.getByText('CR-123456 needs attention')).toBeVisible();
+  await expect(panel.getByText('CR-123456 has 2 comments waiting for your reply')).toBeVisible();
   expect(errors).toEqual([]);
 });

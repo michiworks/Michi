@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { closeDb, initDb } from '../src/services/db';
+import { closeDb, getDb, initDb } from '../src/services/db';
 import { saveMessage, saveNode, saveEdge, saveTree, saveWorkspace } from '../src/services/dbRepository';
 import {
   BranchBoundaryError,
@@ -78,5 +78,28 @@ describe('resolve a branch boundary from durable graph + messages', () => {
     const rendered = renderBranchContext(context);
     assert.match(rendered ?? '', /Inherited branch transcript/);
     assert.match(rendered ?? '', /Note: At the branch point/);
+  });
+
+  test('a long parent cut keeps the summaries of its cut turns, none from after the branch point', () => {
+    // 60 more turns of about 2k characters each, then a branch at turn 49.
+    for (let t = 0; t < 60; t++) {
+      for (const [k, role] of [[0, 'user'], [1, 'assistant']] as const) {
+        const at = 1_000 + 100 * t + 10 * k;
+        saveMessage({ id: `t${t}-${role}`, node_id: 'root', role, content: `${role === 'user' ? 'Q' : 'A'}${t} `.padEnd(2_000, '.'),
+          seq: 10 + 2 * t + k, created_at: at });
+      }
+    }
+    const overviews = Array.from({ length: 60 }, (_, t) => ({ at: 1_000 + 100 * t + 50, text: `Turn ${t} settled S${t}.` }));
+    getDb().prepare('UPDATE nodes SET branch_overview = ? WHERE id = ?').run(JSON.stringify(overviews), 'root');
+    branchEdge('t49-assistant');
+    const boundary = resolveBranchBoundary({ childNodeId: 'child' });
+    assert.ok(boundary);
+    const context = toBranchContext(boundary);
+    assert.equal(context.messages.at(-1)?.createdAt, 1_000 + 100 * 49 + 10, 'the times reach the runtime-facing context');
+    const rendered = renderBranchContext(context) ?? '';
+    assert.match(rendered, /Summaries the agent wrote at the end of each turn in the omitted part/);
+    assert.ok(rendered.includes('- Turn 20 settled S20.'), 'a cut turn');
+    for (const absent of ['S0.', 'S49.', 'S50.', 'S59.']) assert.equal(rendered.includes(absent), false, absent);
+    assert.match(rendered, /call read_node with nodeId "root", from "head", offset \d+/);
   });
 });

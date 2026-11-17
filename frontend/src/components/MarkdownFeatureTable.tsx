@@ -3,6 +3,7 @@ import { AnimatePresence } from 'motion/react';
 import { ModalShell } from './ui/ModalShell';
 import { copyText } from '../lib/clipboard';
 import { downloadText } from '../lib/download';
+import { leaveOverlaysEvent } from '../state/appEvents';
 
 function tableRows(table: HTMLTableElement): string[][] {
   return Array.from(table.rows).map((row) => (
@@ -56,6 +57,8 @@ interface TableLightboxProps {
 }
 
 function TableLightbox({ sourceTable, onClose, onCopy, onDownload }: TableLightboxProps) {
+  // A notification's click opens its target over the pane this sits on.
+  useEffect(() => leaveOverlaysEvent.subscribe(() => onClose()), [onClose]);
   // Escape is captured so TerminalShell's own Escape (clear selection / leave
   // the Digest page) does not also fire in the same keypress.
   return (

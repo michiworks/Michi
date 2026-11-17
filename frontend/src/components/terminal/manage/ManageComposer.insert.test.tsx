@@ -21,10 +21,10 @@ const storeState: Record<string, unknown> = {
   createThread, createChildChat, sendMessage, selectProject: vi.fn(), agentStatus: null, refreshAgentStatus: vi.fn(),
   availableModes: [], defaultModeId: null, projects: [],
 };
-vi.mock('../../../state/chatStore', () => ({
+vi.mock('../../../state/chatStore', async () => ({
+  // The @ menu reads the node store only when it opens; these tests open none.
+  ChatNodeStoreContext: (await import('react')).createContext(null),
   useChatStore: () => storeState,
-  useStructuralSelector: () => [],
-  shallowArrayEqual: Object.is,
   chatLabel: () => 'New thread',
 }));
 vi.mock('../../../services/api', () => ({
@@ -122,7 +122,7 @@ describe('ManageComposer insert', () => {
     await mount();
     type('帮我看看');
     act(() => { editorOf().commands.focus('end'); });
-    fireEvent.click(screen.getByTitle('Mention context or node'));
+    fireEvent.click(screen.getByRole('button', { name: 'Mention context or node' }));
     expect(draft().value).toBe('帮我看看 @');
   });
 

@@ -1,5 +1,5 @@
 import { extractToolUsePurpose } from "michi-shared";
-import { omitInlineImages, truncateToolPayload } from "michi-runtime/internal/contract/toolPayload";
+import { omitInlineImages, truncateToolOutput, truncateToolPayload } from "michi-runtime/internal/contract/toolPayload";
 import { contextFillPercentage } from "michi-runtime/internal/contract/usage";
 import type { NormalizedEvent } from "../../services/chatEvents";
 import type { SpawnedBranch } from "../toolBridge";
@@ -180,7 +180,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                 status: isError ? "failed" : "completed",
                 detail: isError ? extractErrorText(result) : undefined,
                 // The agent loop keeps the original result for the model; the chip's copy drops its images.
-                output: truncateToolPayload(omitInlineImages(result)),
+                output: truncateToolOutput(omitInlineImages(result)),
                 ...toolIdentity(name),
             };
             return;
@@ -236,7 +236,7 @@ export function* mapAgentEvent(event: any, ctx: MapperContext): Iterable<Normali
                 title: event.toolName ?? "",
                 status: "in_progress",
                 kindType: "execute",
-                output: truncateToolPayload(omitInlineImages(event.args ?? event.partialResult ?? event.result)),
+                output: truncateToolOutput(omitInlineImages(event.args ?? event.partialResult ?? event.result)),
                 ...toolIdentity(event.toolName),
             };
             return;

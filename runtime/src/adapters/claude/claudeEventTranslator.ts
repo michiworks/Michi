@@ -1,6 +1,6 @@
 import { extractToolUsePurpose, type SubagentInfo } from 'michi-shared';
 import { NormalizedEvent } from '../../contract/events';
-import { omitInlineImages, truncateToolPayload } from '../../contract/toolPayload';
+import { omitInlineImages, truncateToolOutput, truncateToolPayload } from '../../contract/toolPayload';
 import { contextFillPercentage } from '../../contract/usage';
 import { ClaudeEnvelope } from './claudeEnvelopeParser';
 import { getClaudeModelEntry } from './claudeModelCatalog';
@@ -573,7 +573,7 @@ export function createTranslator(emit: (ev: NormalizedEvent) => void, options: T
             status: b['is_error'] ? 'failed' : 'completed',
             kindType: 'tool',
             // The model already has this result from the CLI; only the chip's copy drops its images.
-            output: truncateToolPayload(omitInlineImages(resultContent)),
+            output: truncateToolOutput(omitInlineImages(resultContent)),
           });
 
           // Parent-level tool_result for an Agent call = its hand-back.

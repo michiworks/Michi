@@ -9,11 +9,30 @@ import { projectConnectionId } from '../config/backendConnections';
 
 export interface MessageHistoryActions {
   loadOlderMessages(nodeId: string): Promise<void>;
+  loadOlderUntil(nodeId: string, has: (node: ChatNodeState) => boolean,
+    options: { maxPages: number; signal?: AbortSignal }): Promise<OlderHistoryRead>;
   ensureCompleteHistory(nodeIds: readonly string[]): Promise<Record<string, ChatNodeState>>;
+}
+
+/** Where loadOlderUntil stopped. */
+export interface OlderHistoryRead {
+  /** `has` holds of the node. */
+  found: boolean;
+  /** Older pages it read. */
+  pages: number;
+  /** Older history is still unread: maxPages stopped it. */
+  more: boolean;
 }
 
 // The server's page cap: completing a long history takes the fewest reads.
 const HISTORY_PAGE_LIMIT = 200;
+/**
+ * An older page the reader scrolls into: whole turns, up to 50 messages or
+ * this many bytes, finished calls without their bodies (DeferredToolCalls).
+ * Completing a history reads its pages whole; what its callers read of it
+ * is the text, which no deferred body holds.
+ */
+const OLDER_PAGE_MAX_BYTES = 256 * 1024;
 // Reads of a placeholder whose messages or cursors moved while it was read.
 const PLACEHOLDER_READ_ATTEMPTS = 2;
 
@@ -45,7 +64,8 @@ export function useMessageHistory(nodesRef: MutableRefObject<Record<string, Chat
     const connectionId = projectConnectionId(project);
     const generation = backendConnectionGeneration(connectionId);
     await read(JSON.stringify(['older', nodeId, before, generation]), async signal => {
-      const result = await fetchTreeMessagePage(project.id, treeId, project.backendConnectionId, signal, { nodeId, before });
+      const result = await fetchTreeMessagePage(project.id, treeId, project.backendConnectionId, signal,
+        { nodeId, before, maxBytes: OLDER_PAGE_MAX_BYTES, leanToolCalls: true });
       if (signal.aborted) return;
       if (generation !== backendConnectionGeneration(connectionId)) throw new DOMException('Remote connection changed', 'AbortError');
       const page = result.pages?.find(item => item.nodeId === nodeId);
@@ -55,6 +75,24 @@ export function useMessageHistory(nodesRef: MutableRefObject<Record<string, Chat
         before: page?.before ?? null, total: page?.total ?? messages.length, messages });
     });
   }, [dispatch, nodesRef, projectsRef, read]);
+
+  // Older pages one at a time, the reader's (lean, OLDER_PAGE_MAX_BYTES),
+  // until `has` holds of the node, its history runs out or maxPages were
+  // read: what a jump to an older message, or find, needs before it looks.
+  const loadOlderUntil = useCallback(async (nodeId: string, has: (node: ChatNodeState) => boolean,
+    options: { maxPages: number; signal?: AbortSignal }): Promise<OlderHistoryRead> => {
+    for (let pages = 0; ; pages++) {
+      const node = nodesRef.current[nodeId];
+      const before = node?.historyBefore;
+      if (!node || has(node) || !before || pages >= options.maxPages) {
+        return { found: !!node && has(node), pages, more: !!before };
+      }
+      if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      await loadOlderMessages(nodeId);
+      const after = nodesRef.current[nodeId]?.historyBefore;
+      if (after && after.id === before.id && after.seq === before.seq) throw new Error('Message history paging did not advance');
+    }
+  }, [loadOlderMessages, nodesRef]);
 
   const ensureCompleteHistory = useCallback(async (nodeIds: readonly string[]) => {
     // One node at a time, one bounded page at a time: completing a context
@@ -136,5 +174,5 @@ export function useMessageHistory(nodesRef: MutableRefObject<Record<string, Chat
     }
     return nodesRef.current;
   }, [dispatch, nodesRef, projectsRef, read, reconnectStreamingRef]);
-  return { loadOlderMessages, ensureCompleteHistory };
+  return { loadOlderMessages, loadOlderUntil, ensureCompleteHistory };
 }

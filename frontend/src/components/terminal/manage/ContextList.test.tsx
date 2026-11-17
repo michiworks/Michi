@@ -37,12 +37,6 @@ function renderRow(props: Partial<React.ComponentProps<typeof ContextList>> = {}
   );
 }
 
-function hoverFirstRow() {
-  const row = screen.getByText('a.md').closest('[data-hovered]') as HTMLElement;
-  fireEvent.mouseEnter(row);
-  return row;
-}
-
 describe('ContextList', () => {
   it('groups artifacts by type (Documents / Files / Images / Links)', () => {
     render(
@@ -96,22 +90,37 @@ describe('ContextList', () => {
       artifacts: [ctx('1', 'a.md', { pinnedAt: NOW })],
       onPin,
     });
-    hoverFirstRow();
     const favoriteButton = screen.getByRole('button', { name: 'Remove a.md from favorites' });
     expect(favoriteButton.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(favoriteButton);
     expect(onPin).toHaveBeenCalledWith('1');
   });
 
-  it('hover reveals the trash button; clicking it calls onDelete', () => {
+  it('deletes from the row\'s trash button, without selecting the row', () => {
     const onDelete = vi.fn();
+    const onSelect = vi.fn();
     renderRow({
       artifacts: [ctx('1', 'a.md')],
       onDelete,
+      onSelect,
     });
-    hoverFirstRow();
     fireEvent.click(screen.getByLabelText(/delete a\.md/i));
     expect(onDelete).toHaveBeenCalledWith('1');
+    expect(onSelect).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'a.md' }));
+    expect(onSelect).toHaveBeenCalledWith('1');
+  });
+
+  it('says a search found nothing, with Clear search, and what goes here when there is nothing', () => {
+    const onClearFilter = vi.fn();
+    const view = renderRow({ filter: 'zzz', onClearFilter });
+    expect(screen.getByRole('status').textContent).toBe('No matches for “zzz”');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(onClearFilter).toHaveBeenCalledOnce();
+    view.unmount();
+    renderRow({ artifacts: [] });
+    expect(screen.getByText('no artifacts yet — add one above')).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('filter hides non-matching artifacts', () => {

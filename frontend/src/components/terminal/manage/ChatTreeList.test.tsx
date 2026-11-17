@@ -42,19 +42,24 @@ const NODES: Record<string, ChatNodeState> = {
 };
 
 describe('ChatTreeList', () => {
-  it('filter hides non-matching tree', () => {
+  it('filter hides non-matching tree and says nothing matched, with a way to clear it', () => {
+    const onClearFilter = vi.fn();
     render(
       <ChatTreeList
         workspace={mkProject()}
         nodes={NODES}
         filter="zzz-no-match"
+        onClearFilter={onClearFilter}
         onOpen={() => {}}
       />,
     );
     expect(screen.queryByText('root chat')).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('No matches for “zzz-no-match”');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(onClearFilter).toHaveBeenCalledOnce();
   });
 
-  it('clicking a row calls onOpen with the chat id', () => {
+  it('opens the chat from its row button', () => {
     const onOpen = vi.fn();
     render(
       <ChatTreeList
@@ -64,9 +69,7 @@ describe('ChatTreeList', () => {
         onOpen={onOpen}
       />,
     );
-    const listitems = screen.getAllByRole('listitem');
-    const rootItem = listitems.find((el) => el.textContent?.includes('root chat'))!;
-    fireEvent.click(rootItem);
+    fireEvent.click(screen.getByRole('button', { name: 'root chat' }));
     expect(onOpen).toHaveBeenCalledWith('r');
   });
 
@@ -140,31 +143,56 @@ describe('ChatTreeList', () => {
     expect(screen.queryByText(/Rename/)).toBeNull();
   });
 
-  it('keeps ⋯ visible on a screen that cannot hover, where a tap opens the thread', () => {
-    const original = window.matchMedia;
-    window.matchMedia = ((query: string) => ({
-      ...original(query),
-      matches: query === '(hover: none)',
-    })) as typeof window.matchMedia;
-    try {
-      const onOpen = vi.fn();
-      render(
-        <ChatTreeList
-          workspace={mkProject()}
-          nodes={NODES}
-          filter=""
-          onOpen={onOpen}
-          menuActions={{
-            activateTree: vi.fn(), archiveTree: vi.fn(), unarchiveTree: vi.fn(), pinTree: vi.fn(),
-            unpinTree: vi.fn(), renameTree: vi.fn(), deleteTree: vi.fn(), exportTree: vi.fn(),
-          }}
-        />,
-      );
-      fireEvent.click(screen.getByLabelText(/more actions/i));
-      expect(screen.queryByText('Pin')).not.toBeNull();
-      expect(onOpen).not.toHaveBeenCalled();
-    } finally {
-      window.matchMedia = original;
-    }
+  it('selects threads with their checkboxes in manage mode, Shift extending the range', () => {
+    const project = mkProject();
+    project.chatIds = ['r', 'b1', 'r2', 'r3'];
+    project.trees = [
+      { id: 't1', rootNodeId: 'r', createdAt: 0, lastActiveAt: 300 },
+      { id: 't2', rootNodeId: 'r2', createdAt: 0, lastActiveAt: 200 },
+      { id: 't3', rootNodeId: 'r3', createdAt: 0, lastActiveAt: 100 },
+    ];
+    const nodes = { ...NODES, r2: { ...NODES.r, nodeId: 'r2', title: 'second' }, r3: { ...NODES.r, nodeId: 'r3', title: 'third' } };
+    const treeSelection = new Set<string>();
+    const toggleTreeSelection = vi.fn((id: string) => { if (!treeSelection.delete(id)) treeSelection.add(id); });
+    const onOpen = vi.fn();
+    render(
+      <ChatTreeList
+        workspace={project}
+        nodes={nodes}
+        filter=""
+        onOpen={onOpen}
+        manageMode
+        bulkActions={{
+          treeSelection, toggleTreeSelection, clearTreeSelection: vi.fn(), selectAllTrees: vi.fn(),
+          bulkArchiveTrees: vi.fn(), bulkDeleteTrees: vi.fn(), bulkUnarchiveTrees: vi.fn(),
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select root chat' }));
+    expect([...treeSelection]).toEqual(['t1']);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select third' }), { shiftKey: true });
+    expect([...treeSelection]).toEqual(['t1', 't2', 't3']);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('opens the row menu from ⋯ without a hover and without opening the thread', () => {
+    const onOpen = vi.fn();
+    render(
+      <ChatTreeList
+        workspace={mkProject()}
+        nodes={NODES}
+        filter=""
+        onOpen={onOpen}
+        menuActions={{
+          activateTree: vi.fn(), archiveTree: vi.fn(), unarchiveTree: vi.fn(), pinTree: vi.fn(),
+          unpinTree: vi.fn(), renameTree: vi.fn(), deleteTree: vi.fn(), exportTree: vi.fn(),
+        }}
+      />,
+    );
+    const more = screen.getByRole('button', { name: 'More actions' });
+    fireEvent.click(more);
+    expect(screen.queryByText('Pin')).not.toBeNull();
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });

@@ -62,6 +62,8 @@ const MICHI_TOOL_COPY: Readonly<Record<string, MichiToolCopy>> = {
   search_artifacts: { verb: 'search', object: 'artifacts', many: 'artifacts # times', from: (i) => quoted(i, 'query', 'artifacts for') },
   delete_artifact: { verb: 'delete', object: 'an artifact', many: 'artifacts', from: (i) => (text(i, 'name') ? `@${text(i, 'name')!.replace(/^@/, '')}` : undefined) },
   show_image: { verb: 'show', object: 'an image', many: 'images', from: (i) => file(i, 'path') },
+  show_blocks: { verb: 'show', object: 'blocks', many: 'blocks # times', from: (i) => (text(i, 'title') ? `“${clip(text(i, 'title')!, 40)}”`
+    : countOf(i, 'blocks') > 1 ? `${countOf(i, 'blocks')} blocks` : countOf(i, 'blocks') === 1 ? 'a block' : undefined) },
   open_url: { verb: 'open', object: 'a link', many: 'links', from: (i) => host(i, 'url') },
   michi_docs: { verb: 'read', object: 'Michi docs', many: 'Michi docs # times', from: (i) => quoted(i, 'query', 'Michi docs about') ?? (text(i, 'docId') ? `Michi doc ${text(i, 'docId')}` : undefined) },
   michi_skills: { verb: 'read', object: 'Michi skills', many: 'Michi skills # times', from: (i) => (text(i, 'name') ? `skill ${text(i, 'name')}` : undefined) },

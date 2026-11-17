@@ -1,4 +1,5 @@
 import React from 'react';
+import { useIsPresent } from 'motion/react';
 import { PopoverSurface } from './Popover';
 import { useBackLayer } from '../../lib/backStack';
 import { isImeComposing } from '../../lib/ime';
@@ -7,6 +8,7 @@ import { placeBelowAnchor } from './useAnchoredPosition';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { PhoneContextMenu } from './PhoneContextMenu';
 import type { MenuSection } from '../ContextMenu';
+import { CheckIcon } from '../terminal/icons';
 
 export interface ActionMenuEntry {
   id: string;
@@ -52,7 +54,7 @@ function phoneSections(items: readonly ActionMenuEntry[]): MenuSection[] {
     if (item.dividerBefore || sections.length === 0) sections.push({ items: [] });
     sections[sections.length - 1].items.push({
       id: item.id, label: item.label as string, danger: item.danger, disabled: item.disabled,
-      glyph: item.checked ? '✓' : undefined, run: item.onSelect,
+      glyph: item.checked ? <CheckIcon size="sm" /> : undefined, run: item.onSelect,
     });
   }
   return sections;
@@ -63,8 +65,11 @@ function DesktopActionMenu({ anchor, onClose, label, items, width = 208 }: Actio
   const [position, setPosition] = React.useState({ left: 0, top: 0 });
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
-  useBackLayer(true, { back: () => closeRef.current() });
-  useMenuEscape(true, () => {
+  // Inside the caller's <AnimatePresence> a closed menu fades out for a moment
+  // (PopoverSurface); meanwhile it takes no keys, presses or Back.
+  const present = useIsPresent();
+  useBackLayer(present, { back: () => closeRef.current() });
+  useMenuEscape(present, () => {
     anchor.focus({ preventScroll: true });
     closeRef.current();
   });
@@ -76,6 +81,7 @@ function DesktopActionMenu({ anchor, onClose, label, items, width = 208 }: Actio
     surface.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true });
   }, [anchor]);
   React.useEffect(() => {
+    if (!present) return;
     const dismiss = () => closeRef.current();
     const outside = (event: PointerEvent) => {
       if (!surface.current?.contains(event.target as Node) && !anchor.contains(event.target as Node)) dismiss();
@@ -103,10 +109,10 @@ function DesktopActionMenu({ anchor, onClose, label, items, width = 208 }: Actio
       window.removeEventListener('resize', dismiss);
       window.removeEventListener('scroll', dismiss, true);
     };
-  }, [anchor]);
+  }, [present, anchor]);
   return (
-    <PopoverSurface ref={surface} menuKind="context" animate={false} role="menu" aria-label={label}
-      width={width} left={position.left} top={position.top} className="trash-menu">
+    <PopoverSurface ref={surface} menuKind="context" role="menu" aria-label={label}
+      width={width} left={position.left} top={position.top}>
       {items.map((item) => <React.Fragment key={item.id}>
         {item.dividerBefore && <div className="michi-menu-divider" role="separator" />}
         <button type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemradio'}

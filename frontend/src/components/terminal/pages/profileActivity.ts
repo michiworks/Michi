@@ -111,6 +111,19 @@ function isBranchNode(node: ChatNodeState, project?: Project): boolean {
   );
 }
 
+/** Same totals and the same count on every day of every metric: the page draws the same. */
+export function profileActivityEqual(a: ProfileActivity, b: ProfileActivity): boolean {
+  if (a === b) return true;
+  if (a.totalNodes !== b.totalNodes || a.totalThreads !== b.totalThreads
+    || a.totalBranches !== b.totalBranches || a.totalMessages !== b.totalMessages) return false;
+  return (Object.keys(a.metrics) as ActivityMetric[]).every((metric) => {
+    const before = a.metrics[metric].cells;
+    const after = b.metrics[metric].cells;
+    return before.length === after.length && before.every((cell, i) =>
+      cell.dateKey === after[i].dateKey && cell.count === after[i].count && cell.isFuture === after[i].isFuture);
+  });
+}
+
 export function buildProfileActivityFromSnapshot(
   snapshot: ProfileActivitySnapshot,
   nowMs = Date.now(),

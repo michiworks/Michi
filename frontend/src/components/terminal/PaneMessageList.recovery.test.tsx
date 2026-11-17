@@ -16,9 +16,20 @@ const node: ChatNodeState = {
 };
 
 function list(value: ChatNodeState, onCheck = vi.fn(), onRunAgain = vi.fn()) {
-  return <PaneMessageList node={value} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
-    onRetryTurn={onCheck} onRunAgain={onRunAgain}
-    onEditUserMessage={vi.fn()} onContinueFollowUp={vi.fn()} onBranchFollowUp={vi.fn()} />;
+  // In a pane with its composer, which takes focus when nothing else can.
+  return <div className="terminal-pane">
+    <PaneMessageList node={value} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
+      onRetryTurn={onCheck} onRunAgain={onRunAgain}
+      onEditUserMessage={vi.fn()} onContinueFollowUp={vi.fn()} onBranchFollowUp={vi.fn()} />
+    <div className="terminal-composer"><div role="textbox" aria-label="Message" contentEditable suppressContentEditableWarning tabIndex={0} /></div>
+  </div>;
+}
+
+/** Presses a button the way the keyboard does: focused first. */
+function press(name: string | RegExp) {
+  const button = screen.getByRole('button', { name });
+  button.focus();
+  fireEvent.click(button);
 }
 
 describe('uncertain turn recovery actions', () => {
@@ -32,8 +43,10 @@ describe('uncertain turn recovery actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Run again$/ }));
     expect(rerun).not.toHaveBeenCalled();
     expect(screen.getByText(/may repeat file changes/)).not.toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Run again anyway' }));
+    press('Run again anyway');
     expect(rerun).toHaveBeenCalledExactlyOnceWith(0);
+    // The rerun takes the error row away: the composer has the keyboard.
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Message' }));
     expect(screen.getByText('The file was updated.')).not.toBeNull();
   });
 
@@ -48,9 +61,10 @@ describe('uncertain turn recovery actions', () => {
     expect(screen.getByText(/original result could not be confirmed/)).not.toBeNull();
     expect(screen.getByText('The file was updated.')).not.toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^Run again$/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Keep current result' }));
+    press('Keep current result');
     expect(rerun).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Run again anyway' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: /^Run again$/ }));
   });
 
   it('does not turn an ordinary rejected request into an unknown-outcome warning', () => {
@@ -77,7 +91,7 @@ describe('uncertain turn recovery actions', () => {
     expect(screen.queryByText(/could not be confirmed/)).toBeNull();
     // The sentence is said once: the raw error line is not repeated below the status.
     expect(screen.getAllByText(/Michi restarted while this task was running/)).toHaveLength(1);
-    fireEvent.click(screen.getByRole('button', { name: '▶ Resume' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
     expect(resume).toHaveBeenCalledExactlyOnceWith(0);
     expect(rerun).not.toHaveBeenCalled();
   });

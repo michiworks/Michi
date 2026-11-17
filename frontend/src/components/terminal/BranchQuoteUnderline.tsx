@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type JSX, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight } from 'lucide-react';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import { relativeTime } from '../../lib/relativeTime';
 import { isFresh } from '../../motion/useFresh';
 import { EASE } from '../../motion/tokens';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { BranchStatusLabel } from './BranchAnchorRow';
-import { BranchIcon } from './icons';
+import { ArrowUpRightIcon, BranchIcon } from './icons';
 import { isImeComposing } from '../../lib/ime';
 
 export interface BranchQuoteAnchor {
@@ -48,14 +47,14 @@ function BranchCardItem({ anchor, compact, onOpen }: {
       onClick={onOpen}
     >
       <span className="t-branch-card-head">
-        <BranchIcon size={13} className="t-branch-card-glyph" />
+        <BranchIcon className="t-branch-card-glyph" />
         <span className="t-branch-card-title">{anchor.title}</span>
         <span className="t-branch-card-state" id={stateId}>
           {anchor.status === 'idle'
             ? <span className="t-branch-card-time">{relativeTime(anchor.createdAt)}</span>
-            : <BranchStatusLabel status={anchor.status} size={12} />}
+            : <BranchStatusLabel status={anchor.status} size="sm" />}
         </span>
-        <ArrowUpRight className="t-branch-card-open" size={13} aria-hidden />
+        <ArrowUpRightIcon className="t-branch-card-open" />
       </span>
       {exchange && (
         <span className="t-branch-card-exchange" id={exchangeId}>

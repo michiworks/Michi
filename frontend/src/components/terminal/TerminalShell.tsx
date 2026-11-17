@@ -8,10 +8,11 @@ import React, { useEffect, useState } from 'react';
 import { useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { paneScopeKey } from '../../state/paneState';
 import { useTerminalColors } from './useTerminalColors';
-import { animate, useMotionValue } from 'motion/react';
+import { AnimatePresence, animate, useMotionValue } from 'motion/react';
 import { useSwipeTrack, type SwipeTrack } from '../../hooks/useEdgeSwipe';
 import { useBackSwipe, useSystemBack } from '../../hooks/useBackNavigation';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
+import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import { useUndoShortcut } from '../../hooks/useUndoShortcut';
 import { escLayerOpen, modalOpen, useBackLayer } from '../../lib/backStack';
 import { TRANSITION } from '../../motion/tokens';
@@ -33,7 +34,7 @@ import { usePrefs, useDigestEnabled } from '../../state/prefs';
 import { DrawerShell } from '../ui/DrawerShell';
 import { ModalShell } from '../ui/ModalShell';
 import type { PageId } from '../../state/commands';
-import { navPageEvent } from '../../state/appEvents';
+import { leaveOverlaysEvent, navPageEvent } from '../../state/appEvents';
 import type { MapView } from './pages/mapView';
 import { PROFILE_PAGE_ENABLED } from '../../state/featureFlags';
 import { IS_MAC } from '../../lib/platform';
@@ -50,7 +51,7 @@ import type { AgentDefinitionFormValue } from './agents/AgentDefinitionForm';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { PanePresentationProvider } from './PanePresentation';
 import { PaneViewStateProvider } from './PaneViewState';
-import { setPanePresenceDashboardVisible } from '../../state/panePresenceVisibility';
+import { setDashboardUncovered, setPanePresenceDashboardVisible } from '../../state/panePresenceVisibility';
 import { onOpenBackgroundWork, type OpenBackgroundWorkDetail } from './backgroundWork/backgroundWorkEvents';
 
 import { REMOTE_DIAGNOSTIC_AGENT_EVENT, type DiagnosticAgentRequest } from '../../services/remoteDiagnosticAgent';
@@ -64,7 +65,7 @@ import { SpaceConversationWatcher } from './spaces/conversation/SpaceConversatio
 import { MemoryNotifications } from './settings/memory/MemoryNotifications';
 import { CompanionPanelHost } from './companion/CompanionPanel';
 import { CompanionNotifications } from './companion/CompanionNotifications';
-import { closeCompanionPanel, registerCompanionOpenSource, toggleCompanionPanel } from '../../state/companion/companionPanel';
+import { closeCompanionPanel, registerCompanionOpenSource, takeCompanionReturnFocus, toggleCompanionPanel } from '../../state/companion/companionPanel';
 import { companionIsOff } from '../../state/companion/companionStore';
 import { AreaRail, AreaTabs } from './rail/AreaRail';
 import { useRailBadges } from './rail/useRailBadges';
@@ -76,7 +77,7 @@ import { useMetaAgentOverviewSnapshot } from '../../state/metaAgent/useMetaAgent
 import { SpacesMetaChat, type SpacesChatView } from './spaces/metaChat/SpacesMetaChat';
 import { ALL_TASKS, SPACES_HOME, areaForPage, entryPageForArea, type ShellArea, type SpacesHomeTarget } from '../../state/shellArea';
 import { settingsPageForRequest, type SettingsPage } from './rail/settingsPages';
-import type { SettingsHeaderAction } from './pages/settings/settingsPhone';
+import { SETTINGS_WINDOW_WIDTH, type SettingsHeaderAction } from './pages/settings/settingsPhone';
 import { SourcePopoverHost } from './source';
 import { dismissSourceBack, openExactSourcePopover, openSourcePopover, registerSourceNavigator, type SourceOrigin, type SourcePage } from '../../state/sourceNav/sourceNav';
 import { useSpaceTopbar } from '../../state/pages/spaceTopbar';
@@ -198,10 +199,19 @@ export default function TerminalShell() {
   const [backgroundWork, setBackgroundWork] = useState<{ request: OpenBackgroundWorkDetail; seq: number } | null>(null);
   const [backgroundWorkOpen, setBackgroundWorkOpen] = useState(false);
   const [backgroundWorkPresent, setBackgroundWorkPresent] = useState(false);
+  // A drawer closed because something opened from it (an artifact in a pane,
+  // Cite, a chat from Background work) goes in one frame: panel and scrim
+  // unmount with the close (TR-39). Every other close slides out. The next
+  // opening clears the mark, in the same update.
+  const [artifactsCut, setArtifactsCut] = useState(false);
+  const [backgroundWorkCut, setBackgroundWorkCut] = useState(false);
+  const closeArtifactsAtOnce = React.useCallback(() => { setArtifactsCut(true); setArtifactsOpen(false); }, []);
+  const closeBackgroundWorkAtOnce = React.useCallback(() => { setBackgroundWorkCut(true); setBackgroundWorkOpen(false); }, []);
   const remoteAuthenticationOpen = !!useRemoteAuthentication();
   const [remoteRecoveryOpen, setRemoteRecoveryOpen] = useState(false);
   const [remoteRecoveryPresent, setRemoteRecoveryPresent] = useState(false);
-  const openRemoteRecovery = React.useCallback(() => setRemoteRecoveryOpen(true), []);
+  const [remoteRecoveryCut, setRemoteRecoveryCut] = useState(false);
+  const openRemoteRecovery = React.useCallback(() => { setRemoteRecoveryCut(false); setRemoteRecoveryOpen(true); }, []);
   const closeRemoteRecovery = React.useCallback(() => setRemoteRecoveryOpen(false), []);
   // Branches/Map/Digest are thread-scoped views (and Workspaces a picker): a
   // second click on the same nav target — or a second ⌘M/⌘D/⌘O — drops back to
@@ -289,12 +299,13 @@ export default function TerminalShell() {
   }, [openAllTasks]);
   const [newWsOpen, setNewWsOpen] = useState(false);
 
+  // The Dashboard is up and no dialog lies over it.
+  const nativeSurfacesVisible = page === 'dashboard' && !paletteOpen && !settingsOpen && !settingsPresent && !artifactsOpen && !artifactsPresent
+    && !backgroundWorkOpen && !backgroundWorkPresent && !newWsOpen && !remoteAuthenticationOpen && !remoteRecoveryOpen && !remoteRecoveryPresent;
   useEffect(() => {
-    const visible = page === 'dashboard' && !paletteOpen && !settingsOpen && !settingsPresent && !artifactsOpen && !artifactsPresent
-      && !backgroundWorkOpen && !backgroundWorkPresent && !newWsOpen && !remoteAuthenticationOpen && !remoteRecoveryOpen && !remoteRecoveryPresent;
-    document.documentElement.dataset.nativeSurfacesVisible = String(visible);
-    window.dispatchEvent(new CustomEvent('michi:native-surfaces-visible', { detail: { visible } }));
-  }, [page, paletteOpen, settingsOpen, settingsPresent, artifactsOpen, artifactsPresent, backgroundWorkOpen, backgroundWorkPresent, newWsOpen, remoteAuthenticationOpen, remoteRecoveryOpen, remoteRecoveryPresent]);
+    document.documentElement.dataset.nativeSurfacesVisible = String(nativeSurfacesVisible);
+    window.dispatchEvent(new CustomEvent('michi:native-surfaces-visible', { detail: { visible: nativeSurfacesVisible } }));
+  }, [nativeSurfacesVisible]);
   const {
     activeProject, selection,
     treeSelection,
@@ -771,6 +782,7 @@ export default function TerminalShell() {
       if (!hydrated) return;
       const artifactId = event.detail?.artifactId;
       setArtifactRequest(artifactId ?? null);
+      setArtifactsCut(false);
       if (artifactId) setArtifactsOpen(true);
       else setArtifactsOpen((v) => !v);
     };
@@ -781,6 +793,7 @@ export default function TerminalShell() {
   useEffect(() => onOpenBackgroundWork((request) => {
     if (!hydrated) return;
     setBackgroundWork((current) => ({ request, seq: (current?.seq ?? 0) + 1 }));
+    setBackgroundWorkCut(false);
     setBackgroundWorkOpen(true);
   }), [hydrated]);
   // The drawer shows one conversation of the active workspace. Once the
@@ -824,6 +837,21 @@ export default function TerminalShell() {
 
   const narrowMode = usePhoneLayout();
   const [narrowOverlayOpen, setNarrowOverlayOpen] = useState(false);
+  // In the phone layout the Michi panel lies over the page, which then takes
+  // no focus (TR-43). A close hands focus back only once the page is live
+  // again, since focus() into an inert page does nothing.
+  const [companionShown, setCompanionShown] = useState(false);
+  const pageUnderPanel = narrowMode && companionShown;
+  // Under the phone drawer, which is modal, the page takes no focus either.
+  const pageUnderDrawer = narrowMode && narrowOverlayOpen;
+  // What the panes show is in front of the user (a failure there counts as seen, useFailureSeen).
+  React.useLayoutEffect(() => {
+    setDashboardUncovered(nativeSurfacesVisible && !pageUnderPanel && !pageUnderDrawer);
+    return () => setDashboardUncovered(false);
+  }, [nativeSurfacesVisible, pageUnderPanel, pageUnderDrawer]);
+  React.useLayoutEffect(() => {
+    if (!pageUnderPanel) takeCompanionReturnFocus()?.focus({ preventScroll: true });
+  }, [pageUnderPanel]);
   // The phone's page Back: what was opened from within the page since the
   // last destination picked in the drawer, which starts afresh as a tab
   // does. With nothing to go back to, a back swipe opens the drawer. A
@@ -887,6 +915,14 @@ export default function TerminalShell() {
   const [sidebarDragging, setSidebarDragging] = useState(false);
   const shellRef = React.useRef<HTMLDivElement>(null);
   const settleSidebar = React.useCallback((x: number, scrim: number, then: () => void) => {
+    // Neither MotionConfig nor the CSS catch-all reaches animate(): under
+    // reduced motion a released swipe lands at once.
+    if (prefersReducedMotion()) {
+      sidebarX.set(x);
+      sidebarScrim.set(scrim);
+      then();
+      return;
+    }
     const transition = { duration: TRANSITION.enter.duration, ease: TRANSITION.enter.ease };
     animate(sidebarX, x, transition);
     void animate(sidebarScrim, scrim, transition).then(then, then);
@@ -952,6 +988,16 @@ export default function TerminalShell() {
   }, [handleNav, leaveForNarrowChoice]);
   // Area sidebar rows that open something in the main column close it too.
   const closeNarrowOverlay = leaveForNarrowChoice;
+  // A notification's click opens its target where these would cover it.
+  useEffect(() => leaveOverlaysEvent.subscribe(() => {
+    setPaletteOpen(false);
+    setSettingsOpen(false);
+    closeArtifactsAtOnce();
+    closeBackgroundWorkAtOnce();
+    setRemoteRecoveryCut(true);
+    setRemoteRecoveryOpen(false);
+    leaveForNarrowChoice();
+  }), [closeArtifactsAtOnce, closeBackgroundWorkAtOnce, leaveForNarrowChoice]);
   const newThread = React.useCallback(() => {
     setPage('home');
     leaveForNarrowChoice();
@@ -1077,7 +1123,7 @@ export default function TerminalShell() {
             the view a drag scrolls from composited layers, not the DOM, so a
             drag over the glass drawer or its scrim could scroll the transcript
             beneath; without pointer events it has no hit region to be found by. */}
-        <div ref={contentColRef} className="terminal-content-col" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, pointerEvents: narrowMode && narrowOverlayOpen ? 'none' : undefined }}>
+        <div ref={contentColRef} className="terminal-content-col" inert={pageUnderPanel || pageUnderDrawer || undefined} style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, pointerEvents: pageUnderDrawer ? 'none' : undefined }}>
           {/* Keep the data barrier, not a root-level rendering barrier. */}
           {!hydrated ? (
             <div role="status" aria-label="Loading workspaces" style={{ flex: 1, display: 'grid', placeItems: 'center', color: 'var(--term-muted)', fontSize: 'var(--fs-md)' }}>
@@ -1108,7 +1154,7 @@ export default function TerminalShell() {
           </>}
         </div>
         {/* Shell-level and docked right of every page (over the page in a narrow window). */}
-        {hydrated && <CompanionPanelHost narrow={narrowMode} page={page} covered={narrowMode && narrowOverlayOpen} />}
+        {hydrated && <CompanionPanelHost narrow={narrowMode} page={page} covered={narrowMode && narrowOverlayOpen} onShownChange={setCompanionShown} />}
       </div>
       {hydrated && paletteOpen && (
         <React.Suspense fallback={null}>
@@ -1120,13 +1166,16 @@ export default function TerminalShell() {
         </React.Suspense>
       )}
       <NewWorkspaceAutoOpen ready={autoOpenReady} onOpen={autoOpenNewWorkspace} />
-      {hydrated && createSpaceOpen && (
-        <CreateSpaceDialog
-          activeWorkspaceId={activeProject?.id}
-          onClose={() => setCreateSpaceOpen(false)}
-          onCreated={(target) => { setCreateSpaceOpen(false); openSpaceRoute({ type: 'space', ...target }); }}
-        />
-      )}
+      <AnimatePresence>
+        {hydrated && createSpaceOpen && (
+          <CreateSpaceDialog
+            key="create-space"
+            activeWorkspaceId={activeProject?.id}
+            onClose={() => setCreateSpaceOpen(false)}
+            onCreated={(target) => { setCreateSpaceOpen(false); openSpaceRoute({ type: 'space', ...target }); }}
+          />
+        )}
+      </AnimatePresence>
       {hydrated && <NewWorkspaceDialog
         open={newWsOpen}
         onClose={() => setNewWsOpen(false)}
@@ -1154,14 +1203,15 @@ export default function TerminalShell() {
             onHeaderAction={setSettingsAction} />
         </DrawerShell>
       ) : (
-        <ModalShell open={settingsOpen} onClose={() => setSettingsOpen(false)} title="Settings" width={1080} maxHeight="calc(100vh - 48px)" layer="window">
+        <ModalShell open={settingsOpen} onClose={() => setSettingsOpen(false)} title="Settings" width={SETTINGS_WINDOW_WIDTH} maxHeight="calc(100vh - 48px)" layer="window">
           <TerminalSettingsArea page={settingsPage} onPageChange={setSettingsPage} onViewChange={setSettingsView} workspaceReady={hydrated} onNav={handleNav} />
         </ModalShell>
       )}
-      <RemoteRecoveryDrawer open={remoteRecoveryOpen} onClose={closeRemoteRecovery} motion={drawerMotion} onPresenceChange={setRemoteRecoveryPresent} />
+      <RemoteRecoveryDrawer open={remoteRecoveryOpen} onClose={closeRemoteRecovery} motion={remoteRecoveryCut ? 'instant' : drawerMotion} onPresenceChange={setRemoteRecoveryPresent} />
       {hydrated && (artifactsOpen || artifactsPresent) && (
         <React.Suspense fallback={null}>
-          <ArtifactsDrawer key={activeProject?.id ?? 'none'} open={artifactsOpen} motion={drawerMotion} onPresenceChange={setArtifactsPresent} onClose={() => { setArtifactsOpen(false); }}
+          <ArtifactsDrawer key={activeProject?.id ?? 'none'} open={artifactsOpen} motion={artifactsCut ? 'instant' : drawerMotion} onPresenceChange={setArtifactsPresent}
+            onClose={() => { setArtifactsOpen(false); }} closeAtOnce={closeArtifactsAtOnce}
             openArtifactId={artifactRequest} onOpenArtifactHandled={clearArtifactRequest} />
         </React.Suspense>
       )}
@@ -1174,9 +1224,10 @@ export default function TerminalShell() {
           <BackgroundWorkDrawer
             key={activeProject?.id ?? 'none'}
             open={backgroundWorkShown}
-            motion={drawerMotion}
+            motion={backgroundWorkCut ? 'instant' : drawerMotion}
             onPresenceChange={setBackgroundWorkPresent}
             onClose={() => { setBackgroundWorkOpen(false); }}
+            closeAtOnce={closeBackgroundWorkAtOnce}
             request={backgroundWork.request}
             requestSeq={backgroundWork.seq}
           />

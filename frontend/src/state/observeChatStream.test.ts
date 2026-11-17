@@ -11,7 +11,7 @@ import { cancelChatAndObserve, settleCancellationObservation } from '../services
 import { fetchStream } from '../services/api/streamTransport';
 
 import { indexBackendProjects, setKnownBackendConnections } from '../config/backendConnections';
-import { closeRemoteAuthentication, completeRemoteAuthentication, getRemoteAuthentication, reportRemoteCredentialError } from './remoteAuthentication';
+import { closeRemoteAuthentication, completeRemoteAuthentication, getPendingRemoteAuthentications } from './remoteAuthentication';
 import { resetTurnPageReceiptInvalidationForTests } from '../lib/turnPageReceipt';
 import { subscribePageChanges } from './pages/pageEvents';
 
@@ -116,7 +116,7 @@ describe('createBackgroundTurnBinding', () => {
 
     // The turn and the server's completion counts travel with it (completionFacts.ts).
     expect(dispatch).toHaveBeenCalledWith({
-      type: 'done', nodeId: 'node-1', assistantId: 'self-a-1', turnId: 'self-turn-1',
+      type: 'done', nodeId: 'node-1', assistantId: 'self-a-1', turnId: 'self-turn-1', stopReason: 'end_turn',
       completion: { completionSeq: 3, seenCompletionSeq: 2 },
     });
     expect(onTurnEnd).toHaveBeenCalledWith('done', 'node-1');
@@ -180,15 +180,9 @@ describe('the side effects of a background turn', () => {
       done: (stopReason = 'end_turn') => dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: { ...at(2), stopReason, persisted: true } }, handlers),
     };
   };
-  const signInShown = () => getRemoteAuthentication()?.key === 'runtime:sso-remote';
-  /** Whether a sign-in the connection still owes would open again: a clean turn forgets it. */
-  const signInOwed = () => {
-    closeRemoteAuthentication();
-    reportRemoteCredentialError('node-1', CREDENTIAL_ERROR);
-    const owed = getRemoteAuthentication() === null;
-    closeRemoteAuthentication();
-    return owed;
-  };
+  // A turn's credential error asks from the notice corner; the request stays owed there until a clean turn clears it.
+  const signInShown = () => getPendingRemoteAuthentications().some((request) => request.key === 'runtime:sso-remote');
+  const signInOwed = signInShown;
 
   beforeEach(() => {
     setKnownBackendConnections([{ id: 'sso-remote', name: 'Remote', transport: 'ssh', sshHost: 'box', hasToken: true, createdAt: 1, updatedAt: 1 }]);
@@ -343,7 +337,7 @@ describe('cancellation settlement from the existing background binding', () => {
     };
     dispatchChatStreamEvent(done, handlers);
     dispatchChatStreamEvent(done, handlers);
-    expect(status).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(status).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(status).toHaveBeenCalledTimes(1);
     expect(fetchStream).toHaveBeenCalledTimes(1);
@@ -382,7 +376,7 @@ describe('cancellation settlement from the existing background binding', () => {
     dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: {
       ...envelope(1), stopReason: 'cancelled', persisted: true,
     } }, background());
-    expect(newStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(newStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     await vi.advanceTimersByTimeAsync(30_000);
     expect(oldStatus).not.toHaveBeenCalled();
     expect(newStatus).toHaveBeenCalledTimes(1);
@@ -395,7 +389,7 @@ describe('cancellation settlement from the existing background binding', () => {
     dispatchChatStreamEvent({ event: CHAT_STREAM_EVENTS.done, data: {
       ...envelope(1), stopReason: 'cancelled', persisted: true,
     } }, background());
-    expect(status).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(status).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     release(new Response('{}', { status: 200 }));
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetchStream).not.toHaveBeenCalled();

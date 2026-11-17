@@ -10,13 +10,20 @@ import {
 } from 'michi-shared';
 import { formatDuration } from '../../../lib/duration';
 
-/** Run status colors follow AgentRunCard (completed reads as digest). */
+/** Run status colors follow AgentRunCard (completed reads as digest): the status dot. */
 export const WORKFLOW_STATUS_COLOR: Record<WorkflowRunStatus, string> = {
   running: 'var(--term-run)',
   paused: 'var(--term-select)',
   completed: 'var(--term-digest)',
   failed: 'var(--term-danger)',
   cancelled: 'var(--term-muted)',
+};
+
+/** The status word beside that dot: a hue's text form where the hue is too dim for words. */
+export const WORKFLOW_STATUS_TEXT_COLOR: Record<WorkflowRunStatus, string> = {
+  ...WORKFLOW_STATUS_COLOR,
+  paused: 'var(--term-waiting-text)',
+  failed: 'var(--term-danger-text)',
 };
 
 export const WORKFLOW_STATUS_LABEL: Record<WorkflowRunStatus, string> = {
@@ -37,14 +44,22 @@ export const WORKFLOW_CHIP: Record<WorkflowRunStatus, { label: string; color: st
 };
 export const WORKFLOW_NEEDS_YOU_CHIP = { label: 'Needs you', color: 'var(--term-waiting-text)', fill: 'var(--term-waiting-f)' };
 
+/** A node's status mark: WorkflowRunCard's progress segments. */
 export const NODE_STATUS_COLOR: Record<WorkflowNodeStatus, string> = {
   queued: 'var(--term-faint)',
   running: 'var(--term-run)',
   paused: 'var(--term-select)',
-  completed: 'var(--term-muted)',
+  completed: 'var(--term-digest)',
   failed: 'var(--term-danger)',
   cancelled: 'var(--term-muted)',
   skipped: 'var(--term-faint)',
+};
+
+/** A node's status word: a hue's text form where the hue is too dim for words. */
+export const NODE_STATUS_TEXT_COLOR: Record<WorkflowNodeStatus, string> = {
+  ...NODE_STATUS_COLOR,
+  paused: 'var(--term-waiting-text)',
+  failed: 'var(--term-danger-text)',
 };
 
 export const NODE_STATUS_LABEL: Record<WorkflowNodeStatus, string> = {

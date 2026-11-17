@@ -1,4 +1,5 @@
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
+import { DUR } from '../../motion/tokens';
 
 /**
  * The phone composer's open/close animation (ComposerShell, collapsible).
@@ -71,8 +72,8 @@ function timing(): { duration: number; easing: string } {
   const style = getComputedStyle(document.documentElement);
   const raw = style.getPropertyValue('--t-enter').trim();
   const value = parseFloat(raw);
-  const duration = Number.isFinite(value) ? (raw.endsWith('ms') ? value : raw.endsWith('s') ? value * 1000 : value) : 180;
-  return { duration: duration > 0 ? duration : 180, easing: style.getPropertyValue('--t-ease').trim() || 'ease-out' };
+  const duration = Number.isFinite(value) ? (raw.endsWith('ms') ? value : raw.endsWith('s') ? value * 1000 : value) : 0;
+  return { duration: duration > 0 ? duration : DUR.enter * 1000, easing: style.getPropertyValue('--t-ease').trim() || 'ease-out' };
 }
 
 /**

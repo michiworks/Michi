@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import type { AgentRunEventV1 } from 'michi-shared';
 import type { LocatedAgentRun } from './agentRunSelectors';
+import { Button } from '../../ui/controls';
 import { runIdentity } from './agentRunSelectors';
 import { serverEntityId } from '../../../config/backendIdentity';
 import { AgentRunActionApiError, continueAgentRunAsBranch, createAgentRunActionOperationId,
@@ -58,18 +59,15 @@ export function AgentRunActions({ run: resource, events = [] }: {
         <label><input type="checkbox" checked={includeTranscript} disabled={events.length === 0} onChange={(e) => setIncludeTranscript(e.target.checked)} /> transcript</label>
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <button type="button" disabled={busy !== null || (!includeTask && !includeResult && !includeTranscript)} onClick={() => void continueRun('error')}
-          style={{ border: '1px solid var(--term-accent)', background: 'transparent', color: 'var(--term-accent)', padding: '5px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>
+        <Button variant="primary" size="sm" disabled={busy !== null || (!includeTask && !includeResult && !includeTranscript)} onClick={() => void continueRun('error')}>
           {busy === 'continue' ? 'Creating…' : 'Continue as Branch'}
-        </button>
-        {offerFallback && <button type="button" disabled={busy !== null} onClick={() => void continueRun('new_thread')}
-          style={{ border: '1px solid var(--term-select)', background: 'transparent', color: 'var(--term-select)', padding: '5px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>Continue as new thread</button>}
-        {run.definitionId === null && <button type="button" disabled={busy !== null} onClick={() => void save()}
-          style={{ border: '1px solid var(--term-line)', background: 'var(--term-surface)', color: 'var(--term-fg)', padding: '5px 8px', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>
+        </Button>
+        {offerFallback && <Button size="sm" disabled={busy !== null} onClick={() => void continueRun('new_thread')}>Continue as new thread</Button>}
+        {run.definitionId === null && <Button size="sm" disabled={busy !== null} onClick={() => void save()}>
           {busy === 'save' ? 'Saving…' : 'Save as Custom Agent'}
-        </button>}
+        </Button>}
       </div>
-      {message && <div role="status" style={{ color: offerFallback ? 'var(--term-select)' : 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>{message}</div>}
+      {message && <div role="status" style={{ color: offerFallback ? 'var(--term-waiting-text)' : 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>{message}</div>}
     </div>
   );
 }

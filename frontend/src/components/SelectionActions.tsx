@@ -7,6 +7,8 @@ import { prefersReducedMotion } from '../hooks/useReducedMotion';
 import { DUR, EASE } from '../motion/tokens';
 import { DOCK_ROOM_VAR } from './selectionDockRoom';
 import { isImeComposing } from '../lib/ime';
+import { ArrowUpIcon, BranchIcon, ChatIcon, CloseIcon, QuoteIcon } from './terminal/icons';
+import { focusPaneComposer } from './terminal/paneFocus';
 
 interface ViewRect {
   left: number;
@@ -174,20 +176,6 @@ const DOCK_SETTLE_MS = 350;
  */
 const POSITION_DEADZONE = 8;
 
-// Shared by the selection bar and the phone sheet's title.
-const BRANCH_GLYPH = (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M16 3h5v5" />
-    <path d="M8 3H3v5" />
-    <path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3" />
-    <path d="m15 9 6-6" />
-  </svg>
-);
-const COMMENT_GLYPH = (
-  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-  </svg>
-);
 
 /**
  * Text-selection action bar + composer, rendered via portal so it can
@@ -421,6 +409,26 @@ export default function SelectionActions({
     window.getSelection()?.removeAllRanges();
   }, [selectionDraftKey]);
 
+  // Closed from inside (Esc, ×, sending, quoting), the popup hands the
+  // keyboard to the pane composer, else to the transcript, in the commit that
+  // takes it away (ST-10). An outside press leaves focus where it lands.
+  const refocusRef = useRef(false);
+  const closeFromPopup = useCallback(() => {
+    refocusRef.current = !!popupRef.current?.contains(document.activeElement);
+    close();
+  }, [close]);
+  useLayoutEffect(() => {
+    if (anchor || !refocusRef.current) return;
+    refocusRef.current = false;
+    const active = document.activeElement;
+    // What the action opened may have taken focus already.
+    if (active && active !== document.body && !active.closest('[inert]') && !popupRef.current?.contains(active)) return;
+    const container = containerRef.current;
+    if (!container || focusPaneComposer(container)) return;
+    if (!container.hasAttribute('tabindex')) container.tabIndex = -1;
+    container.focus({ preventScroll: true });
+  }, [anchor, containerRef]);
+
   // Close on outside mousedown (anywhere except the popup itself).
   useEffect(() => {
     if (!anchor) return;
@@ -471,15 +479,15 @@ export default function SelectionActions({
     } else {
       return;
     }
-    if (result !== false) close();
-  }, [anchor, prompt, composerMode, onBranch, onComment, close]);
+    if (result !== false) closeFromPopup();
+  }, [anchor, prompt, composerMode, onBranch, onComment, closeFromPopup]);
 
   const fireQuote = useCallback(() => {
     if (!anchor) return;
     const args: Parameters<typeof onQuote> = [anchor.text, anchor.range];
     if (anchor.hasContext) args.push(anchor.context);
-    if (onQuote(...args) !== false) close();
-  }, [anchor, onQuote, close]);
+    if (onQuote(...args) !== false) closeFromPopup();
+  }, [anchor, onQuote, closeFromPopup]);
 
   const replaceContext = useCallback((context: unknown) => {
     setAnchor((previous) => previous ? { ...previous, context, hasContext: true } : previous);
@@ -492,7 +500,7 @@ export default function SelectionActions({
       if (e.key === 'Escape') {
         if (isImeComposing(e)) return;
         e.preventDefault();
-        close();
+        closeFromPopup();
         return;
       }
       if (composerMode !== 'closed') return; // In-composer keys handled on textarea.
@@ -509,7 +517,7 @@ export default function SelectionActions({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [anchor, composerMode, openComposer, close, fireQuote]);
+  }, [anchor, composerMode, openComposer, closeFromPopup, fireQuote]);
 
   // Reset measured size whenever the popup mode/content changes so we can
   // re-measure with the new layout instead of carrying stale dimensions.
@@ -627,7 +635,7 @@ export default function SelectionActions({
   );
 
   if (!anchor) return layer(hiddenDraft ? (
-    <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted">
+    <div className="flex items-center gap-2 px-3 py-2 text-xs text-fg-subtle">
       <button type="button" className="text-fg underline" onClick={() => {
         if (!containerRef.current) return;
         setAnchor(restoreDraftAnchor(hiddenDraft, containerRef.current));
@@ -762,17 +770,15 @@ export default function SelectionActions({
           // Phone: a reply strip over a one-line composer, sent like a message.
           <>
             <div className={styles.composerHeader}>
-              {composerMode === 'branch' ? BRANCH_GLYPH : COMMENT_GLYPH}
+              {composerMode === 'branch' ? <BranchIcon /> : <ChatIcon />}
               <span>{composerHeaderLabel}</span>
               <button
                 type="button"
-                onClick={close}
+                onClick={closeFromPopup}
                 className={styles.closeBtn}
                 aria-label="Close selection composer"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
-                  <path d="M18 6 6 18M6 6l12 12" />
-                </svg>
+                <CloseIcon size="lg" />
               </button>
             </div>
             {preview}
@@ -786,10 +792,7 @@ export default function SelectionActions({
                 className="t-action-btn is-primary"
                 aria-label={composerMode === 'branch' ? 'Branch' : 'Save comment'}
               >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M8 13V3" />
-                  <path d="M3.5 7.5L8 3l4.5 4.5" />
-                </svg>
+                <ArrowUpIcon size="lg" />
               </button>
             </div>
             {renderSelectionContext && (
@@ -802,11 +805,11 @@ export default function SelectionActions({
               <span>{composerHeaderLabel}</span>
               <button
                 type="button"
-                onClick={close}
+                onClick={closeFromPopup}
                 className={styles.closeBtn}
                 aria-label="Close selection composer"
               >
-                ×
+                <CloseIcon size="lg" />
               </button>
             </div>
             {preview}
@@ -817,7 +820,7 @@ export default function SelectionActions({
               ) : <button
                 type="button"
                 onMouseDown={(e) => e.preventDefault()}
-                onClick={close}
+                onClick={closeFromPopup}
                 className={styles.footerBtn}
               >
                 Cancel
@@ -845,7 +848,7 @@ export default function SelectionActions({
                 className={styles.barBtn}
                 aria-label="Branch"
               >
-                {BRANCH_GLYPH}
+                <BranchIcon size="sm" />
                 Branch
               </button>
               <button
@@ -855,7 +858,7 @@ export default function SelectionActions({
                 className={styles.barBtn}
                 aria-label="Comment"
               >
-                {COMMENT_GLYPH}
+                <ChatIcon size="sm" />
                 Comment
               </button>
               <button
@@ -865,24 +868,18 @@ export default function SelectionActions({
                 className={styles.barBtn}
                 aria-label="Quote"
               >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z" />
-                  <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z" />
-                </svg>
+                <QuoteIcon size="sm" />
                 Quote
               </button>
               {dock && (
                 <button
                   type="button"
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={close}
+                  onClick={closeFromPopup}
                   className={`${styles.barBtn} is-close`}
                   aria-label="Clear selection"
                 >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M18 6 6 18" />
-                    <path d="m6 6 12 12" />
-                  </svg>
+                  <CloseIcon size="sm" />
                 </button>
               )}
             </div>
@@ -894,6 +891,9 @@ export default function SelectionActions({
       </SelectionPopup>
   ));
 }
+
+/** New content fades in once the surface has begun to reshape around it. */
+const CONTENT_FADE_IN = { duration: DUR.brief, delay: 0.04, ease: 'linear' } as const;
 
 /**
  * The surface the bar and the composer share. Appearing, it grows from the
@@ -937,8 +937,8 @@ function SelectionPopup({ ref, contentKey, morph, originY, settled, className, s
       style={{ ...style, borderRadius: radius, originX: 0.5, originY, pointerEvents: present ? undefined : 'none' } as MotionStyle}
       initial={settled ? false : { opacity: 0, scale: 0.96, y: originY === 1 ? 4 : -4 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, transition: { duration: 0.08, ease: EASE.out } }}
-      transition={{ duration: 0.12, ease: EASE.out, layout: layoutTransition }}
+      exit={{ opacity: 0, transition: { duration: DUR.dismiss, ease: EASE.out } }}
+      transition={{ duration: DUR.brief, ease: EASE.out, layout: layoutTransition }}
       // Measured only when the content changes: scroll-follow and selection
       // edits move it 1:1, and typing never animates it.
       layout={morph}
@@ -955,7 +955,7 @@ function SelectionPopup({ ref, contentKey, morph, originY, settled, className, s
         layoutDependency={contentKey}
         initial={contentKey === firstContent ? false : { opacity: 0 }}
         animate={{ opacity: 1 }}
-        transition={{ opacity: { duration: 0.12, delay: 0.04, ease: 'linear' }, layout: layoutTransition }}
+        transition={{ opacity: CONTENT_FADE_IN, layout: layoutTransition }}
       >
         {children}
       </motion.div>
@@ -1388,7 +1388,7 @@ const TERMINAL_CSS = `
 .sel-actions-term-textarea {
   display: block; width: calc(100% - 24px);
   min-height: 76px; margin: 10px 12px; padding: 0;
-  background: transparent; border: 0; outline: none; resize: none;
+  background: transparent; border: 0; outline: 2px solid transparent; resize: none;
   font-family: var(--ui-font); font-size: var(--fs-lg);
   color: var(--sel-bar-fg); line-height: 1.5;
 }
@@ -1407,11 +1407,17 @@ const TERMINAL_CSS = `
 }
 .sel-actions-term-footer-btn:hover:not(:disabled) { background: var(--sel-bar-hover); color: var(--sel-bar-fg); }
 .sel-actions-term-submit { background: var(--sel-bar-action-bg); color: var(--sel-bar-action-fg); font-weight: 550; }
-.sel-actions-term-submit:hover:not(:disabled) { background: var(--sel-bar-action-bg); color: var(--sel-bar-action-fg); filter: brightness(1.08); }
-.sel-actions-term-footer-btn:disabled { cursor: not-allowed; opacity: 0.4; }
+.sel-actions-term-submit:hover:not(:disabled) { background: color-mix(in srgb, var(--sel-bar-action-bg) 88%, var(--sel-bar-fg)); color: var(--sel-bar-action-fg); }
+.sel-actions-term-footer-btn:disabled { cursor: not-allowed; opacity: 0.5; }
 .sel-actions-term-footer-kbd { font-family: var(--ui-font); font-size: var(--fs-2xs); color: inherit; opacity: .7; }
 .sel-actions-term-bar button:focus-visible, .sel-actions-term-composer button:focus-visible, .file-selection-picker select:focus-visible {
   outline: 2px solid var(--sel-bar-fg); outline-offset: -2px;
+}
+/* The textarea takes focus as the composer opens, so a ring round the frame
+   would always show; the rule under the field lights instead, 2px, with the
+   extra pixel taken from the field's margin so the footer stays put. */
+.sel-actions-term-composer:not(.is-sheet):has(.sel-actions-term-textarea:focus-visible) .sel-actions-term-footer {
+  border-top: 2px solid var(--sel-bar-focus); margin-top: -1px;
 }
 /* Phone composer: a keyboard-aware sheet. It stands in for the pane composer,
    so it wears the page palette rather than the raised selection one: the

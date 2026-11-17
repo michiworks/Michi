@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
-import type { LucideIcon } from 'lucide-react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import type { IconComponent } from '../../icons';
 import type { SettingsPage } from '../../rail/settingsPages';
 import { requestSettings } from '../../rail/settingsRequests';
 
@@ -19,6 +19,39 @@ export function useSettingsLayout(): SettingsLayout {
 
 export function useSettingsPhone(): boolean {
   return useContext(SettingsLayoutContext) === 'phone';
+}
+
+/** The desktop Settings window's width (TerminalShell's ModalShell). */
+export const SETTINGS_WINDOW_WIDTH = 880;
+/** Widths of what the panel beside the window holds (.settings-toc, .settings-window__aside > .appearance-preview). */
+export const SETTINGS_TOC_WIDTH = 196;
+export const SETTINGS_PREVIEW_WIDTH = 288;
+
+/**
+ * The panel beside the Settings window, outside its right edge: a long page's
+ * "On this page" and the Appearance preview render into it. Null on a phone
+ * and wherever a pane renders without the window.
+ */
+export const SettingsAsideContext = createContext<HTMLElement | null>(null);
+
+export function useSettingsAside(): HTMLElement | null {
+  return useContext(SettingsAsideContext);
+}
+
+/**
+ * Whether a panel this wide fits beside the centred window on this screen,
+ * 16px from the window and 16px from the screen's edge. Without the room the
+ * pane keeps it inside the window, or leaves it out.
+ */
+export function useSettingsAsideRoom(width: number): boolean {
+  const query = `(min-width: ${SETTINGS_WINDOW_WIDTH + 2 * (width + 32)}px)`;
+  const subscribe = useCallback((onChange: () => void) => {
+    if (typeof window.matchMedia !== 'function') return () => {};
+    const list = window.matchMedia(query);
+    list.addEventListener('change', onChange);
+    return () => list.removeEventListener('change', onChange);
+  }, [query]);
+  return useSyncExternalStore(subscribe, () => typeof window.matchMedia === 'function' && window.matchMedia(query).matches);
 }
 
 /**
@@ -74,14 +107,14 @@ export function useSettingsPageTitle(taken: boolean): void {
 export interface SettingsHeaderAction {
   label: string;
   short?: string;
-  icon?: LucideIcon;
+  icon?: IconComponent;
   onClick: () => void;
 }
 
 export const SettingsHeaderActionContext = createContext<((action: SettingsHeaderAction | null) => void) | null>(null);
 
 /** Offers the action while `label` is set; null takes it away. */
-export function useSettingsHeaderAction(label: string | null, onClick: () => void, options: { short?: string; icon?: LucideIcon } = {}): void {
+export function useSettingsHeaderAction(label: string | null, onClick: () => void, options: { short?: string; icon?: IconComponent } = {}): void {
   const register = useContext(SettingsHeaderActionContext);
   const run = useRef(onClick);
   useLayoutEffect(() => { run.current = onClick; });

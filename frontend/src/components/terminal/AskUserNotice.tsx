@@ -1,5 +1,4 @@
 import React, { useCallback, useId, useMemo } from 'react';
-import { CircleHelp } from 'lucide-react';
 import { AnimatePresence, useIsPresent } from 'motion/react';
 import { isAssistantConversation, useChatActions, useChatPanes, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { useCompanionName } from '../../state/companion/companionName';
@@ -15,6 +14,7 @@ import './workflows/runChip.css';
 import { Button } from '../ui/controls';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { NoticeHeader, NoticeMotion, NoticeTab, shrinkOnEscape, useAnnounceNew, useNoticeMinimized } from './shellNoticeParts';
+import { HelpIcon } from './icons';
 
 /**
  * Global "the agent is asking you something" reminder, in the shell's
@@ -76,7 +76,7 @@ export default function AskUserNotice() {
         <NoticeMotion key="ask-tab" noticeKey="ask-tab">
           <NoticeTab
             tone="ask"
-            icon={<CircleHelp size={14} />}
+            icon={<HelpIcon />}
             count={pending.length}
             label={`Show the agent's ${pending.length === 1 ? 'question' : `${pending.length} questions`}`}
             onExpand={expand}
@@ -128,7 +128,7 @@ function AskNoticeCard({ next, label, extra, reveal, onMinimize, focusTitle, onF
     >
       <NoticeHeader
         tone="ask"
-        icon={<CircleHelp size={14} />}
+        icon={<HelpIcon />}
         title={label}
         status={(
           <span className="run-chip" style={{ color: WORKFLOW_NEEDS_YOU_CHIP.color, background: WORKFLOW_NEEDS_YOU_CHIP.fill }}>

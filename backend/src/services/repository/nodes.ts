@@ -33,6 +33,8 @@ export interface NodeRow {
   permission_approve_for_me?: number | null;
   /** 1: the chat runs Ultracode (chatUltracode.ts). Server-owned like permission_mode. */
   ultracode?: number | null;
+  /** The chat's speed tier, NULL for standard (chatServiceTier.ts). Server-owned like ultracode. */
+  service_tier?: string | null;
   crew_memory_mode?: string | null;
   /** Server-owned memory setting (migration 0076): NULL learn, 'off' a temporary chat (memory/temporaryChat.ts), legacy 'use_only'.
    *  Written by the memory service; saveNode only derives it from the parent on insertion. */
@@ -113,7 +115,7 @@ export function getNode(id: string): NodeRow | null {
 
 export function saveNode(node: NodeRow, userId?: string): void {
   const { permission_mode: _permissionMode, permission_approve_for_me: _approveForMe, crew_memory_mode: _crewMemoryMode, maintenance_job_id: _maintenanceJobId,
-    scheduled_only_job_id: _scheduledOnlyJobId, viewed_at: _viewedAt, ultracode: _ultracode, completion_seq: _completionSeq, last_completed_at: _lastCompletedAt,
+    scheduled_only_job_id: _scheduledOnlyJobId, viewed_at: _viewedAt, ultracode: _ultracode, service_tier: _serviceTier, completion_seq: _completionSeq, last_completed_at: _lastCompletedAt,
     last_completed_turn_id: _lastCompletedTurnId, seen_completion_seq: _seenCompletionSeq, multi_model_run_id: _multiModelRunId,
     fresh_context: _freshContext, memory_mode: _memoryMode, ...graphNode } = node;
   if (process.env.MICHI_CLOUD === '1' && userId !== undefined) {

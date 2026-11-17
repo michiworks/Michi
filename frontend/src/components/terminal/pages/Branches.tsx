@@ -208,7 +208,7 @@ export default function Branches({ onNav }: { onNav?: (page: PageId) => void } =
         <header style={{ marginBottom: root?.overview ? 40 : 56 }}>
           <div
             style={{
-              color: 'var(--term-accent)',
+              color: 'var(--term-accent-text)',
               fontSize: 'var(--fs-xs)',
               letterSpacing: 'var(--ls-caps-wide)',
               marginBottom: 12,
@@ -316,7 +316,8 @@ function BranchDirectory({
               style={{
                 padding: '6px 14px',
                 paddingLeft: 14 + Math.min(row.depth, 5) * 12,
-                fontWeight: current ? 600 : row.depth === 0 ? 600 : 420,
+                // The current row shows in its colour, bar and fill; weight follows depth only (ST-23).
+                fontWeight: row.depth === 0 ? 600 : 420,
               }}
             >
               {row.title}
@@ -432,7 +433,7 @@ function BranchHeading({
             flexShrink: 0,
           }}
         >
-          ↗
+          Open
         </button>
       )}
     </div>

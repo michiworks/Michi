@@ -85,12 +85,14 @@ test('the SSE parser takes split chunks, comments and CRLF', () => {
 
 // ── Delivery ─────────────────────────────────────────────────────────────────
 
+const CLAIMED = { claimed: true, silent: false };
+
 function host(overrides = {}) {
   const banners = [];
   const opened = [];
   const handled = [];
   const claims = [];
-  const state = { windowOpen: false, supported: true, claim: async () => true, background: 0 };
+  const state = { windowOpen: false, supported: true, claim: async () => CLAIMED, background: 0 };
   class Banner {
     constructor(options) { this.options = options; this.listeners = {}; this.closed = false; this.shown = false; banners.push(this); }
     on(event, listener) { this.listeners[event] = listener; }
@@ -124,13 +126,20 @@ test('with no window open: claimed first, then a banner whose click opens the re
   assert.deepEqual(handled, [['attn-1', 'banner'], ['attn-1', 'duplicate']]);
 });
 
+test('with Sounds off the backend\'s claim says so, and the banner keeps quiet', async () => {
+  const { notifier, banners, state } = host();
+  state.claim = async () => ({ claimed: true, silent: true });
+  assert.equal(await notifier.notification(record({ id: 'quiet' })), 'banner');
+  assert.deepEqual(banners[0].options, { title: 'Fix the build', body: record().body, silent: true });
+});
+
 test('a window open, a record a window claimed, a claim lost or no OS notifications: no banner', async () => {
   const { notifier, banners, claims, state } = host();
   state.windowOpen = true;
   assert.equal(await notifier.notification(record({ id: 'a' })), 'window');
   state.windowOpen = false;
   assert.equal(await notifier.notification(record({ id: 'b', claimedByWindowId: 'w-1' })), 'claimed');
-  state.claim = async () => false;
+  state.claim = async () => ({ claimed: false, silent: false });
   assert.equal(await notifier.notification(record({ id: 'c' })), 'claimed');
   state.claim = async () => { throw new Error('offline'); };
   assert.equal(await notifier.notification(record({ id: 'd' })), 'claimed', 'a claim that failed is no claim');
@@ -149,7 +158,7 @@ test('a resolved record takes its banner down, and one resolved while its claim 
   state.claim = () => new Promise((resolve) => { answer = resolve; });
   const pending = notifier.notification(record({ id: 'attn-2' }));
   notifier.resolved('attn-2');
-  answer(true);
+  answer(CLAIMED);
   assert.equal(await pending, 'resolved');
   assert.equal(banners.length, 1);
 });
@@ -198,9 +207,9 @@ test('a click waits for a window whose renderer does not listen yet, and goes to
 // ── The claim over HTTP ──────────────────────────────────────────────────────
 
 test('a claim is the desktop notifier\'s when the backend says claimed', async (t) => {
-  const answers = [{ status: 200, body: { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active' } },
-    { status: 200, body: { claimed: false, claimedByWindowId: 'w-1', status: 'active' } }, { status: 404, body: { error: 'not_found' } },
-    { status: 200, body: 'not json' }];
+  const answers = [{ status: 200, body: { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active', silent: false } },
+    { status: 200, body: { claimed: false, claimedByWindowId: 'w-1', status: 'active', silent: false } }, { status: 404, body: { error: 'not_found' } },
+    { status: 200, body: 'not json' }, { status: 200, body: { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active', silent: true } }];
   const paths = [];
   const server = http.createServer((req, res) => {
     paths.push(`${req.method} ${req.url}`);
@@ -211,8 +220,11 @@ test('a claim is the desktop notifier\'s when the backend says claimed', async (
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const feed = new attention.AttentionDesktopFeed({ port: () => server.address().port, onSnapshot() {}, onNotification() {}, onResolved() {} });
-  assert.deepEqual([await feed.claim('attn-1'), await feed.claim('attn-1'), await feed.claim('attn-1'), await feed.claim('attn-1')], [true, false, false, false]);
-  assert.deepEqual(paths, Array(4).fill('POST /api/attention/desktop/notifications/attn-1/claim'));
+  const no = { claimed: false, silent: false };
+  const claims = [];
+  for (let i = 0; i < 5; i++) claims.push(await feed.claim('attn-1'));
+  assert.deepEqual(claims, [{ claimed: true, silent: false }, no, no, no, { claimed: true, silent: true }]);
+  assert.deepEqual(paths, Array(5).fill('POST /api/attention/desktop/notifications/attn-1/claim'));
 });
 
 // ── The system beacon ────────────────────────────────────────────────────────

@@ -1,3 +1,7 @@
+import type { KeyboardEvent, Ref } from 'react';
+import { SearchIcon } from '../icons';
+import './manage.css';
+
 type Tab = 'chats' | 'artifacts' | 'digests';
 
 interface Props {
@@ -6,6 +10,8 @@ interface Props {
   counts: { chats: number; artifacts: number; digests: number };
   filter: string;
   onFilterChange: (s: string) => void;
+  /** The search field, for a list's Clear search to return focus to. */
+  searchRef?: Ref<HTMLInputElement>;
   /** A phone's narrower column: the search takes its own full-width row above
    *  the tabs instead of squeezing in beside them. */
   compact?: boolean;
@@ -21,10 +27,20 @@ const TAB_LABELS: Record<Tab, string> = {
 
 const TABS: Tab[] = ['chats', 'artifacts', 'digests'];
 
-export default function ManageTabs({ activeTab, onChange, counts, filter, onFilterChange, compact = false, showDigests = true }: Props) {
+export default function ManageTabs({ activeTab, onChange, counts, filter, onFilterChange, searchRef, compact = false, showDigests = true }: Props) {
   const tabs = showDigests ? TABS : TABS.filter((t) => t !== 'digests');
+  // ←/→ move and select, Home/End go to the ends; focus moves with the selection.
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+      : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+    if (tabs[next] !== activeTab) onChange(tabs[next]);
+    event.currentTarget.parentElement?.querySelector<HTMLElement>(`[data-tab="${tabs[next]}"]`)?.focus();
+  };
   return (
     <div
+      className={compact ? 'manage-tabs--compact' : undefined}
       style={{
         marginTop: 12,
         borderBottom: '1px solid var(--term-line)',
@@ -34,47 +50,27 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
         marginBottom: 22,
       }}
     >
-      {tabs.map((t) => {
-        const isActive = t === activeTab;
-        return (
-          <button
-            key={t}
-            type="button"
-            onClick={() => onChange(t)}
-            style={{
-              padding: compact ? '10px 12px 12px' : '10px 18px 12px',
-              minHeight: compact ? 44 : undefined,
-              fontFamily: 'var(--ui-font)',
-              fontSize: 'var(--fs-xl)',
-              lineHeight: 1.2,
-              fontWeight: isActive ? 500 : 400,
-              color: isActive ? 'var(--term-fg)' : 'var(--term-muted)',
-              background: 'transparent',
-              border: 'none',
-              borderBottom: isActive
-                ? '2px solid var(--term-accent)'
-                : '2px solid transparent',
-              marginBottom: -1,
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'baseline',
-              gap: 6,
-            }}
-          >
-            {TAB_LABELS[t]}
-            <span
-              style={{
-                fontSize: 'var(--fs-md)',
-                color: 'var(--term-muted)',
-                fontFamily: 'var(--ui-font)',
-                fontWeight: 400,
-              }}
+      <div role="tablist" aria-label="Workspace lists" style={{ display: 'flex' }}>
+        {tabs.map((t, index) => {
+          const selected = t === activeTab;
+          return (
+            <button
+              key={t}
+              type="button"
+              role="tab"
+              className="manage-tab"
+              data-tab={t}
+              aria-selected={selected}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(t)}
+              onKeyDown={(event) => onTabKeyDown(event, index)}
             >
-              {counts[t]}
-            </span>
-          </button>
-        );
-      })}
+              {TAB_LABELS[t]}
+              <span className="manage-tab__count">{counts[t]}</span>
+            </button>
+          );
+        })}
+      </div>
       <div style={{ flex: 1 }} />
       <label
         className={compact ? 'ui-search' : undefined}
@@ -95,8 +91,9 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
           fontSize: 'var(--fs-lg)',
         }}
       >
-        <SearchGlyph />
+        <SearchIcon style={{ flexShrink: 0 }} />
         <input
+          ref={searchRef}
           type="text"
           aria-label="Search this workspace"
           value={filter}
@@ -115,24 +112,5 @@ export default function ManageTabs({ activeTab, onChange, counts, filter, onFilt
         />
       </label>
     </div>
-  );
-}
-
-function SearchGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      aria-hidden
-      style={{ flexShrink: 0 }}
-    >
-      <circle cx="7" cy="7" r="4.5" />
-      <path d="M10.5 10.5L14 14" />
-    </svg>
   );
 }

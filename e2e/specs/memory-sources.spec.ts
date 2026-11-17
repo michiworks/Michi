@@ -6,14 +6,16 @@ import { CONVERSATION_COMPOSER, openThreadFromSidebar, settingsMain } from '../f
 
 // What a reply was based on, against the mock API: no backend, SQLite or
 // agent. The line under a reply that repeated what Michi gave the model;
-// Forget, Edit and Don't recall; a phone's first tap; a temporary chat; and
+// Forget and Edit; a phone's first tap; a temporary chat; and
 // a streamed reply that asks once it is done, without moving what is read.
 
 const PNPM = memoryRecord('mem-pnpm', 'Use pnpm, never npm, in this repo.', { kind: 'convention' });
+const FRIDAYS = memoryRecord('mem-fridays', 'The team ships on Fridays.', { origin: 'extracted' });
+// A spec lists only the memories its mock holds.
 const based = (): ReplyMemorySource[] => [
-  { kind: 'memory', memoryId: PNPM.id, text: PNPM.body, savedBy: 'user', at: Date.now() - 3_600_000, from: null },
-  { kind: 'conversation', docId: 41, text: 'We ship on Fridays', at: Date.now() - 2 * 86_400_000,
+  { kind: 'memory', memoryId: PNPM.id, text: PNPM.body, savedBy: 'user', at: Date.now() - 3_600_000,
     from: { nodeId: 'chat', messageId: 'chat-q1', title: 'Repo setup' } },
+  { kind: 'memory', memoryId: FRIDAYS.id, text: FRIDAYS.body, savedBy: 'michi', at: Date.now() - 2 * 86_400_000, from: null },
 ];
 const REGION = 'What this reply was based on';
 
@@ -44,7 +46,7 @@ async function boot(page: Page, memory: MemoryMockController, turns = 2): Promis
 const reply = (page: Page, id: string) => page.locator(`[data-msg-id="${id}"]`);
 
 test('only the reply with sources shows the line; Forget asks first, then deletes and says so; the keyboard opens and closes it', async ({ page }, info) => {
-  const memory = createMemoryMock({ records: [PNPM], sources: { 'chat-a2': based() } });
+  const memory = createMemoryMock({ records: [PNPM, FRIDAYS], sources: { 'chat-a2': based() } });
   await boot(page, memory);
   const line = reply(page, 'chat-a2').getByRole('region', { name: REGION });
   await expect(line).toBeVisible();
@@ -62,35 +64,34 @@ test('only the reply with sources shows the line; Forget asks first, then delete
   await page.keyboard.press('Enter');
   await expect(line.getByRole('listitem')).toHaveCount(2);
   await expect(line.getByRole('listitem').nth(0)).toContainText('Saved by you · today');
-  await expect(line.getByRole('listitem').nth(1)).toContainText('From a past chat');
+  await expect(line.getByRole('listitem').nth(1)).toContainText('Noted by Michi');
   await page.screenshot({ path: info.outputPath('reply-sources-open.png') });
-  await line.getByRole('button', { name: 'Forget' }).click();
+  await line.getByRole('button', { name: 'Forget' }).first().click();
   expect(memory.writes).toEqual([]);
   await line.getByRole('button', { name: 'Confirm forget' }).click();
   await expect(line.getByRole('status')).toHaveText('Forgotten.');
   await expect(toggle).toHaveText('Based on 1 thing you told me');
   expect(memory.writes).toEqual(['DELETE /memories/mem-pnpm']);
   await expect(page.locator('[data-sonner-toast]')).toHaveCount(0);
-  await line.getByRole('button', { name: 'Don’t recall' }).click();
-  await line.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await line.getByRole('button', { name: 'Forget' }).click();
+  await line.getByRole('button', { name: 'Confirm forget' }).click();
   await expect(line.getByRole('status')).toHaveCount(2);
-  expect(memory.writes).toEqual(['DELETE /memories/mem-pnpm', 'POST /memory-recall/hide']);
-  expect(memory.writeBodies[1]).toEqual({ docId: 41 });
+  expect(memory.writes).toEqual(['DELETE /memories/mem-pnpm', 'DELETE /memories/mem-fridays']);
   // Focus returns to the toggle on the next frame; Escape is the section's from there.
   await expect(toggle).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('region', { name: REGION })).toHaveCount(0);
 });
 
-test('Edit opens Settings › Memory with the memory marked', async ({ page }) => {
+test('Edit opens the memory in Settings › Memory', async ({ page }) => {
   const memory = createMemoryMock({ records: [PNPM, memoryRecord('mem-other', 'Answer in Chinese')], sources: { 'chat-a2': based() } });
   await boot(page, memory);
   const line = reply(page, 'chat-a2').getByRole('region', { name: REGION });
   await line.locator('.t-reply-sources-toggle').click();
   await line.getByRole('button', { name: 'Edit' }).click();
   const settings = settingsMain(page);
-  await expect(settings.getByRole('heading', { level: 1, name: 'Memory' })).toBeVisible();
-  await expect(settings.getByRole('list', { name: 'Saved memories' }).getByRole('listitem', { name: PNPM.body })).toHaveAttribute('data-marked', 'true');
+  await expect(settings.getByRole('heading', { level: 1, name: PNPM.body })).toBeFocused();
+  await expect(settings.getByRole('region', { name: 'Details' }).getByRole('combobox', { name: 'Kind' })).toHaveValue('convention');
 });
 
 async function phone(browser: Browser, baseURL: string | undefined) {

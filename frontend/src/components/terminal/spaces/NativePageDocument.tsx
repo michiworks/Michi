@@ -1,7 +1,8 @@
 import { NativeHomeSection } from './home/NativeHomeSection';
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, Copy, EyeOff, Quote, Sparkles, SquareCheck } from 'lucide-react';
+import { ArchiveIcon, CopyIcon, EyeOffIcon, QuoteIcon, SquareCheckIcon } from '../icons';
+import { CompanionGlyph } from '../companion/CompanionGlyph';
 import { isCheckinBlockSource, type BlockSource, type PageBlock, type PageDto, type PageEditOp } from 'michi-shared';
 import { BlockFrame, type ApplyResult, type OrphanDraft, type PageChrome } from '../content/page/BlockFrame';
 import { MichiBlock } from '../content/page/MichiBlock';
@@ -24,6 +25,7 @@ import { useCompanionAssistant } from '../../../state/companion/companionStore';
 import { useCompanionName } from '../../../state/companion/companionName';
 import { pageBlockTarget } from './metaChat/blockTarget';
 import { backendConnectionIdForWorkspace } from '../../../config/backendConnections';
+import { blockSubmissionCtx, useBlockSubmissions, type BlockSubmissions } from '../../../state/pages/useBlockSubmissions';
 import { NativeMarkdownSegments, nativeSourceRows } from './NativeMarkdownSegments';
 import { PageViewEntry, PageViewHost } from '../content/page/PageViewContext';
 import { copyText } from '../../../lib/clipboard';
@@ -252,13 +254,17 @@ function useNarrowLayout(ref: React.RefObject<HTMLElement | null>): boolean {
 
 /** Native Page renderer backed by the same editors/chrome as the Michi page. */
 function NativePageDocument(props: NativePageDocumentProps) {
-  const identity = JSON.stringify([backendConnectionIdForWorkspace(props.page.workspaceId), props.page.workspaceId, props.page.id]);
+  const connectionId = backendConnectionIdForWorkspace(props.page.workspaceId);
+  const identity = JSON.stringify([connectionId, props.page.workspaceId, props.page.id]);
+  // What was submitted through the page's forms, polls and choices; one set for the page and its detail views.
+  const host = useMemo(() => ({ kind: 'page' as const, pageId: props.page.id }), [props.page.id]);
+  const submissions = useBlockSubmissions(connectionId, props.page.workspaceId, host);
   return <PageViewHost key={identity} page={props.page} renderBlocks={ids => <>
     {ids.some(id => !props.page.blocks.some(block => block.id === id)) && <p role="status">Some content in this view is no longer available.</p>}
-    <NativePageDocumentContent {...props}
+    <NativePageDocumentContent {...props} submissions={submissions}
       visibleBlocks={ids.flatMap(id => { const block = props.page.blocks.find(block => block.id === id); return block ? [block] : []; })} detailView />
   </>}>
-    <NativePageDocumentContent {...props} />
+    <NativePageDocumentContent {...props} submissions={submissions} />
   </PageViewHost>;
 }
 
@@ -288,7 +294,8 @@ function NativePageDocumentContent({
   onStartConversation,
   onOpenConversation,
   detailView = false,
-}: NativePageDocumentProps & { detailView?: boolean }) {
+  submissions,
+}: NativePageDocumentProps & { detailView?: boolean; submissions: BlockSubmissions }) {
   // A block's own choices and prompts go to the agent's panel, in any area (DESIGN-v2 §1.3).
   const assistantAvailable = useCompanionAssistant().status !== 'unsupported';
   // Blocks a check-in wrote whose media the user chose to load (DESIGN-v2 §2.6.2).
@@ -302,6 +309,8 @@ function NativePageDocumentContent({
   const tablesCompact = compact || narrowLayout;
   const drag = usePageBlockDrag(page, documentRef, onEdit, readOnly || detailView);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Plain information (a refused edit, where kept words went) shows muted on the block it is about.
+  const [blockNote, setBlockNote] = useState<{ text: string; blockId?: string } | null>(null);
   const actionPending = useRef(false);
   const [actionBusy, setActionBusy] = useState(false);
   const perform = useCallback(async (ops: PageEditOp[]) => {
@@ -309,6 +318,7 @@ function NativePageDocumentContent({
     actionPending.current = true;
     setActionBusy(true);
     setActionError(null);
+    setBlockNote(null);
     try {
       const result = await onEdit(ops, page.revision);
       if (result !== 'ok') setActionError(result === 'stale' ? 'The page changed. Try again.' : 'Could not save this change. Try again.');
@@ -332,6 +342,7 @@ function NativePageDocumentContent({
   const apply = useCallback(async (ops: MichiPageEditOp[], _label: string, observedRevision?: number): Promise<ApplyResult> => {
     if (readOnly) return 'failed';
     setActionError(null);
+    setBlockNote(null);
     const insertCount = ops.filter((op) => op.op === 'insert').length;
     if (page.blocks.length + insertCount > PAGE_LIMITS.blocks) {
       setActionError(`A page may contain at most ${PAGE_LIMITS.blocks} blocks`);
@@ -372,7 +383,7 @@ function NativePageDocumentContent({
     } : undefined,
     branch: () => {},
     apply,
-    notice: (text) => setActionError(text),
+    notice: (text, tone = 'info', blockId) => { if (tone === 'error') setActionError(text); else setBlockNote({ text, blockId }); },
     copy: (blocks) => { copy(blocks.map((block) => nativeText(typeof block.id === 'string' ? nativeById.get(block.id) : undefined)).filter(Boolean).join('\n\n'), 'the text'); },
     copyText: copy,
     copyLink: () => {},
@@ -405,17 +416,17 @@ function NativePageDocumentContent({
       if (!block) return [];
       const pending = actionBusy || drag.moving;
       return [
-        { id: 'select', label: activeSelection.includes(block.id) ? 'Deselect' : 'Select', glyph: <SquareCheck size={15} />, onSelect: () => select(block.id, 'toggle') },
+        { id: 'select', label: activeSelection.includes(block.id) ? 'Deselect' : 'Select', glyph: <SquareCheckIcon />, onSelect: () => select(block.id, 'toggle') },
         // Named after the agent where it hands the block to the panel, as the toolbar's Ask (DESIGN-v2 §1.5).
-        { id: 'ask', label: onAskAssistant ? `Ask ${companionName}` : 'Ask', glyph: <Sparkles size={15} />, disabled: !onAsk && !onAskAssistant, onSelect: actions.ask },
-        { id: 'sources', label: 'Sources', glyph: <Quote size={15} />, disabled: !onOpenSource || !(block.sources?.length || pageSegmentSources(block).length), onSelect: actions.sources },
-        { id: 'ignore', label: 'Ignore', glyph: <EyeOff size={15} />, disabled: pending || !!block.edit, title: block.edit ? 'Automatic updates stopped' : 'Keep content and stop automatic updates', onSelect: () => {
+        { id: 'ask', label: onAskAssistant ? `Ask ${companionName}` : 'Ask', glyph: <CompanionGlyph />, disabled: !onAsk && !onAskAssistant, onSelect: actions.ask },
+        { id: 'sources', label: 'Sources', glyph: <QuoteIcon />, disabled: !onOpenSource || !(block.sources?.length || pageSegmentSources(block).length), onSelect: actions.sources },
+        { id: 'ignore', label: 'Ignore', glyph: <EyeOffIcon />, disabled: pending || !!block.edit, title: block.edit ? 'Automatic updates stopped' : 'Keep content and stop automatic updates', onSelect: () => {
           const { id, rev, sources: _sources, edit: _edit, ...content } = block;
           void perform([{ op: 'update', id, block: content, expectRev: rev }]);
         } },
-        { id: 'archive', label: 'Archive', glyph: <Archive size={15} />, disabled: pending, title: 'Remove from this page and keep its history', onSelect: () => { void perform([{ op: 'delete', id: block.id, expectRev: block.rev }]); } },
+        { id: 'archive', label: 'Archive', glyph: <ArchiveIcon />, disabled: pending, title: 'Remove from this page and keep its history', onSelect: () => { actions.focusNeighbor(); void perform([{ op: 'delete', id: block.id, expectRev: block.rev }]); } },
         { divider: true, id: 'clipboard' },
-        { id: 'copy', label: 'Copy text', glyph: <Copy size={15} />, onSelect: () => { copy(nativeText(block), 'the text'); } },
+        { id: 'copy', label: 'Copy text', glyph: <CopyIcon />, onSelect: () => { copy(nativeText(block), 'the text'); } },
       ];
     },
   }), [activeSelection, actionBusy, addEntries, apply, compact, companionName, copy, detailView, drag.dragStart, drag.takeDragged, drag.moving, nativeById, onAsk, onAskAssistant, onOpenSource, onOrphanDraft, onSelectBlock, onSelectionChange, page, perform, select, selectedBlockIds, sourceLabel]);
@@ -434,7 +445,7 @@ function NativePageDocumentContent({
       const id = typeof displayBlock.pageId === 'string' ? displayBlock.pageId : '';
       const target = page.blocks.find((block) => block.type === 'page-link' && block.pageId === id);
       const label = target?.type === 'page-link' ? (id === page.id ? 'This page' : id) : id;
-      return <button type="button" className="michi-doc-link-btn" onClick={() => onOpenPage(id)} disabled={!id}>{label || 'Open page'}</button>;
+      return <button type="button" className="michi-doc-link-btn" data-michi-block="page-link" onClick={() => onOpenPage(id)} disabled={!id}>{label || 'Open page'}</button>;
     },
     renderNativeDatabaseRef: (displayBlock) => {
       const block = page.blocks.find((candidate) => candidate.id === displayBlock.id);
@@ -458,7 +469,9 @@ function NativePageDocumentContent({
     } } : {}),
     ...(readOnly || !slotAddEntries ? {} : { slotAddEntries }),
     ...(onStartConversation && !readOnly ? { startConversation: (text: string) => onStartConversation(text, page.workspaceId) } : {}),
-  }), [tablesCompact, onAskAssistant, onOpenConversation, onOpenPage, onStartConversation, page, readOnly, renderDatabaseRef, renderThreads, renderTaskView, slotAddEntries, toggleItem, updateBlock, nativeById, assistantAvailable]);
+    // A read-only page shows what was submitted and stores nothing.
+    ...blockSubmissionCtx(submissions, !readOnly),
+  }), [tablesCompact, onAskAssistant, onOpenConversation, onOpenPage, onStartConversation, page, readOnly, renderDatabaseRef, renderThreads, renderTaskView, slotAddEntries, toggleItem, updateBlock, nativeById, assistantAvailable, submissions]);
 
   const renderBlock = useCallback((displayBlock: MichiPageBlock, blockCtx: MichiBlockCtx) => {
     const native = displayBlock.id ? nativeById.get(displayBlock.id) : undefined;
@@ -489,9 +502,9 @@ function NativePageDocumentContent({
       selected={activeSelection.includes(block.id)}
       dragging={drag.dragging === block.id}
       renderBlock={held !== 'none' ? (displayBlock, blockCtx) => <HeldMedia media={held} onLoad={() => loadMedia(block.id)}>{renderBlock(displayBlock, blockCtx)}</HeldMedia> : renderBlock}
-      renderDecorations={() => <>{renderDecorations?.(block)}{decisionNote?.blockId === block.id && <p className="native-page-decision-note" role="alert">{decisionNote.text}</p>}<div data-page-view-outlet="" /></>}
+      renderDecorations={() => <>{renderDecorations?.(block)}{decisionNote?.blockId === block.id && <p className="native-page-decision-note" role="alert">{decisionNote.text}</p>}{blockNote?.blockId === block.id && <p className="native-page-note" role="status">{blockNote.text}</p>}<div data-page-view-outlet="" /></>}
     />;
-  }, [chrome, compact, ctx, michiBlocks, readOnly, renderBlock, renderDecorations, activeSelection, decisionNote, drag.dragging, sourceLabel, onOpenSource, detailView, instanceId, loadedMedia, loadMedia]);
+  }, [chrome, compact, ctx, michiBlocks, readOnly, renderBlock, renderDecorations, activeSelection, decisionNote, blockNote, drag.dragging, sourceLabel, onOpenSource, detailView, instanceId, loadedMedia, loadMedia]);
 
   // The page title and chrome belong to the document shell around this list.
   return (
@@ -503,6 +516,7 @@ function NativePageDocumentContent({
       {visibleBlocks.map((block, index) => block.type === 'view' || (!detailView && block.visibility === 'detail') ? null : frameFor(block, index))}
       {drag.drop && createPortal(<div className="native-page-drop" aria-hidden="true" style={{ left: drag.drop.left, top: drag.drop.top, width: drag.drop.width }} />, document.body)}
       {(actionError || drag.error) && <p className="native-page-decision-note" role="alert">{actionError || drag.error}</p>}
+      {blockNote && !(blockNote.blockId && nativeById.has(blockNote.blockId)) && <p className="native-page-note" role="status">{blockNote.text}</p>}
       {!page.blocks.length && <EmptyPageEditor page={page} onEdit={onEdit} onOrphanDraft={onOrphanDraft} readOnly={readOnly} />}
     </div>
     </PageBlocksContext.Provider></MichiMantine>

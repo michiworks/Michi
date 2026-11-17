@@ -156,9 +156,11 @@ test('Trash confirms destructive actions, preserves failed rows, and empties all
   await expect(menuTrigger).toBeFocused();
   expect(calls.purges).toHaveLength(0);
 
+  // The row's actions show for the pointer or keyboard focus, not for focus a click left behind.
   calls.failPurge = true;
+  await row.hover();
   await menuTrigger.click();
-  await page.getByRole('menuitem', { name: 'Delete permanently...' }).click();
+  await page.getByRole('menuitem', { name: 'Delete permanently…' }).click();
   await page.getByRole('dialog', { name: 'Delete permanently?' }).getByRole('button', { name: 'Delete permanently', exact: true }).click();
   await expect(settings.getByRole('alert')).toContainText('Could not delete this item');
   await expect(settings.getByRole('button', { name: 'Michi implementation notes', exact: true })).toBeVisible();
@@ -166,8 +168,9 @@ test('Trash confirms destructive actions, preserves failed rows, and empties all
   expect(calls.purges).toEqual([['notes']]);
 
   calls.failPurge = false;
+  await row.hover();
   await menuTrigger.click();
-  await page.getByRole('menuitem', { name: 'Delete permanently...' }).click();
+  await page.getByRole('menuitem', { name: 'Delete permanently…' }).click();
   await page.getByRole('dialog', { name: 'Delete permanently?' }).getByRole('button', { name: 'Delete permanently', exact: true }).click();
   await expect(rows).toHaveCount(4);
 

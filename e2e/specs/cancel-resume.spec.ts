@@ -223,6 +223,38 @@ test.describe('cancel + resume', () => {
     await bootWithWorkspace(page);
   });
 
+  test('a message queued before Stop waits for Send now, then goes as the next turn', async ({ page }) => {
+    const composer = page.locator(COMPOSER_EDITOR).first();
+    await composer.fill('start the long turn');
+    await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
+    await expect.poll(() => page.evaluate(() => window.__cancelResume.messages.length)).toBe(1);
+    const first = await page.evaluate(() => {
+      const { url, turnId } = window.__cancelResume.messages[0];
+      return { url, turnId };
+    });
+    await page.evaluate((body) => window.__cancelResume.messages[0].write(body), sseBody([
+      { event: 'chunk', data: { text: originalReply, turnId: first.turnId, seq: 0 } },
+    ]));
+    await expect(page.getByText(originalReply, { exact: true })).toBeVisible();
+    await composer.fill('then push it');
+    await page.getByRole('button', { name: 'Send next (Enter). Sends after the current response', exact: true }).click();
+    await expect(page.locator('.t-pre-block')).toHaveCount(1);
+
+    await page.getByRole('button', { name: /Stop stream/ }).click();
+    await expect(page.locator('.t-pre-block')).toContainText('paused after Stop');
+    await acknowledgeCancel(page, first);
+    await page.evaluate((body) => window.__cancelResume.observers[0].write(body, true), sseBody([
+      { event: 'done', data: { stopReason: 'cancelled', persisted: true, turnId: first.turnId, seq: 0 } },
+    ]));
+    await expect(page.locator('.t-pre-block')).toContainText('paused after Stop');
+    expect(await page.evaluate(() => window.__cancelResume.messages.length)).toBe(1);
+
+    await page.getByRole('button', { name: 'Send now', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__cancelResume.messages.length)).toBe(2);
+    await expect(page.locator('.t-pre-block')).toHaveCount(0);
+    await expect(page.locator('.terminal-message-user').getByText('then push it', { exact: true })).toHaveCount(1);
+  });
+
   test('slow cleanup unlocks the composer and exposes the exact failure without refresh', async ({ page }, info) => {
     const first = await startAndStop(page);
     const pending = page.getByRole('status', { name: waitingLabel, exact: true });

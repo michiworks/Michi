@@ -54,6 +54,8 @@ import { recordTypedText, releaseTypedText } from '../services/memory/typedText'
 import { coreBeginAndFinalizeTurn } from '../services/turnPersistence.core';
 import { mainThreadDb } from '../services/turnPersistence.mainAdapter';
 import { memoryInjector as defaultMemoryInjector, type MemoryInjector, type PreparedMemoryContext } from './memoryInjection';
+import { instructionsInjector as defaultInstructionsInjector, type InstructionsInjector, type PreparedInstructionsContext } from './instructionsInjection';
+import { MAINTENANCE_CHECKPOINT_PACING, TURN_CHECKPOINT_PACING, TurnCheckpointScheduler } from './turnCheckpoints';
 
 export interface HubSubscriber {
   send(ev: ChatStreamEvent): void;
@@ -96,7 +98,8 @@ interface TurnLog {
   status: "active" | "ended" | "error";
   nextSeq: number;
   snapshot: DurableTurnSnapshot;
-  lastCheckpointAt: number;
+  /** Paces this turn's checkpoints (turnCheckpoints.ts); finalization cancels it. */
+  checkpoints: TurnCheckpointScheduler;
   checkpointCount: number;
   selfInitiated: boolean;
   ownerUserId: string | null;
@@ -154,9 +157,15 @@ export interface NodeCompletionFacts {
   nodeSeenCompletionSeq: number;
 }
 
+/** What a checkpoint wrote: the assistant row's bytes (coreCheckpointTurn), null for nothing. */
+interface CheckpointWritten {
+  payloadBytes: number | null;
+}
+
 export interface TurnPersistence {
   begin(snapshot: DurableTurnSnapshot): void | Promise<void>;
-  checkpoint(snapshot: DurableTurnSnapshot): void;
+  /** Called by the turn's checkpoint scheduler, which reads the snapshot only when it writes. */
+  checkpoint(snapshot: DurableTurnSnapshot): void | CheckpointWritten | Promise<CheckpointWritten | void>;
   finalize(snapshot: DurableTurnSnapshot): void | Promise<void>;
   /**
    * The node's completion facts as committed, read once its turn finalized.
@@ -181,26 +190,13 @@ const repositoryTurnPersistence: TurnPersistence = {
     }
     beginTurn(snapshot);
   },
-  checkpoint: (snapshot) => {
-    // Defer the write so the current tick can finish broadcasting SSE events.
-    // When the worker is ready, the write happens off-thread entirely.
-    // Checkpoints are idempotent and non-critical — if one is skipped due to
-    // process exit, finalize will persist the canonical terminal state.
-    if (isDbWorkerReady()) {
-      // Fire-and-forget: the worker handles the write off-thread.
-      dbWorker.checkpointTurn(snapshot).catch((err) => {
-        console.warn(`[turnPersistence] worker checkpoint failed for turn ${snapshot.turnId}:`, err);
-      });
-    } else {
-      setImmediate(() => {
-        try {
-          checkpointTurn(snapshot);
-        } catch (err) {
-          console.warn(`[turnPersistence] deferred checkpoint failed for turn ${snapshot.turnId}:`, err);
-        }
-      });
-    }
-  },
+  // Checkpoints are idempotent and non-critical: one lost to a process exit
+  // leaves the previous one, and finalize persists the terminal state. The
+  // scheduler calls this from its own timer, after the events were broadcast,
+  // so without the worker the write runs here; the hub logs a failure.
+  checkpoint: (snapshot) => isDbWorkerReady()
+    ? dbWorker.checkpointTurn(snapshot)
+    : { payloadBytes: checkpointTurn(snapshot).payloadBytes },
   finalize: (snapshot) => {
     if (isDbWorkerReady()) {
       return dbWorker.finalizeTurn(snapshot).then(() => {});
@@ -419,6 +415,11 @@ export interface TurnFinalizedEvent {
   outcome: DurableTurnSnapshot['status'];
   /** False when the terminal commit failed. */
   persisted: boolean;
+  /** The `done` frame's stop reason (end_turn, max_tokens, cancelled, …); null after an error. */
+  stopReason: string | null;
+  /** The failure as the turn row keeps it (BACKEND_RESTARTED_ERROR after a shutdown), and the error frame's code. */
+  error: string | null;
+  errorCode: string | null;
   runtimeId: string | null;
   completedAt: number;
 }
@@ -552,21 +553,35 @@ interface DurableTurnIdentity {
 }
 
 export const ENDED_LOG_RETENTION_MS = 60_000;
-export const TURN_CHECKPOINT_INTERVAL_MS = 1_500;
 
-const STRUCTURAL_EVENTS = new Set<ChatStreamEvent['event']>([
+/**
+ * Events whose checkpoint is written on the next tick rather than at the
+ * turn's interval: a tool's result, a prompt waiting on the user, accepted
+ * steering, the title and the turn's other structure. A tool's start and the
+ * usage summary wait for the interval: the next update or finalize rewrites
+ * the row anyway, and usage_summary comes just before turn_end.
+ */
+const SOON_CHECKPOINT_EVENTS = new Set<ChatStreamEvent['event']>([
   CHAT_STREAM_EVENTS.plan,
-  CHAT_STREAM_EVENTS.toolCall,
   CHAT_STREAM_EVENTS.image,
+  CHAT_STREAM_EVENTS.blocks,
   CHAT_STREAM_EVENTS.title,
   CHAT_STREAM_EVENTS.followUps,
   CHAT_STREAM_EVENTS.branchOverview,
   CHAT_STREAM_EVENTS.steerAccepted,
+  CHAT_STREAM_EVENTS.permissionRequest,
+  CHAT_STREAM_EVENTS.permissionResolved,
   CHAT_STREAM_EVENTS.userInputRequest,
   CHAT_STREAM_EVENTS.userInputResolved,
-  CHAT_STREAM_EVENTS.usageSummary,
   CHAT_STREAM_EVENTS.warning,
 ]);
+
+function checkpointsSoon(event: ChatStreamEvent): boolean {
+  if (event.event === CHAT_STREAM_EVENTS.toolCall || event.event === CHAT_STREAM_EVENTS.toolCallUpdate) {
+    return !isActiveToolStatus(event.data.status);
+  }
+  return SOON_CHECKPOINT_EVENTS.has(event.event);
+}
 
 /** The runtime reported a non-empty branch overview (set_branch_overview), so the turn need not derive one. */
 function reportsBranchOverview(ev: NormalizedEvent): boolean {
@@ -581,6 +596,13 @@ function titleSourceOf(args: StartTurnArgs): { text: string; context?: string } 
   if (!text) return undefined;
   const context = args.userMetadata?.quotedText?.trim();
   return context ? { text, context } : { text };
+}
+
+/** A host block a turn carries (Michi Memory, workspace instructions): the session holds it once the turn completes. */
+type InjectedTurnContext = Pick<PreparedMemoryContext | PreparedInstructionsContext, 'delivered'>;
+
+function injectedContexts(...contexts: Array<InjectedTurnContext | null>): InjectedTurnContext[] {
+  return contexts.filter((context): context is InjectedTurnContext => context !== null);
 }
 
 /** What a turn stops with on a runtime_error event; ReportedRuntimeError keeps its code. */
@@ -624,13 +646,13 @@ export class ChatHub {
   private shuttingDown = false;
   private readonly retentionMs: number;
   private readonly persistence: TurnPersistence;
-  private readonly checkpointIntervalMs: number;
   private readonly workspaceIdForNode: (nodeId: string) => string | null;
   private readonly lookupDurableTurn: (turnId: string) => DurableTurnIdentity | null;
   private readonly titleGenerator: SidecarTitleGenerator | null;
   private readonly nodeTitle: (nodeId: string) => string | null;
   private readonly pageManifestBuilder: typeof buildPageManifest;
   private readonly memoryInjector: Pick<MemoryInjector, 'prepare' | 'forget'> | null;
+  private readonly instructionsInjector: Pick<InstructionsInjector, 'prepare' | 'forget'> | null;
   private readonly turnFinalizedListeners = new Set<(turn: TurnFinalizedEvent) => void>();
   private readonly isAssistantNode: (nodeId: string) => boolean;
   private readonly assistantPurposeOf: (nodeId: string) => string;
@@ -639,7 +661,6 @@ export class ChatHub {
   constructor(opts: {
     retentionMs?: number;
     persistence?: TurnPersistence;
-    checkpointIntervalMs?: number;
     workspaceIdForNode?: (nodeId: string) => string | null;
     lookupDurableTurn?: (turnId: string) => DurableTurnIdentity | null;
     /** `null` disables sidecar title generation (tests, agent-run-only hubs). */
@@ -653,6 +674,8 @@ export class ChatHub {
      * harness) sends none unless the test passes one.
      */
     memoryInjector?: Pick<MemoryInjector, 'prepare' | 'forget'> | null;
+    /** Workspace instructions after a session's first turn (agents/instructionsInjection); defaults as memoryInjector does. */
+    instructionsInjector?: Pick<InstructionsInjector, 'prepare' | 'forget'> | null;
     /** Whether a node is an assistant conversation (assistant/identity); injectable for harness tests. */
     isAssistantNode?: (nodeId: string) => boolean;
     /** An assistant conversation's recorded purpose (assistant/identity); injectable for harness tests. */
@@ -665,13 +688,15 @@ export class ChatHub {
     this.recordUntrusted = opts.recordUntrustedSource ?? recordUntrustedSource;
     this.retentionMs = opts.retentionMs ?? ENDED_LOG_RETENTION_MS;
     this.persistence = opts.persistence ?? repositoryTurnPersistence;
-    this.checkpointIntervalMs = opts.checkpointIntervalMs ?? TURN_CHECKPOINT_INTERVAL_MS;
     this.workspaceIdForNode = opts.workspaceIdForNode
       ?? ((nodeId) => getNode(nodeId)?.workspace_id ?? null);
     this.pageManifestBuilder = opts.pageManifestBuilder ?? buildPageManifest;
     this.memoryInjector = opts.memoryInjector === undefined
       ? (opts.persistence ? null : defaultMemoryInjector)
       : opts.memoryInjector;
+    this.instructionsInjector = opts.instructionsInjector === undefined
+      ? (opts.persistence ? null : defaultInstructionsInjector)
+      : opts.instructionsInjector;
     // A hub built with injected persistence is a test harness; it must not
     // reach into the runtime registry unless the test asks for it.
     this.titleGenerator = opts.titleGenerator === undefined
@@ -737,6 +762,7 @@ export class ChatHub {
     if (this.turnFinalizedListeners.size === 0) return;
     const { snapshot } = log;
     const user = snapshot.userMessage;
+    const terminal = log.events.at(-1)?.ev;
     const event: TurnFinalizedEvent = {
       chatId,
       nodeId: log.nodeId,
@@ -759,6 +785,9 @@ export class ChatHub {
       status: log.status === 'ended' ? 'ended' : 'error',
       outcome: persisted ? snapshot.status : 'error',
       persisted,
+      stopReason: snapshot.stopReason ?? null,
+      error: snapshot.error ?? null,
+      errorCode: terminal?.event === CHAT_STREAM_EVENTS.error ? terminal.data.code ?? null : null,
       runtimeId: log.runtimeId ?? null,
       completedAt: snapshot.completedAt ?? Date.now(),
     };
@@ -1393,7 +1422,7 @@ export class ChatHub {
     const session = this.activeSessions.get(chatId) ?? idleSession;
     if (!session?.compact) return { started: false, detail: "unsupported" };
     const result = await session.compact(instructions);
-    // The summary may leave out the memory block: send it again next turn.
+    // The summary may leave out the memory block and the workspace instructions: send them again next turn.
     if (result.started) this.forgetInjectedMemory(session);
     const log = this.turns.get(chatId);
     const live = log && log.status === "active" ? log : null;
@@ -1426,24 +1455,29 @@ export class ChatHub {
   }
 
   /**
-   * The session may no longer hold the Michi Memory block it was sent (a
-   * runtime command such as /clear or /compact ran on it): its next turn
-   * carries the block again.
+   * The session may no longer hold the Michi Memory block or the workspace
+   * instructions it was sent (a runtime command such as /clear or /compact
+   * ran on it): its next turn carries them again.
    */
   forgetInjectedMemory(session: AgentSession): void {
     this.memoryInjector?.forget(session);
+    this.instructionsInjector?.forget(session);
   }
 
   /**
-   * The Michi Memory block for a turn about to be sent, or null. A turn
-   * that starts with "/" may be a command the runtime runs only when it
-   * leads the prompt (and that may reset its context), so it carries no
-   * block and the next turn sends one again.
+   * A turn that starts with "/" may be a command the runtime runs only when
+   * it leads the prompt (and that may reset its context), so it carries no
+   * host block and the next turn sends them again. A skill turn's text is
+   * what followed the skill's name, never a runtime command.
    */
+  private leadsWithRuntimeCommand(log: TurnLog): boolean {
+    return !log.skill && log.wireText.trimStart().startsWith('/');
+  }
+
+  /** The Michi Memory block for a turn about to be sent, or null. */
   private prepareMemory(session: AgentSession, log: TurnLog): PreparedMemoryContext | null {
     if (!this.memoryInjector) return null;
-    // A skill turn's text is what followed the skill's name, never a runtime command.
-    if (!log.skill && log.wireText.trimStart().startsWith('/')) {
+    if (this.leadsWithRuntimeCommand(log)) {
       this.memoryInjector.forget(session);
       return null;
     }
@@ -1462,16 +1496,32 @@ export class ChatHub {
     });
   }
 
-  /** Follows a runtime event for the memory block: a compaction drops it, a completed turn delivers it. */
-  private trackMemory(session: AgentSession | undefined, memory: PreparedMemoryContext | null, log: TurnLog, ev: NormalizedEvent): void {
-    if (!session) return;
-    if (ev.kind === 'compaction_start' || ev.kind === 'compaction_end') this.forgetInjectedMemory(session);
-    else if (ev.kind === 'turn_end') this.memoryDelivered(memory, log, ev.stopReason);
+  /**
+   * What a turn about to be sent carries of the workspace instructions
+   * (agents/instructionsInjection), or null: the instructions when the
+   * session does not hold the current ones.
+   */
+  private prepareInstructions(session: AgentSession, log: TurnLog): PreparedInstructionsContext | null {
+    if (!this.instructionsInjector) return null;
+    if (this.leadsWithRuntimeCommand(log)) {
+      this.instructionsInjector.forget(session);
+      return null;
+    }
+    return this.instructionsInjector.prepare({
+      session, workspaceId: log.snapshot.workspaceId, nodeId: log.nodeId, turnId: log.turnId,
+    });
   }
 
-  private memoryDelivered(memory: PreparedMemoryContext | null, log: TurnLog, stopReason: string | undefined): void {
-    if (!memory || stopReason === 'error' || stopReason === 'cancelled' || this.cancelledTurnIds.has(log.turnId)) return;
-    memory.delivered();
+  /** Follows a runtime event for the host blocks: a compaction drops them, a completed turn delivers them. */
+  private trackInjected(session: AgentSession | undefined, injected: readonly InjectedTurnContext[], log: TurnLog, ev: NormalizedEvent): void {
+    if (!session) return;
+    if (ev.kind === 'compaction_start' || ev.kind === 'compaction_end') this.forgetInjectedMemory(session);
+    else if (ev.kind === 'turn_end') this.injectedDelivered(injected, log, ev.stopReason);
+  }
+
+  private injectedDelivered(injected: readonly InjectedTurnContext[], log: TurnLog, stopReason: string | undefined): void {
+    if (stopReason === 'error' || stopReason === 'cancelled' || this.cancelledTurnIds.has(log.turnId)) return;
+    for (const context of injected) context.delivered();
   }
 
   /**
@@ -1791,6 +1841,7 @@ export class ChatHub {
       selfInitiated: true,
       keepUserMessage,
       ownerUserId: args.ownerUserId ?? null,
+      maintenance: !!args.maintenanceContext,
     });
     log.runtimeId = args.session.runtimeId;
     if (args.private === true || isCheckinNodeId(args.nodeId)) log.private = true;
@@ -1819,6 +1870,7 @@ export class ChatHub {
     // ordinary chat.
     const memory = args.maintenanceContext || args.memoryContext !== undefined ? null : this.prepareMemory(args.session, log);
     const memoryContext = args.maintenanceContext ? null : args.memoryContext ?? memory?.text ?? null;
+    const instructions = args.maintenanceContext ? null : this.prepareInstructions(args.session, log);
     const events = (async function* (): AsyncIterableIterator<NormalizedEvent> {
       // Stop can reserve this id while begin() commits, or arrive from
       // a synchronous turn_start subscriber. Never dispatch that work.
@@ -1829,13 +1881,14 @@ export class ChatHub {
       yield* args.session.send(args.text, {
         assistantMessageId: assistantId,
         ...(log.snapshot.userMessage?.id ? { userMessageId: log.snapshot.userMessage.id } : {}),
+        ...(instructions?.text ? { instructionsContext: instructions.text } : {}),
         ...(memoryContext ? { memoryContext } : {}),
         ...(pageContext ? { pageContext } : {}),
         ...(args.maintenanceContext ? { maintenanceContext: args.maintenanceContext } : {}),
         turnId: log.turnId,
       });
     })();
-    const done = this.runSelfTurn(args.chatId, log, events, args.session, memory);
+    const done = this.runSelfTurn(args.chatId, log, events, args.session, injectedContexts(memory, instructions));
     this.requestedSelfTurnCompletions.set(args.turnId, done);
     void done.then(
       () => this.requestedSelfTurnCompletions.delete(args.turnId),
@@ -1932,11 +1985,13 @@ export class ChatHub {
     selfInitiated: boolean;
     keepUserMessage?: boolean;
     ownerUserId: string | null;
+    /** A Pages maintenance turn (StartRequestedSelfTurnArgs.maintenanceContext), checkpointed less often. */
+    maintenance?: boolean;
   }): TurnLog {
     const workspaceId = this.workspaceIdForNode(input.nodeId);
     if (!workspaceId) throw new Error(`node ${input.nodeId} does not exist`);
     const startedAt = Date.now();
-    return {
+    const log: TurnLog = {
       chatId: input.chatId,
       turnId: input.turnId,
       assistantId: input.assistantId,
@@ -1956,11 +2011,16 @@ export class ChatHub {
         keepUserMessage: input.keepUserMessage,
         startedAt,
       }),
-      lastCheckpointAt: startedAt,
+      checkpoints: new TurnCheckpointScheduler(
+        () => this.writeCheckpoint(log),
+        input.maintenance ? MAINTENANCE_CHECKPOINT_PACING : TURN_CHECKPOINT_PACING,
+        startedAt,
+      ),
       checkpointCount: 0,
       selfInitiated: input.selfInitiated,
       ownerUserId: input.ownerUserId,
     };
+    return log;
   }
 
   private async runSelfTurn(
@@ -1968,10 +2028,10 @@ export class ChatHub {
     log: TurnLog,
     events: AsyncIterableIterator<NormalizedEvent>,
     session?: AgentSession,
-    memory: PreparedMemoryContext | null = null,
+    injected: readonly InjectedTurnContext[] = [],
   ): Promise<void> {
     try {
-      await this.pumpTurnEvents(chatId, log, events, session, memory);
+      await this.pumpTurnEvents(chatId, log, events, session, injected);
     } catch (err) {
       await this.failTurn(chatId, log, err);
     } finally {
@@ -1995,7 +2055,7 @@ export class ChatHub {
     log: TurnLog,
     events: AsyncIterable<NormalizedEvent>,
     session: AgentSession | undefined,
-    memory: PreparedMemoryContext | null,
+    injected: readonly InjectedTurnContext[],
   ): Promise<void> {
     let branchOverviewPublished = false;
     for await (const ev of events) {
@@ -2004,7 +2064,7 @@ export class ChatHub {
       if (reportsBranchOverview(ev)) branchOverviewPublished = true;
       observeTurnTrust({ nodeId: log.nodeId, turnId: log.turnId }, session?.runtimeId, ev);
       if (ev.kind === "runtime_error") throw runtimeEventError(ev);
-      this.trackMemory(session, memory, log, ev);
+      this.trackInjected(session, injected, log, ev);
       if (ev.kind === "turn_end") {
         if (!branchOverviewPublished) {
           branchOverviewPublished = this.publishBranchOverview(chatId, log);
@@ -2022,7 +2082,7 @@ export class ChatHub {
     if (log.finalization) await log.finalization;
     if (log.status === 'active' && this.turns.get(chatId) === log) {
       if (!branchOverviewPublished) this.publishBranchOverview(chatId, log);
-      this.memoryDelivered(memory, log, 'end_turn');
+      this.injectedDelivered(injected, log, 'end_turn');
       await this.finishWithDone(
         chatId,
         log,
@@ -2094,7 +2154,7 @@ export class ChatHub {
     log.events.push(stamped);
     this.trackPendingInteraction(log, stamped.ev);
     this.broadcast(chatId, log, stamped.ev);
-    if (checkpoint) this.maybeCheckpoint(log, stamped.ev);
+    if (checkpoint) log.checkpoints.markDirty(checkpointsSoon(stamped.ev));
   }
 
   private trackPendingInteraction(log: TurnLog, event: ChatStreamEvent): void {
@@ -2131,24 +2191,34 @@ export class ChatHub {
     });
   }
 
-  private maybeCheckpoint(log: TurnLog, event: ChatStreamEvent): void {
-    const now = Date.now();
-    const immediate = STRUCTURAL_EVENTS.has(event.event)
-      || (event.event === CHAT_STREAM_EVENTS.toolCallUpdate && !isActiveToolStatus(event.data.status));
-    if (!immediate && now - log.lastCheckpointAt < this.checkpointIntervalMs) return;
-    log.lastCheckpointAt = now;
+  /** The scheduler's write: the snapshot as it is now, and the bytes the store reports. */
+  private writeCheckpoint(log: TurnLog): number | null | Promise<number | null> {
+    let written: ReturnType<TurnPersistence['checkpoint']>;
     try {
-      this.persistence.checkpoint(log.snapshot);
-      log.checkpointCount += 1;
+      written = this.persistence.checkpoint(log.snapshot);
     } catch (err) {
-      appLog.warn('chat', 'turn checkpoint failed; continuing to finalization', {
-        turnId: log.turnId,
-        nodeId: log.nodeId,
-        eventCount: log.events.length,
-        checkpointCount: log.checkpointCount,
-        errorClass: err instanceof Error ? err.name : 'Error',
-      });
+      this.checkpointFailed(log, err);
+      return null;
     }
+    log.checkpointCount += 1;
+    if (!(written instanceof Promise)) return written?.payloadBytes ?? null;
+    return written.then(
+      (result) => result?.payloadBytes ?? null,
+      (err: unknown) => {
+        this.checkpointFailed(log, err);
+        return null;
+      },
+    );
+  }
+
+  private checkpointFailed(log: TurnLog, err: unknown): void {
+    appLog.warn('chat', 'turn checkpoint failed; continuing to finalization', {
+      turnId: log.turnId,
+      nodeId: log.nodeId,
+      eventCount: log.events.length,
+      checkpointCount: log.checkpointCount,
+      errorClass: err instanceof Error ? err.name : 'Error',
+    });
   }
 
   private broadcast(chatId: string, log: TurnLog, event: ChatStreamEvent): void {
@@ -2207,6 +2277,9 @@ export class ChatHub {
   private finalizeOnce(log: TurnLog, finalize: () => Promise<void>): Promise<void> {
     if (log.finalization) return log.finalization;
     if (log.status !== 'active') return Promise.resolve();
+    // finalize writes the terminal snapshot, with the steering it waits for;
+    // a checkpoint still pending would only rewrite the row before it.
+    log.checkpoints.cancel();
     log.finalization = Promise.resolve().then(finalize);
     return log.finalization;
   }
@@ -2480,6 +2553,7 @@ export class ChatHub {
         turnId: log.turnId,
       });
       const memory = this.prepareMemory(session, log);
+      const instructions = this.prepareInstructions(session, log);
       const uploaded = log.snapshot.userMessage?.metadata?.attachments;
       const input = uploaded?.length && isAssistantNode(log.nodeId)
         ? prepareAssistantAttachments(log.wireText, uploaded, assistantCwd())
@@ -2488,13 +2562,14 @@ export class ChatHub {
         attachments: input.attachments,
         assistantMessageId: log.assistantId,
         userMessageId: log.snapshot.userMessage?.id,
+        ...(instructions?.text ? { instructionsContext: instructions.text } : {}),
         ...(memory ? { memoryContext: memory.text } : {}),
         ...(pageContext ? { pageContext } : {}),
         turnId: log.turnId,
         ...(log.humanOrigin ? { humanOrigin: true } : {}),
         ...(log.skill ? { skill: log.skill } : {}),
         ...(log.titleSource ? { titleSource: log.titleSource } : {}),
-      }), session, memory);
+      }), session, injectedContexts(memory, instructions));
     } catch (err) {
       await this.failTurn(chatId, log, err);
     } finally {
@@ -2524,6 +2599,7 @@ export class ChatHub {
       this.retainedTurns.set(chatId, retained);
     }
     const timer = setTimeout(() => {
+      log.checkpoints.cancel();
       if (this.turns.get(chatId) === log) this.turns.delete(chatId);
       const remaining = (this.retainedTurns.get(chatId) ?? []).filter((entry) => entry !== log);
       if (remaining.length > 0) this.retainedTurns.set(chatId, remaining);

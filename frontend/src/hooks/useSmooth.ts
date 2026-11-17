@@ -1,5 +1,7 @@
 import { useRef, useState, useEffect, useLayoutEffect, useMemo } from 'react';
 import { hasCjkText, performanceNowMs, rendererStreamProbeEnabled, writeRendererStreamProbe } from '../lib/streamProbe';
+import { usePaneShown } from './paneShown';
+import { prefersReducedMotion } from './useReducedMotion';
 
 const ASSUMED_FRAME_MS = 1000 / 60;
 const MAX_FRAME_DELTA_MS = 100;
@@ -412,6 +414,9 @@ export function useSmooth(
   const hasRateEstimateRef = useRef(false);
   const isBackgroundedRef = useRef(false);
   const wasBackgroundedRef = useRef(false);
+  // Whether the pane holding this text can be seen (paneShown.ts): hidden in
+  // place, it snaps like a backgrounded window; frozen off the strip, it stops.
+  const pane = usePaneShown();
 
   // Lock-and-coast: when streaming ends, freeze the last computed CPS so the
   // remaining backlog drains at a constant speed instead of decelerating.
@@ -516,7 +521,7 @@ export function useSmooth(
   }
 
   function startFrame() {
-    if (frameRef.current !== null) return;
+    if (frameRef.current !== null || pane?.hidden || pane?.frozen) return;
     frameRef.current = requestFrame(tick);
   }
 
@@ -747,7 +752,8 @@ export function useSmooth(
       snapToSource('window_backgrounded');
     };
     const markForegrounded = () => {
-      if (isDocumentHidden()) return;
+      // A window coming back does not restart pacing in a pane still hidden.
+      if (isDocumentHidden() || pane?.hidden) return;
       isBackgroundedRef.current = false;
       if (wasBackgroundedRef.current) snapToSource('window_foregrounded');
     };
@@ -755,6 +761,19 @@ export function useSmooth(
       if (isDocumentHidden()) markBackgrounded();
       else markForegrounded();
     };
+    // A pane hidden in place snaps as a backgrounded window does. Frozen off
+    // the strip it only stops its frame, rendering nothing; back on the strip
+    // it shows its source and paces again what follows (MO-25).
+    const onPaneShown = () => {
+      if (!pane) return;
+      if (pane.hidden) markBackgrounded();
+      else if (pane.frozen) {
+        stopFrame();
+        wasBackgroundedRef.current = true;
+      } else markForegrounded();
+    };
+    const unsubscribePane = pane?.subscribe(onPaneShown);
+    if (pane?.hidden || pane?.frozen) onPaneShown();
 
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', onVisibilityChange);
@@ -772,8 +791,9 @@ export function useSmooth(
         window.removeEventListener('blur', markBackgrounded);
         window.removeEventListener('focus', markForegrounded);
       }
+      unsubscribePane?.();
     };
-  }, [streaming]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [streaming, pane]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When new text arrives, estimate agent speed and ensure the frame loop runs.
   useEffect(() => {
@@ -783,9 +803,18 @@ export function useSmooth(
     const nextCount = boundaries.length;
     const nextChars = source.length;
 
-    if (isDocumentHidden() || isBackgroundedRef.current || wasBackgroundedRef.current) {
+    // Reduced motion, either trigger, does not pace text: each chunk shows as
+    // it arrives, as in a backgrounded window (MO-18).
+    if (prefersReducedMotion()) {
+      snapToSource('reduced_motion');
+      return;
+    }
+
+    // A pane hidden or frozen shows each chunk as it comes, with no frame.
+    const paneUnseen = !!pane && (pane.hidden || pane.frozen);
+    if (isDocumentHidden() || isBackgroundedRef.current || wasBackgroundedRef.current || paneUnseen) {
       snapToSource('source_while_backgrounded');
-      if (!isDocumentHidden() && !isBackgroundedRef.current) {
+      if (!isDocumentHidden() && !isBackgroundedRef.current && !paneUnseen) {
         wasBackgroundedRef.current = false;
       }
       return;

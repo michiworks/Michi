@@ -188,12 +188,31 @@ export interface TreeMessagePage {
   turns?: unknown[];
 }
 
+/** What one read of a tree's message pages asks for. */
+interface TreeMessagePageRequest {
+  nodeId?: string;
+  before?: MessagePageCursor;
+  limit?: number;
+  /**
+   * Whole turns until `limit` messages or this many bytes, the newest turn
+   * always whole. A gateway that predates it answers the newest `limit`.
+   */
+  maxBytes?: number;
+  /**
+   * Finished calls come without their bodies (ToolCallState.deferred), for
+   * fetchMessageToolCalls. A gateway that predates it sends them whole.
+   */
+  leanToolCalls?: boolean;
+}
+
 export async function fetchTreeMessagePage(workspaceId: string, treeId: string, connectionId?: string,
-  signal?: AbortSignal, page?: { nodeId?: string; before?: MessagePageCursor; limit?: number },
+  signal?: AbortSignal, page?: TreeMessagePageRequest,
 ): Promise<TreeMessagePage> {
   // One node's latest page when `before` is absent; the server caps limit at 200.
   // Without a node, every node's latest `limit` messages.
   const query = new URLSearchParams({ limit: String(Math.min(200, Math.max(1, page?.limit ?? 50))) });
+  if (page?.maxBytes !== undefined) query.set('maxBytes', String(page.maxBytes));
+  if (page?.leanToolCalls) query.set('toolCalls', 'lean');
   if (page?.nodeId) {
     query.set('nodeId', serverEntityId(page.nodeId, connectionId));
     if (page.before) {
@@ -215,6 +234,30 @@ export async function fetchTreeMessagePage(workspaceId: string, treeId: string, 
     throw new Error('Invalid message page');
   }
   return body;
+}
+
+/** The most messages one fetchMessageToolCalls names (the server's cap). */
+export const MAX_TOOL_CALL_MESSAGES = 50;
+
+/**
+ * The tool calls a display page deferred, for some of one node's messages:
+ * `{ id, node_id, tool_calls }` rows, transport-projected. A message no
+ * longer there is left out.
+ */
+export async function fetchMessageToolCalls(workspaceId: string, treeId: string, connectionId: string | undefined,
+  nodeId: string, messageIds: readonly string[], signal?: AbortSignal,
+): Promise<Array<{ id: string; tool_calls: unknown }>> {
+  const query = new URLSearchParams({ nodeId: serverEntityId(nodeId, connectionId) });
+  for (const id of messageIds.slice(0, MAX_TOOL_CALL_MESSAGES)) query.append('messageId', id);
+  const res = await backendFetch(
+    `${connectionId ? backendApiBase(connectionId) : workspaceBackendApiBase(workspaceId)}/workspaces/${encodeURIComponent(serverEntityId(workspaceId, connectionId))}/trees/${encodeURIComponent(treeId)}/tool-calls?${query}`,
+    { signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(30_000)]) },
+  );
+  if (!res.ok) throw new Error(`fetchMessageToolCalls failed: ${res.status}`);
+  const body = await res.json() as { messages?: unknown };
+  if (!Array.isArray(body.messages)) throw new Error('Invalid tool call answer');
+  return body.messages.filter((row): row is { id: string; tool_calls: unknown } =>
+    !!row && typeof row === 'object' && typeof (row as { id?: unknown }).id === 'string');
 }
 
 /**

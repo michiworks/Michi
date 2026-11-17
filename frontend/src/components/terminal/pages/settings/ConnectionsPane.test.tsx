@@ -58,6 +58,8 @@ describe('ConnectionsPane', () => {
     render(<ConnectionsPane projects={[]} />);
     expect(await screen.findByText('Local')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Manual setup/i }));
+    // The form opens on its first field and, once saved, closes back to Manual setup.
+    expect(document.activeElement).toBe(screen.getByPlaceholderText('build-server'));
     fireEvent.change(screen.getByPlaceholderText('build-server'), { target: { value: 'Build' } });
     fireEvent.change(screen.getByLabelText('Connection transport'), { target: { value: 'direct' } });
     fireEvent.change(screen.getByPlaceholderText('https://michi.example.com:3000'), { target: { value: 'https://build.example.com' } });
@@ -69,6 +71,7 @@ describe('ConnectionsPane', () => {
       apiUrl: 'https://build.example.com',
     })));
     await vi.waitFor(() => expect(screen.queryByDisplayValue('secret-remote-token')).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Manual setup' }));
   });
 
   it('lists current remote membership even when local projects disagree, and only opens workspaces loaded from that host', async () => {

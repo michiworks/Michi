@@ -118,6 +118,7 @@ it('keeps HTTPS consent visible and automatically shows a reusable QR only after
   expect(screen.getByText(/owner@example.com/)).toBeTruthy();
   expect(screen.getByRole('link', { name: ready.url }).getAttribute('href')).toBe(ready.url + '/mobile-connect#first-key');
   expect(screen.getByText(/This link pairs your phone for this run/)).toBeTruthy();
+  // A backend can restart between polls and return the same public origin.
   mocks.request.mockImplementation(async () => ({ ...ready }));
   mocks.link.mockResolvedValue({ url: ready.url + '/mobile-connect#new-key', reusable: true, expiresAt: 1 });
   await act(() => vi.advanceTimersByTimeAsync(3000));

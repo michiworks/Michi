@@ -80,6 +80,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const STALLED_AFTER_MS = 3 * DAY_MS;
 /** Where Just done starts before the first look at the Spaces Home. */
 export const FIRST_LOOK_WINDOW_MS = DAY_MS;
+/**
+ * A failed or interrupted last turn waits on you for this long at most: the
+ * window the sidebar's Failed mark has (frontend sidebarSelectors' FAILED_MARK_MS).
+ */
+export const FAILED_WAIT_MS = 7 * DAY_MS;
 const TITLE_MAX = 120;
 
 type ConversationRow = {
@@ -204,10 +209,23 @@ function conversationItem(row: ConversationRow, at: number | null, summary: stri
   };
 }
 
+/**
+ * A failed or interrupted last turn stops waiting on you once you had the
+ * conversation on screen after it ended (`nodes.viewed_at`), or after
+ * FAILED_WAIT_MS: the rule the sidebar's Failed mark follows, so Home, the
+ * Companion's feed (companion/sources/michi.ts) and the sidebar agree.
+ * Dismiss and Snooze still act on one before that. Thread cards keep saying
+ * it failed: they ignore what the person has seen.
+ */
+export function failureSettled(row: { turn_status: string | null; viewed_at: number | null }, at: number, now: number): boolean {
+  if (row.turn_status !== 'error') return false;
+  return (row.viewed_at !== null && row.viewed_at >= at) || now - at > FAILED_WAIT_MS;
+}
+
 /** Which section a conversation is in, if any, and the row it shows there. */
 function classify(row: ConversationRow, live: HomeLiveWaitReader, since: number, now: number): { state: HomeSectionKey | null; item: HomeSectionItem } {
   const wait = waitingFor(row, live);
-  if (wait) return { state: now - wait.at >= STALLED_AFTER_MS ? 'stalled' : 'waiting', item: conversationItem(row, wait.at, wait.summary) };
+  if (wait && !failureSettled(row, wait.at, now)) return { state: now - wait.at >= STALLED_AFTER_MS ? 'stalled' : 'waiting', item: conversationItem(row, wait.at, wait.summary) };
   // A message written after it completed, or having it on screen since, means the user was there since.
   if (row.turn_status === 'completed' && !row.replied && row.completed_at !== null && row.completed_at > since
     && !(row.viewed_at !== null && row.viewed_at >= row.completed_at)) {
@@ -379,8 +397,9 @@ export function conversationCount(ownerUserId: string): number {
  * it waits for in ChatHub. Waiting adds page proposals that wait for
  * confirmation. The Spaces Home's structured layout rules narrow what each
  * one lists. Just done leaves out a conversation the user had on screen
- * after it completed (`nodes.viewed_at`); the client also drops the ones this
- * window opened since its last read.
+ * after it completed (`nodes.viewed_at`), and Waiting and Stalled a failed one
+ * the same way, or once it is a week old (failureSettled); the client also
+ * drops the ones this window opened since its last read.
  */
 export function homeSections(input: HomeSectionsInput): SpacesHomeSectionsDto {
   const { now, since, list } = classified(input, false);

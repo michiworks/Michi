@@ -6,7 +6,7 @@ import { areaButton } from '../fixtures/shell';
  * Sidebar polish contracts:
  *  - keyboard focus reveals the row menu instead of leaving it at opacity 0
  *  - workspace actions get a delayed, styled HoverTip instead of native title
- *  - scrollbars are quiet until the pointer enters and linger 2s after leaving
+ *  - scrollbars are quiet until the pointer enters and linger 700ms after leaving
  *  - the collapsed wide sidebar leaves the 48px area rail
  */
 async function bootSidebar(page: Page, { reduceMotion = false }: { reduceMotion?: boolean } = {}) {
@@ -68,7 +68,7 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
   const sidebar = page.locator('.terminal-sidebar');
   const thumb = sidebar.locator('.sb-scroller__thumb').first();
 
-  // ── scrollbars start quiet, appear on entry, linger 2s after leaving ──
+  // ── scrollbars start quiet, appear on entry, linger 700ms after leaving ──
   await expect(sidebar).toHaveAttribute('data-scrollbars', 'quiet');
   await expect.poll(() => thumb.evaluate(el => getComputedStyle(el).opacity)).toBe('0');
 
@@ -78,7 +78,7 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
 
   await page.mouse.move(4, 4);
   await expect(sidebar).toHaveAttribute('data-scrollbars', 'visible');
-  await expect(sidebar).toHaveAttribute('data-scrollbars', 'quiet', { timeout: 3500 });
+  await expect(sidebar).toHaveAttribute('data-scrollbars', 'quiet', { timeout: 2000 });
 
   // Re-entering cancels the pending hide instead of letting it fire.
   await sidebar.hover();
@@ -106,10 +106,17 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
   const tooltip = page.getByRole('tooltip');
   await expect(tooltip).toBeVisible({ timeout: 2000 });
   await expect(tooltip).toContainText('More actions');
-  // Tooltip must be the styled surface, not a native title.
-  await expect(tooltip).toHaveCSS('pointer-events', 'none');
   await page.screenshot({ path: info.outputPath('sidebar-tooltip.png'), fullPage: true });
 
+  // The tip is hoverable (WCAG 1.4.13): the pointer crosses the gap onto it and
+  // it stays; once the pointer has left both, it goes.
+  const tip = await tooltip.boundingBox();
+  if (!tip) throw new Error('tooltip has no box');
+  await page.mouse.move(tip.x + tip.width / 2, tip.y + tip.height / 2, { steps: 6 });
+  // A frame for a close to land, so the check below cannot pass ahead of it.
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toContainText('More actions');
   await page.mouse.move(4, 4);
   await expect(tooltip).toHaveCount(0);
 
@@ -120,10 +127,12 @@ test('sidebar polish: focus reveal, HoverTip, scrollbar linger', async ({ page }
 
 
 test("the sidebar list's own thumb takes the outer 2px, beside the rows' rails, and follows the scroll", async ({ page }) => {
-  // Short enough that the first page of threads overflows the list.
   await page.setViewportSize({ width: 1280, height: 380 });
   await bootSidebar(page);
   const sidebar = page.locator('.terminal-sidebar');
+  // All fourteen threads overflow the list at this height, whatever a row's
+  // height; the first page alone (sidebarThreadLimit, 5) fits.
+  await sidebar.getByRole('button', { name: /^Show \d+ more$/ }).click();
   const frame = sidebar.locator('.sb-scroller').first();
   const view = frame.locator('.sb-scroller__view');
   const thumb = frame.locator('.sb-scroller__thumb');

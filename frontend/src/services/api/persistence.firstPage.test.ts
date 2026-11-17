@@ -14,3 +14,12 @@ it('asks for every node\'s latest messages of a tree with a limit and no node', 
   expect(url.searchParams.has('nodeId')).toBe(false);
   expect(url.searchParams.has('beforeSeq')).toBe(false);
 });
+
+it('asks for turn pages within a byte budget when given one', async () => {
+  const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ messages: [], pages: [] })));
+  vi.stubGlobal('fetch', fetch);
+  await fetchTreeMessagePage(backendEntityId('r', 'ws'), backendEntityId('r', 'tree'), 'r', undefined,
+    { nodeId: backendEntityId('r', 'n'), before: { seq: 4, id: 'm4' }, maxBytes: 4096 });
+  const url = new URL(fetch.mock.calls[0][0], 'http://localhost');
+  expect(Object.fromEntries(url.searchParams)).toEqual({ limit: '50', maxBytes: '4096', nodeId: 'n', beforeSeq: '4', beforeId: 'm4' });
+});

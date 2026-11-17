@@ -8,6 +8,7 @@ import type express from 'express';
 import type { AttentionNotificationV1 } from 'michi-shared';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { setupAttentionRoutes } from '../src/routes/attention';
+import { writePrefs } from '../src/services/prefsConfig';
 import { setupMichiRoutes } from '../src/routes/michi';
 import { setupPersistenceRoutes } from '../src/routes/persistence';
 import { AttentionFeed, attentionFeed } from '../src/services/attention/attentionFeed';
@@ -185,10 +186,25 @@ describe('the desktop notifier feed (Electron main)', () => {
     seedRecord('attn-1', 'local-user');
     const router = setupAttentionRoutes(service());
     const claimed = await invoke(router, 'POST', '/attention/desktop/notifications/attn-1/claim', LOCAL);
-    assert.deepEqual([claimed.statusCode, claimed.body], [200, { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active' }]);
+    assert.deepEqual([claimed.statusCode, claimed.body], [200, { claimed: true, claimedByWindowId: 'desktop-notifier', status: 'active', silent: false }]);
     const window = await invoke(router, 'POST', '/attention/notifications/attn-1/claim', { body: { windowId: 'w-1' } });
     assert.deepEqual(window.body, { claimed: false, claimedByWindowId: 'desktop-notifier', status: 'active' });
     assert.equal((await invoke(router, 'POST', '/attention/desktop/notifications/attn-404/claim', LOCAL)).statusCode, 404);
+  });
+
+  test('a desktop claim tells the notifier to keep its banner quiet while Sounds is off', async () => {
+    seedRecord('attn-1', 'local-user');
+    const router = setupAttentionRoutes(service());
+    writePrefs({ notificationSounds: false });
+    try {
+      const claimed = await invoke(router, 'POST', '/attention/desktop/notifications/attn-1/claim', LOCAL);
+      assert.equal((claimed.body as { silent: boolean }).silent, true);
+      writePrefs({ notificationSounds: true });
+      const again = await invoke(router, 'POST', '/attention/desktop/notifications/attn-1/claim', LOCAL);
+      assert.equal((again.body as { silent: boolean }).silent, false);
+    } finally {
+      writePrefs({ notificationSounds: true });
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
-import { COMPOSER_EDITOR } from '../fixtures/shell';
+import { createPagesMockController, taskDatabaseFixture } from '../fixtures/pagesFixtures';
+import { COMPOSER_EDITOR, leaveSettings, openArea, openSettings } from '../fixtures/shell';
 
 async function bootMenus(page: Page, palette: 'bone' | 'monokai', extraPrefs: Record<string, unknown> = {}) {
   await installMockApi(page, { streamEvents: [
@@ -135,10 +136,8 @@ test('autocomplete stays within a narrow viewport and reduced motion skips the b
 test('glass menus keep the overlay frost whatever the sidebar glass, honour reduced transparency; right-click stays solid', async ({ page }, info) => {
   await bootMenus(page, 'monokai');
   await page.evaluate(() => {
-    // The sidebar's glass knobs. Overlays must not follow them.
+    // The sidebar's glass knob. Overlays must not follow it.
     const style = document.documentElement.style;
-    style.setProperty('--term-glass-blur', '36px');
-    style.setProperty('--term-glass-saturate', '120%');
     style.setProperty('--term-sidebar-solid-alpha', '.2');
   });
   await page.getByRole('button', { name: 'Search', exact: true }).click();
@@ -243,7 +242,8 @@ test('workspace, agent and model pickers share selection mark, pressed trigger, 
   });
   const selectedMark = async (row: Locator) => row.evaluate((element) => {
     const glyph = element.querySelector('.michi-menu-glyph');
-    return glyph?.textContent === '✓' && element.lastElementChild === glyph;
+    // The check is CheckIcon from icons.tsx, in the row's trailing glyph slot.
+    return !!glyph?.querySelector('svg') && element.lastElementChild === glyph;
   });
 
   const pickers = [
@@ -273,4 +273,104 @@ test('workspace, agent and model pickers share selection mark, pressed trigger, 
     await expect(surface).toHaveCount(0);
     await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   }
+});
+
+/**
+ * Records what each growing menu surface animates: its duration and the
+ * properties it moves. An animation cancelled at once (the development
+ * build's StrictMode remounts the surface) did not play.
+ */
+async function recordMenuMotion(page: Page) {
+  await page.evaluate(() => {
+    const played: Animation[] = [];
+    (window as unknown as { menuMotion: Animation[] }).menuMotion = played;
+    const original = Element.prototype.animate;
+    Element.prototype.animate = function (...args: Parameters<typeof original>) {
+      const animation = original.apply(this, args);
+      if (this instanceof HTMLElement && this.dataset.menuMotion === 'grow') played.push(animation);
+      return animation;
+    };
+  });
+}
+const menuMotion = (page: Page) => page.evaluate(() => (window as unknown as { menuMotion: Animation[] }).menuMotion
+  .filter((animation) => animation.playState !== 'idle')
+  .map((animation) => ({
+    duration: Number(animation.effect?.getTiming().duration),
+    properties: [...new Set((animation.effect as KeyframeEffect).getKeyframes().flatMap((frame) => Object.keys(frame)))]
+      .filter((key) => !['offset', 'computedOffset', 'easing', 'composite'].includes(key)).sort(),
+  })));
+
+const GROW = { duration: 154, properties: ['opacity', 'transform'] };
+const FADE_IN = { duration: 120, properties: ['opacity'] };
+const FADE_OUT = { duration: 80, properties: ['opacity'] };
+
+/** Opens a surface and closes it with Esc: it grows in (or only fades under reduced motion), then fades out as an inert ghost. */
+async function expectGrowAndFade(page: Page, trigger: Locator, surface: Locator, entrance: typeof GROW) {
+  await page.evaluate(() => { (window as unknown as { menuMotion: unknown[] }).menuMotion.length = 0; });
+  await trigger.click();
+  await expect(surface).toHaveAttribute('data-menu-motion', 'grow');
+  await expect.poll(() => menuMotion(page)).toEqual([entrance]);
+  await expect.poll(() => surface.evaluate((element) => element.getAnimations().length)).toBe(0);
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+  await expect(surface).toHaveCount(0);
+  await expect.poll(() => menuMotion(page)).toEqual([entrance, FADE_OUT]);
+  await expect(page.locator('[data-menu-motion="grow"]')).toHaveCount(0);
+}
+
+test('the Trash ⋯ menu (ActionMenu) and a database Filter panel (DbPopover) grow in and fade out like the right-click menu', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const now = Date.now();
+  const workspace = {
+    workspace: { id: 'menu-ws', name: 'Menus', cwd: '/mock/menus', created_at: now - 86_400_000, active_tree_id: 'menu-tree' },
+    nodes: [
+      { id: 'live', tree_id: 'menu-tree', title: 'Live conversation', kind: 'chat', created_at: now - 86_400_000, message_count: 1 },
+      { id: 'gone', tree_id: 'menu-tree', title: 'Deleted notes', kind: 'chat', created_at: now - 86_400_000, message_count: 1,
+        deleted_at: now - 60_000, deletion_group_id: 'del-gone' },
+    ],
+    trees: [{ id: 'menu-tree', root_node_id: 'live', created_at: now, last_active_at: now }],
+    edges: [], contexts: [], messages: [],
+  };
+  const pages = createPagesMockController();
+  pages.pages.set('menu-page', { id: 'menu-page', workspaceId: 'menu-ws', parentId: null, position: 0, title: 'Menu page', color: null,
+    updatedAt: 1, updatedBy: 'user', pendingProposals: 0, helperNodeId: null, revision: 1, viewVersion: 1,
+    blocks: [{ id: 'board', rev: 1, type: 'task-view' }] });
+  pages.databases.set('menu-tasks', taskDatabaseFixture({ id: 'menu-tasks', workspaceId: 'menu-ws', title: 'Tasks', revision: 1, updatedAt: now,
+    rows: [{ id: 't1', values: { task: 'Write the migration', status: 'todo' }, position: 0, updatedAt: now, rev: 1, edited: {}, bodyEditedAt: null }] }));
+  pages.taskDatabases.set('menu-ws', 'menu-tasks');
+  await installMockApi(page, { workspaces: [workspace], custom: async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (path === '/api/prefs' && method === 'GET') {
+      await route.fulfill({ json: { prefs: { onboardingCompletedAt: 1, terminalPalette: 'bone' } } });
+      return true;
+    }
+    if (path === '/api/workspaces/menu-ws' && method === 'GET') {
+      await route.fulfill({ json: workspace });
+      return true;
+    }
+    return pages.handle(route);
+  } });
+  await page.addInitScript(() => localStorage.setItem('michi:migrated', '1'));
+  await page.goto('/');
+  await recordMenuMotion(page);
+
+  const settings = await openSettings(page, 'Trash');
+  const row = settings.locator('[data-history-key="thread:del-gone"]');
+  const more = settings.getByRole('button', { name: 'More actions for Deleted notes' });
+  const actions = page.getByRole('menu', { name: 'Trash actions' });
+  await row.hover();
+  await expectGrowAndFade(page, more, actions, GROW);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expectGrowAndFade(page, more, actions, FADE_IN);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await leaveSettings(page);
+
+  await openArea(page, 'spaces');
+  const sidebar = page.locator('.spaces-side');
+  const pageRow = sidebar.getByRole('button', { name: 'Menu page', exact: true });
+  if (!(await pageRow.isVisible())) await sidebar.getByRole('button', { name: 'Expand Menus', exact: true }).click();
+  await pageRow.click();
+  await page.locator('[data-tasks]').hover();
+  await expectGrowAndFade(page, page.getByRole('button', { name: 'Filter', exact: true }), page.getByRole('dialog', { name: 'Filter' }), GROW);
 });

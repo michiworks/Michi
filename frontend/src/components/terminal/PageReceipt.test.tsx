@@ -20,7 +20,7 @@ function write(id: string, title: string, michiPageWrite: Record<string, unknown
 }
 
 /** Each row's text, without its glyph. */
-const rows = () => [...document.querySelectorAll('[data-receipt="page"]')].map((row) => row.textContent!.replace(/^✓ /, ''));
+const rows = () => [...document.querySelectorAll('[data-receipt="page"]')].map((row) => row.textContent);
 
 afterEach(() => {
   cleanup();
@@ -56,7 +56,7 @@ describe('page rows under a reply', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View' }));
     expect(openPagePane).toHaveBeenCalledWith({ pageId: 'pg-home', workspaceId: 'ws-r', backendConnectionId: 'local', title: 'Tasks' });
     // The changed row, in the pane it just opened.
-    expect(revealPageTarget).toHaveBeenCalledWith({ targetId: 'row-1', databaseId: 'db-t', pane: { pageId: 'pg-home', workspaceId: 'ws-r', backendConnectionId: 'local' } });
+    expect(revealPageTarget).toHaveBeenCalledWith({ targetId: 'row-1', databaseId: 'db-t', pane: { pageId: 'pg-home', workspaceId: 'ws-r', backendConnectionId: 'local' } }, { land: 'instant' });
   });
 
   it('counts the places a write changed', () => {
@@ -72,6 +72,21 @@ describe('page rows under a reply', () => {
     render(<TurnReceipts tools={[made, page, filled]} workspaceId="ws-r" backendConnectionId="local" />);
     expect(screen.getAllByRole('list')).toHaveLength(1);
     expect(rows()).toEqual(['Created 外部跟进 Database · 2 edits', 'Updated FMH Config 进度 1 place View']);
+  });
+
+  it.each([
+    ['grows the list, then a later row, in under a reply made on screen', true, '0px'],
+    ['shows the list and a later row settled under a reply that came with history', false, 'auto'],
+  ] as const)('%s', (_name, enter, height) => {
+    const plan = write('t9', 'edit_page', { resourceKind: 'page', resourceId: 'pg-a', title: 'Plan', appliedCount: 1, proposedCount: 0, affectedTargetIds: ['b1'] });
+    const notes = write('t10', 'edit_page', { resourceKind: 'page', resourceId: 'pg-b', title: 'Notes', appliedCount: 1, proposedCount: 0, affectedTargetIds: ['b2'] });
+    const receipts = (tools: ToolCallState[]) => <TurnReceipts tools={tools} workspaceId="ws-r" backendConnectionId="local" enter={enter} />;
+    const { rerender } = render(receipts([]));
+    // A growing box starts at 0px, a settled one at its own height.
+    rerender(receipts([plan]));
+    expect((document.querySelector('.receipt-ledger')!.parentElement as HTMLElement).style.height).toBe(height);
+    rerender(receipts([plan, notes]));
+    expect([...document.querySelectorAll<HTMLElement>('[data-reveal="arrive"]')].map((box) => box.style.height)).toEqual(['auto', height]);
   });
 
   it('shows no page rows without the conversation’s workspace', () => {

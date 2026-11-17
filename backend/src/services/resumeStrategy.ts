@@ -1,6 +1,8 @@
 import type { AgentConfig } from "./agentConfig";
 import { getBuiltinDefaultModel, getBuiltinDefaultReasoning, resolveProvider } from "./agentConfig";
 import type { AgentReasoning, AgentRuntime } from "../agents/types";
+import { parseBranchOverviewEntries, type BranchOverviewEntry } from "michi-shared";
+import { getNode } from "./dbRepository";
 
 export type ResumeStrategy = "fresh" | "live" | "exact" | "compatible";
 
@@ -15,6 +17,8 @@ export interface ResumeSignature {
 export interface TranscriptMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** Epoch ms the message was stored. Without it a cut middle gets no per-turn summaries. */
+  createdAt?: number;
 }
 
 export interface ResumeDecisionInput {
@@ -36,9 +40,18 @@ export interface ResumeDecision {
   reason: string;
 }
 
-const MAX_COMPAT_TRANSCRIPT_CHARS = 28_000;
-const COMPAT_TRANSCRIPT_HEAD = 8_000;
-const COMPAT_TRANSCRIPT_TAIL = 16_000;
+/**
+ * Transcript characters a compatible context keeps, about 28k tokens: enough
+ * that what a long conversation settled in its middle survives a runtime,
+ * provider or model switch, and still a fraction of a current model's window.
+ */
+export const COMPAT_TRANSCRIPT_BUDGET = 112_000;
+// A longer transcript keeps 2/7 of the budget from its start and 4/7 from its
+// end, the shares the former 8k + 16k of 28k had; the 1/7 between is room
+// for the per-turn summaries of the part cut out.
+const COMPAT_HEAD_SHARE = 2 / 7;
+const COMPAT_TAIL_SHARE = 4 / 7;
+const TRANSCRIPT_SEPARATOR = "\n\n---\n\n";
 
 export function normalizeSignaturePart(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
@@ -154,6 +167,8 @@ export interface CompatibleContextOptions {
   intro?: string;
   /** Extra caveat about an incomplete or approximate transcript. */
   note?: string;
+  /** Transcript characters to keep (default COMPAT_TRANSCRIPT_BUDGET); less for a model with a small window. */
+  budget?: number;
 }
 
 export function buildCompatibleResumeContext(
@@ -164,10 +179,12 @@ export function buildCompatibleResumeContext(
   const nonEmpty = messages.filter((m) => m.content.trim().length > 0);
   if (nonEmpty.length === 0 && !extra?.note) return null;
   const label = opts.title?.trim() || opts.nodeId;
-  const transcript = nonEmpty
-    .map((m) => `${m.role === "user" ? "User" : "Assistant"}:\n${m.content}`)
-    .join("\n\n---\n\n");
-  const body = truncateMiddle(transcript, MAX_COMPAT_TRANSCRIPT_CHARS);
+  const blocks = nonEmpty.map((m) => `${m.role === "user" ? "User" : "Assistant"}:\n${m.content}`);
+  const transcript = blocks.join(TRANSCRIPT_SEPARATOR);
+  const budget = extra?.budget !== undefined && Number.isFinite(extra.budget) && extra.budget > 0
+    ? Math.floor(extra.budget)
+    : COMPAT_TRANSCRIPT_BUDGET;
+  const body = transcript.length <= budget ? transcript : cutMiddle(nonEmpty, blocks, budget, opts.nodeId);
   const parts = [
     `=== ${extra?.heading ?? "Compatible resume transcript"}: ${label} ===`,
     extra?.intro ?? "The following is the visible transcript from this node. It may come from a different runtime, provider, or model. Treat it as prior conversation context and continue naturally; do not mention the restore mode unless the user asks.",
@@ -177,10 +194,72 @@ export function buildCompatibleResumeContext(
   return parts.join("\n");
 }
 
-function truncateMiddle(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  const head = text.slice(0, COMPAT_TRANSCRIPT_HEAD).trimEnd();
-  const tail = text.slice(-COMPAT_TRANSCRIPT_TAIL).trimStart();
-  const omitted = text.length - head.length - tail.length;
-  return `${head}\n\n[... omitted ${omitted} chars from the middle of the prior transcript ...]\n\n${tail}`;
+/**
+ * The transcript's start and end, and in place of its middle the summaries
+ * the agent recorded for those turns (nodes.branch_overview) and where
+ * read_node finds the messages themselves.
+ */
+function cutMiddle(messages: readonly TranscriptMessage[], blocks: readonly string[], budget: number, nodeId: string): string {
+  const text = blocks.join(TRANSCRIPT_SEPARATOR);
+  const headEnd = Math.floor(budget * COMPAT_HEAD_SHARE);
+  const tailStart = text.length - Math.floor(budget * COMPAT_TAIL_SHARE);
+  const head = text.slice(0, headEnd).trimEnd();
+  const tail = text.slice(tailStart).trimStart();
+  // The messages the cut reaches, whole or in part.
+  let first = -1;
+  let last = -1;
+  let start = 0;
+  blocks.forEach((block, index) => {
+    const end = start + block.length;
+    if (end > headEnd && start < tailStart) {
+      if (first < 0) first = index;
+      last = index;
+    }
+    start = end + TRANSCRIPT_SEPARATOR.length;
+  });
+  const lines = [`[... omitted ${text.length - head.length - tail.length} chars from the middle of the prior transcript ...]`];
+  if (first >= 0) {
+    const room = budget - headEnd - Math.floor(budget * COMPAT_TAIL_SHARE);
+    lines.push(...cutSummaries(nodeId, messages, first, last, room));
+    // The stored conversation has at least as many messages before the cut as this
+    // transcript (it drops empty ones and joins check-in facts), so this offset never starts after it.
+    lines.push(`To read the omitted messages, call read_node with nodeId "${nodeId}", from "head", offset ${first + 1}; `
+      + "it starts at or just before the omitted part.");
+  }
+  return `${head}\n\n${lines.join("\n")}\n\n${tail}`;
+}
+
+/** The overview entries recorded during the turns of messages first..last, newest kept first when they exceed `room`. */
+function cutSummaries(nodeId: string, messages: readonly TranscriptMessage[], first: number, last: number, room: number): string[] {
+  const from = messages[first]?.createdAt;
+  // A turn's entry is recorded as the turn ends, before the next message. One
+  // after the transcript's last message may be a later turn's (past a branch point).
+  const until = messages[last + 1]?.createdAt ?? messages[last]?.createdAt;
+  if (from === undefined || until === undefined) return [];
+  const entries = nodeOverviewEntries(nodeId).filter((entry) => entry.at >= from && entry.at < until);
+  if (entries.length === 0) return [];
+  const kept: string[] = [];
+  let used = 0;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const line = `- ${entries[index].text.replace(/\s*\n\s*/g, " ")}`;
+    if (used + line.length + 1 > room) break;
+    kept.unshift(line);
+    used += line.length + 1;
+  }
+  if (kept.length === 0) return [];
+  const left = entries.length - kept.length;
+  return [
+    "Summaries the agent wrote at the end of each turn in the omitted part, oldest first. "
+      + "They were not checked against the messages and may leave things out:",
+    ...(left > 0 ? [`(${left} earlier summar${left === 1 ? "y" : "ies"} left out for length)`] : []),
+    ...kept,
+  ];
+}
+
+function nodeOverviewEntries(nodeId: string): BranchOverviewEntry[] {
+  try {
+    return parseBranchOverviewEntries(getNode(nodeId)?.branch_overview);
+  } catch {
+    return [];
+  }
 }

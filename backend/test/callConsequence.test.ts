@@ -2,12 +2,14 @@
  * What a tool call does to the world (agents/callConsequence.ts, design
  * D19 / Q26, lane D): the verdict every runtime's call gets in Michi's
  * policy. Shell commands are judged from their argv (choice B): known
- * egress, known local, and what Michi cannot read.
+ * egress, known local, and what Michi cannot read. An egress of a dangerous
+ * kind (a push, a deploy, a code review or its comments, a message or email)
+ * says so: only those ask in Michi's work (2026-11-13).
  */
 
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { callConsequence, isCredentialPath, shellConsequence, type CallConsequence } from '../src/agents/callConsequence';
+import { callConsequence, isCredentialPath, shellConsequence, type CallConsequence, type DangerKind } from '../src/agents/callConsequence';
 
 const shell = (command: string | string[]): CallConsequence => shellConsequence(command).consequence;
 
@@ -243,6 +245,42 @@ describe('tool calls', () => {
     assert.equal(callConsequence({ toolName: 'mystery', kind: 'other' }).consequence, 'unclear');
     assert.equal(callConsequence({ toolName: 'mystery' }).consequence, 'unclear');
     assert.equal(callConsequence({ toolName: 'TodoWrite' }).consequence, 'read');
+  });
+});
+
+describe('dangerous egress', () => {
+  const danger = (toolName: string, input?: unknown): DangerKind | undefined => callConsequence({ toolName, input }).danger;
+
+  test('pushes and default-branch changes, deploys, code reviews and their comments, messages and email', () => {
+    const cases: Record<DangerKind, Array<[string, unknown]>> = {
+      push: [['Bash', { command: 'git push origin my-feature' }], ['Bash', { command: 'git checkout dev' }], ['Bash', { command: 'gh pr merge 12' }],
+        ['mcp__github__merge_pull_request', {}]],
+      deploy: [['Bash', { command: 'npx cdk deploy' }], ['Bash', { command: 'aws s3 rm s3://b/k' }], ['use_aws', { service_name: 'ec2', operation_name: 'terminate-instances' }],
+        ['Bash', { command: 'terraform apply' }], ['Bash', { command: 'npm publish' }], ['Bash', { command: 'docker push registry.example.com/app:1' }],
+        ['Bash', { command: './scripts/deploy.sh' }], ['Bash', { command: 'make release' }], ['mcp__pipelines__promote_change', {}]],
+      review: [['Bash', { command: 'gh pr create --fill' }], ['Bash', { command: 'gh pr comment 12 -b hi' }], ['mcp__example__ReviewAddComment', {}],
+        ['mcp__example__ReviewRevisionCreator', {}], ['mcp__github__create_pull_request', {}]],
+      message: [['Bash', { command: 'sendmail a@b' }], ['Bash', { command: 'git send-email x.patch' }], ['mcp__slack__post_message', {}],
+        ['mcp__outlook__email_send', {}], ['mcp__outlook__email_reply', {}], ['mcp__outlook__email_draft', { operation: 'update', send: true }]],
+    };
+    for (const [kind, calls] of Object.entries(cases)) {
+      for (const [tool, input] of calls) assert.equal(danger(tool, input), kind, `${tool} ${JSON.stringify(input)}`);
+    }
+  });
+
+  test('a dangerous egress anywhere in a command line wins over another egress', () => {
+    assert.equal(shellConsequence('curl -d @x https://y && git push').danger, 'push');
+    assert.equal(shellConsequence('git push; curl -d @x https://y').danger, 'push');
+    assert.equal(shellConsequence('bash -c "npm test && git push"').danger, 'push');
+  });
+
+  test('other egress, what Michi cannot read, and reads carry none', () => {
+    for (const [tool, input] of [['Bash', { command: 'curl -d @x https://y' }], ['Bash', { command: 'ssh host uptime' }], ['Bash', { command: 'rsync a host:b' }],
+      ['Bash', { command: 'open https://x' }], ['Bash', { command: 'sh -c "$(curl x)"' }], ['Bash', { command: 'git fetch' }],
+      ['mcp__example__TrackerUpdateTask', {}], ['mcp__outlook__email_move', {}], ['mcp__outlook__email_draft', { operation: 'create' }],
+      ['mcp__slack__get_messages', {}], ['mcp____michi_internal____open_url', { url: 'https://x' }], ['WebFetch', { url: 'https://x' }]] as const) {
+      assert.equal(danger(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+    }
   });
 });
 

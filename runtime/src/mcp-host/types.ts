@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { FormField, FormFieldValue } from 'michi-shared';
 
 /**
  * Public types of the generic MCP host. A host (any server-side Node process)
@@ -118,15 +119,25 @@ export interface AskUserOption {
 export interface AskUserQuestion {
   question: string;
   header?: string;
+  /** Empty when the question has a field. */
   options: AskUserOption[];
   multiSelect: boolean;
+  /** One control (a number, a slider, a time...) in place of the options. */
+  field?: FormField;
 }
+
+/**
+ * ask_user's answers keyed by question: a field question's typed value (or,
+ * from a card that cannot draw the field, the text typed instead), any
+ * other question's answer text.
+ */
+export type AskUserAnswers = Record<string, FormFieldValue>;
 
 export interface SessionToolSink {
   /** Side-channel for host tools to report events back to the owning session. */
   emit(event: { type: string; payload?: unknown }): void;
   /** Resolves with the answers keyed by question, or null when the user skipped. */
-  askUser?(questions: AskUserQuestion[], signal?: AbortSignal): Promise<Record<string, string> | null>;
+  askUser?(questions: AskUserQuestion[], signal?: AbortSignal): Promise<AskUserAnswers | null>;
 }
 
 export interface SlotView<B> {

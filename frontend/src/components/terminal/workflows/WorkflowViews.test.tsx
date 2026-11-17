@@ -159,6 +159,15 @@ describe('MessageWorkflowRuns', () => {
     expect(getByRole('button', { name: 'Workflows: 2 done, 1 failed' })).toBeTruthy();
   });
 
+  it('folds a failed run at once, even alone', async () => {
+    const { feed, getByRole, getAllByTestId, queryAllByTestId } = renderMessage();
+    feed({ id: 'wfr_a', name: 'alpha', startedAt: 1_000, ...ended('failed'), statusDetail: 'SyntaxError' });
+    feed({ id: 'wfr_b', name: 'alpha', startedAt: 2_000 });
+    await waitFor(() => expect(queryAllByTestId('workflow-run-card')).toHaveLength(1));
+    expect(getAllByTestId('workflow-run-card')[0].textContent).not.toContain('SyntaxError');
+    expect(getByRole('button', { name: 'Workflows: 1 failed' })).toBeTruthy();
+  });
+
   it('lists the folded runs one line each, and a line opens its run', () => {
     const { feed, getByRole, onOpen } = renderMessage();
     feed({ id: 'wfr_a', name: 'alpha', startedAt: 1_000, ...ended('completed') });
@@ -181,6 +190,24 @@ describe('WorkflowActions', () => {
     expect(getByRole('button', { name: /Pause workflow/ }).textContent).toBe('Pause…');
     rerender(<WorkflowRunDetail run={run({ status: 'completed', actions: [] })} now={5_000} controls onAction={() => {}} />);
     expect(queryByRole('button', { name: /Stop workflow/ })).toBeNull();
+  });
+
+  it('hands focus to Resume when Pause swaps out, and to Close when Stop leaves no control', () => {
+    const props = { onClose: () => {}, onAction: () => {} };
+    const { getByRole, rerender } = render(<WorkflowRunPane run={run()} {...props} />);
+    const pause = getByRole('button', { name: /^Pause workflow/ });
+    pause.focus();
+    fireEvent.click(pause);
+    rerender(<WorkflowRunPane run={run()} pending="pause" {...props} />);
+    const paused = run({ status: 'paused', actions: ['resume', 'stop'] });
+    rerender(<WorkflowRunPane run={paused} {...props} />);
+    expect(document.activeElement).toBe(getByRole('button', { name: /^Resume workflow/ }));
+    const stop = getByRole('button', { name: /^Stop workflow/ });
+    stop.focus();
+    fireEvent.click(stop);
+    rerender(<WorkflowRunPane run={paused} pending="stop" {...props} />);
+    rerender(<WorkflowRunPane run={run({ status: 'cancelled', actions: [] })} {...props} />);
+    expect(document.activeElement).toBe(getByRole('button', { name: 'Close workflow pane' }));
   });
 });
 

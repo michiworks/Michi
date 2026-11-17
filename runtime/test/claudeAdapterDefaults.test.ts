@@ -16,9 +16,10 @@ const OPTIONAL = [
 describe('Claude adapter defaults', () => {
   it('pins the default limits and CLI switches', () => {
     assert.deepEqual(DEFAULT_CLAUDE_LIMITS, {
-      maxConcurrent: 15,
+      maxConcurrent: 50,
       pool: { disabled: false, sessionsPerCwd: 2, waitForWarm: true },
       initTimeoutMs: 60_000, approveTimeoutMs: 300_000, disposeTermTimeoutMs: 2000, disposeKillTimeoutMs: 1000,
+      sessionIdleTtlMs: 900_000,
     });
     assert.deepEqual(DEFAULT_CLAUDE_CLI_FLAGS, { bare: false, strictMcp: false, forwardSubagentText: true, humanOrigin: true });
   });
@@ -50,7 +51,7 @@ describe('Claude adapter defaults', () => {
     assert.notEqual(flags, DEFAULT_CLAUDE_CLI_FLAGS);
     assert.notEqual(options.cli(), flags, 'a new copy at each call');
     flags.bare = true;
-    assert.equal(DEFAULT_CLAUDE_LIMITS.maxConcurrent, 15);
+    assert.equal(DEFAULT_CLAUDE_LIMITS.maxConcurrent, 50);
     assert.equal(DEFAULT_CLAUDE_LIMITS.pool.disabled, false);
     assert.equal(DEFAULT_CLAUDE_CLI_FLAGS.bare, false);
     assert.deepEqual(claudeAdapterOptions({ host, spawnEnv }).limits, DEFAULT_CLAUDE_LIMITS);
@@ -81,7 +82,7 @@ describe('Claude adapter defaults', () => {
   it('passes every given member through unchanged', () => {
     const limits: ClaudeLimits = {
       maxConcurrent: 3, pool: { disabled: true, sessionsPerCwd: 1, waitForWarm: false },
-      initTimeoutMs: 1250, approveTimeoutMs: 1500, disposeTermTimeoutMs: 50, disposeKillTimeoutMs: 25,
+      initTimeoutMs: 1250, approveTimeoutMs: 1500, disposeTermTimeoutMs: 50, disposeKillTimeoutMs: 25, sessionIdleTtlMs: 0,
     };
     const given: ClaudeAdapterOptions = {
       host, spawnEnv, limits,

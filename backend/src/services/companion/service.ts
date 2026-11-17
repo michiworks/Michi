@@ -2,7 +2,7 @@
  * The CompanionService routes use while the coordinator does not run in this
  * process (before boot.ts starts it, without a scheduler, with
  * MICHI_DISABLE_COMPANION=1): nothing polls and no check-in runs, so there
- * is no welcome or catch-up; Check now answers as the real one does in a
+ * is no welcome; Check now answers as the real one does in a
  * process without the scheduler lease.
  *
  * Also here: how an applied conversation.start card starts its conversation
@@ -31,8 +31,7 @@ export interface NoopCompanionServiceDeps {
 /**
  * CompanionService contract notes the coordinator keeps too: checkNow
  * throws notOwner() (errors.ts; the route answers 409 `not_owner`) in a
- * process that does not hold the scheduler lease. Without catchUp the
- * snapshot shows the stored "Since you left" (repository.latestCatchUp).
+ * process that does not hold the scheduler lease.
  */
 export function createNoopCompanionService(deps: NoopCompanionServiceDeps): CompanionService {
   return {
@@ -57,7 +56,7 @@ function refusalMessage(text: string): string {
  * Starts the conversation of an applied conversation.start card (R2.1) with
  * the Meta agent's start_conversation logic, as the agent's conversation V
  * (the one the user talks to it in): the same workspace checks, the user's
- * global runtime settings, and the brief as its first message. The user's
+ * global runtime settings, and the card's text as its first message. The user's
  * Apply on the card is the approval, so none is asked again. Rejects with
  * the reason it could not start.
  */

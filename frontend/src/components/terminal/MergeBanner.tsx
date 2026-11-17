@@ -5,6 +5,7 @@ import {
   MERGE_PREAMBLE_TOKEN_WARN,
   mergeContextNodeIds,
 } from '../../state/mergePreamble';
+import { WarningIcon } from './icons';
 
 export default function MergeBanner({ nodeId }: { nodeId: string }) {
   const { activeProject } = useChatStore();
@@ -52,7 +53,7 @@ export default function MergeBanner({ nodeId }: { nodeId: string }) {
         flexShrink: 0,
       }}
     >
-      <span>⚠</span>
+      <WarningIcon size="sm" style={{ flexShrink: 0 }} />
       <span style={{ flex: 1 }}>
         Merging from {sourceTitles}. Will inject ~{tokens.toLocaleString()} tokens. May exceed model context.
       </span>

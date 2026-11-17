@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { MichiPageBlock } from 'michi-shared';
 import { BlockFrame, type ApplyResult, type PageChrome } from './BlockFrame';
 import type { MichiBlockCtx } from './blockTypes';
@@ -89,17 +89,21 @@ describe('BlockFrame', () => {
     expect(screen.queryByRole('button', { name: 'Block menu' })).toBeNull();
   });
 
-  it('keeps sources folded until asked, then lists them; a known conversation opens its thread', () => {
+  it('keeps sources folded until asked, then lists them; a known conversation opens its thread', async () => {
     const { chrome } = renderFrame();
     expect(screen.queryByRole('dialog', { name: 'Sources for Plan vs actual' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Sources 2' }));
+    const button = screen.getByRole('button', { name: 'Sources 2' });
+    fireEvent.click(button);
     const pop = screen.getByRole('dialog', { name: 'Sources for Plan vs actual' });
     expect(pop.textContent).toContain('Sources · 2');
     expect(pop.textContent).toContain('KiroCrew · S7');
     expect(pop.textContent).toContain('crew-mcp/tests/fixtures.ts');
-    fireEvent.click(within(pop).getByRole('button', { name: /KiroCrew · S7/ }));
+    const thread = within(pop).getByRole('button', { name: /KiroCrew · S7/ });
+    await waitFor(() => expect(document.activeElement).toBe(thread));
+    fireEvent.click(thread);
     expect(chrome!.openThread).toHaveBeenCalledWith('t7');
     expect(screen.queryByRole('dialog', { name: 'Sources for Plan vs actual' })).toBeNull();
+    expect(document.activeElement).toBe(button);
   });
 
   it('has no Sources and no Edit on a data block without sources', () => {

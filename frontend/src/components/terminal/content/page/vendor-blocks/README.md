@@ -1,56 +1,45 @@
-# Agent Desk's block code, mirrored
+# Michi's block renderers (from Agent Desk)
 
-Michi native Pages draw most of Agent Desk's block types with Desk's own component
-code (on Mantine, scoped by `../mantine/MichiMantine.tsx`). This directory holds
-that code under Desk's own paths (`shared/…`, `src/…` as in `~/agent-desk`), so
-the copied files import each other unchanged and a Desk diff applies to them as
-it is.
+Michi native Pages draw most block types with the code in this directory, on
+Mantine (scoped by `../mantine/MichiMantine.tsx`). It started as a copy of
+Agent Desk's block code. Agent Desk is deprecated, nothing syncs from it any
+more, and Michi owns every file here: edit them like any other Michi code.
 
-**Desk commit:** the `commit` field of `manifest.json`. Every file listed there
-was taken from that commit.
+The files keep Desk's paths (`shared/…`, `src/…` as in `~/agent-desk`), so they
+import each other as they did there, and most keep Desk's compact style.
+Comments marked `// Michi:` record where a file departed from Desk's version
+before the copy became Michi's.
 
 ## What is here
 
-- `manifest.json` → `verbatim`: byte-for-byte copies. Do not edit them; fix
-  things from outside (a shim, `../richCss/*.css`, `../richRenderers.tsx`).
-- `manifest.json` → `patched`: copies with Michi edits, each marked
-  `// Michi:`. They leave out what Michi draws itself (thread cards, custom
-  blocks). Embedded pages load on a click, without popups, under their real
-  domain. Pictures and avatars keep Michi's page permission and private-network
-  URL restrictions. Contents navigation preserves native block identities.
-- Everything else is a Michi shim standing in for a Desk module the mirrored
-  files import:
+- Desk's block code: the display catalog (`shared/desk-catalog`), the block
+  renderers (`src/desk/blocks/catalog/…`) and the helpers they use.
+- Small modules that stand in for Desk modules the renderers import:
   - `shared/i18n.ts`: `L()` takes the English side; Michi has no Chinese UI.
-  - `shared/desk.ts`: the few types and limits the mirrored files read.
+  - `shared/desk.ts`: the few types and limits the renderers read.
   - `src/desk/blocks/types.ts`: Desk's `BlockProps`, with Michi's block
     context (`../blockTypes.ts`) as `ctx`.
-  - `src/desk/blocks/catalog/interactive/useBlockSend.ts`: delegates to the current native page context. Actions and forms prefill the visible Spaces Assistant; polls and choices send only their visible question and selected answer. There is no Desk service or Desk assistant bridge.
+  - `src/desk/blocks/catalog/interactive/useBlockSend.ts`: delegates to the current native page context. Actions and forms prefill the visible Spaces Assistant; polls and choices send only their visible question and selected answer. A host whose context sets `sendsAlways` (a chat reply's blocks, ChatBlocksView.tsx) sends every one at once. Where the host keeps block submissions (`recordSubmission` in `../blockTypes.ts`), forms, polls and choices store what they send first and afterwards show it read-only. There is no Desk service or Desk assistant bridge.
+  - `src/desk/blocks/catalog/interactive/SubmittedNote.tsx`: the line a submitted form, poll or choice shows.
   - `src/desk/peek/use-peek.ts`: the contents block finds and lights blocks by
     Michi's page markers.
 
-`../richRenderers.tsx` registers the mirrored renderers for the block types
-Michi does not draw itself. Each block is first read with Desk's catalog
-(`shared/desk-catalog`, `validateBlock`), the same check Desk makes before it
-stores a page, so a renderer only ever sees a block in the shape it expects;
-one the catalog will not read shows Michi's one-line label.
+`../richRenderers.tsx` registers these renderers for the block types Michi does
+not draw elsewhere. Each block is first read with the display catalog
+(`shared/desk-catalog`, `validateBlock`), so a renderer only ever sees a block
+in the shape it expects; one the catalog will not read shows Michi's one-line
+label. The catalog is forgiving (what does not fit is clipped or dropped);
+native write validation and tool schemas live in `shared/src/pages/`, and a
+field added there needs the matching change in the display catalog, or the
+renderer never sees it.
 
-## Syncing with a newer Desk
+The native block menu, hover toolbar, drag and history live outside this
+directory and follow Michi's product requirements.
 
-```sh
-node scripts/page-block-source-sync.mjs <desk commit>   # default: Desk's HEAD; reads committed files only
-git diff -- frontend/src/components/terminal/content/page/vendor-blocks
-```
-
-The script rewrites the `verbatim` files from that commit, prints Desk's diff
-since the recorded commit for each `patched` file (merge those by hand), lists
-other Desk block and shared files that changed (a shim or the block menu may
-need the same change), and records the new commit in `manifest.json`. Then
-check the shims against what the new files import, run the Desk page tests
-(`npm test -w frontend -- src/components/terminal/content/page`), and look at
-`?specimen=native-blocks` in each palette.
-
-The native block menu, hover toolbar, drag and history live outside this mirror and follow Michi's product requirements. Do not replace them with Desk's actions when syncing.
-
-Native write validation and tool schemas live in `shared/src/pages/`, not this display catalog. The old labels/values chart format and gallery titles remain supported by `../richRenderers.tsx`. A database is a native database reference; executable components remain in Michi's component library. Containers are atomic content groups; references stay top-level.
+The old labels/values chart format and gallery titles remain supported by `../richRenderers.tsx`. A database is a native database reference; executable components remain in Michi's component library. Containers are atomic content groups; references stay top-level.
 
 Repeated labels in an existing labels/values chart use the original positional renderer so no data is coalesced. Shared stored content, metadata and history are never rewritten by display adapters.
+
+After a change here, run the page tests
+(`npm test -w frontend -- src/components/terminal/content/page`) and look at
+`?specimen=native-blocks` in each palette.

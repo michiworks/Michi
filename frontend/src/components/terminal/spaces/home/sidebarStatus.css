@@ -11,7 +11,7 @@
 }
 /* Not running is a warning, not an error: the link keeps the row's own colour. */
 .spaces-side-foot-link[data-tone='warn'] { color: inherit; }
-.spaces-side-foot-link:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
+.spaces-side-foot-link:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 .spaces-side-progress { font: 400 var(--fs-sm)/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--term-faint); }
 .spaces-side-progress[data-tone='danger'] { color: var(--term-danger-text); }

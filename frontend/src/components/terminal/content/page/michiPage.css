@@ -35,7 +35,17 @@
   letter-spacing: var(--ls-caps-wide);
   text-transform: uppercase;
 }
-.michi-doc-caption--accent { color: var(--term-accent); }
+.michi-doc-caption--accent { color: var(--term-accent-text); }
+/* A small label in a block's content (the words above a figure, a column of pros or cons) is set
+   in the words' own case at the page's smallest reading size, as a native table's header is:
+   upper-case 10px is chrome's caption, and CJK cannot be read there. */
+.michi-doc-label {
+  margin: 0;
+  color: var(--term-muted);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  line-height: 1.45;
+}
 
 /* ── Header ──────────────────────────────────────────────────── */
 .michi-doc-header { display: flex; flex-direction: column; gap: 10px; }
@@ -43,7 +53,7 @@
   margin: 0;
   color: var(--term-fg);
   font-family: var(--message-latin-font), var(--message-cjk-font);
-  font-size: 26px;
+  font-size: var(--fs-5xl);
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: var(--ls-tight);
@@ -77,9 +87,18 @@
   background: transparent;
   color: var(--term-muted);
   cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.michi-doc-title__open:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
-.michi-doc-title__open:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
+/* Throughout this file a hover paints for a real pointer only (ST-02), and the
+   press, outside that gate, also answers a tap (ST-06): the hover's own look,
+   or one step darker on a borderless button. */
+@media (hover: hover) {
+  .michi-doc-title__open:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+}
+/* Its menu open, the ⋯ stays pressed (ST-06). */
+.michi-doc-title__open[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+.michi-doc-title__open:active { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); color: var(--term-fg); }
+.michi-doc-title__open:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-doc-link-btn {
   border: 0;
   padding: 2px 0;
@@ -88,10 +107,17 @@
   font: inherit;
   font-size: var(--fs-sm);
   cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.michi-doc-link-btn:hover,
+/* A word to act on inside a block (Change, Show 3 done, every one of them) is the block's own content and is read
+   at 12px; the same button in the page's chrome (a panel's Close, a card's Retry) stays chrome's 11px. */
+:is([data-michi-block] .michi-doc-link-btn, [data-michi-block].michi-doc-link-btn) { font-size: var(--fs-md); }
+@media (hover: hover) {
+  .michi-doc-link-btn:hover:not(:disabled) { color: var(--term-fg); }
+}
+.michi-doc-link-btn:active:not(:disabled),
 .michi-doc-link-btn[aria-expanded='true'] { color: var(--term-fg); }
-.michi-doc-link-btn:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
+.michi-doc-link-btn:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-doc-headline {
   margin: 4px 0 0;
   padding: 14px 16px;
@@ -141,7 +167,7 @@
   margin: 0;
   color: var(--term-fg);
   font-family: var(--message-latin-font), var(--message-cjk-font);
-  font-size: 15px;
+  font-size: var(--fs-xl);
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -159,15 +185,23 @@
   font-family: var(--ui-font);
   font-size: var(--fs-md);
   white-space: nowrap;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.michi-doc-ghost:hover { color: var(--term-fg); }
+@media (hover: hover) {
+  .michi-doc-ghost:hover:not([aria-disabled='true']) { color: var(--term-fg); }
+}
+.michi-doc-ghost:active:not([aria-disabled='true']) { color: var(--term-fg); }
 /* Its app can't resume the conversation: still focusable, its title says why. */
-.michi-doc-ghost[aria-disabled='true'],
-.michi-doc-ghost[aria-disabled='true']:hover { color: var(--term-faint); cursor: default; }
-.michi-doc-ghost:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+.michi-doc-ghost[aria-disabled='true'] { color: var(--term-faint); cursor: not-allowed; }
+.michi-doc-ghost:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* ── Blocks ──────────────────────────────────────────────────── */
-.michi-doc-blocks { display: flex; flex-direction: column; gap: 14px; }
+.michi-doc-blocks { --doc-gap: 14px; display: flex; flex-direction: column; gap: var(--doc-gap); }
+/* A heading belongs to what follows it: it sits close above its content and further from what came before,
+   by half the page's gap again. An agent's note wraps the block it annotates, so look one level deeper too. */
+.michi-doc-blocks > .michi-doc-block:has(> [data-michi-block='heading'], > .michi-doc-note > [data-michi-block='heading']) { padding-bottom: 2px; }
+.michi-doc-blocks > .michi-doc-block + .michi-doc-block:has(> [data-michi-block='heading'], > .michi-doc-note > [data-michi-block='heading']) { margin-top: calc(var(--doc-gap) * 0.5); }
+.michi-doc-blocks > .michi-doc-block:has(> [data-michi-block='heading'], > .michi-doc-note > [data-michi-block='heading']) + .michi-doc-block { margin-top: calc(-1 * var(--doc-gap)); }
 .michi-doc-block {
   position: relative;
   margin: 0 -12px;
@@ -175,7 +209,6 @@
   border-radius: var(--ui-radius);
   outline: 1px solid transparent;
   outline-offset: -1px;
-  transition: outline-color var(--t-quick) ease;
 }
 .michi-doc-toolbar {
   position: absolute;
@@ -188,19 +221,25 @@
   border: 1px solid var(--term-line);
   border-radius: var(--ui-radius);
   background: var(--term-surface);
-  box-shadow: var(--term-float-shadow, 0 6px 18px -8px color-mix(in srgb, var(--term-fg) 30%, transparent));
+  box-shadow: var(--term-float-shadow);
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--t-quick) ease;
+  transition: opacity var(--t-quick) var(--t-ease);
 }
-.michi-doc-block:hover > .michi-doc-toolbar,
-.michi-doc-block:focus-within > .michi-doc-toolbar,
-.michi-doc-block[data-active='true'] > .michi-doc-toolbar { opacity: 1; pointer-events: auto; }
-/* One block's chrome at a time: with the pointer on a block, another that only
-   holds focus (a block just added, a button pressed in it) keeps its toolbar
-   and margin out of sight. One with a menu or popover open keeps them. */
-.michi-doc:has(.michi-doc-block:hover) .michi-doc-block:not(:hover):not([data-active='true']):focus-within > .michi-doc-toolbar { opacity: 0; pointer-events: none; }
-.michi-doc:has(.michi-doc-block:hover):not(:has(.michi-doc-blocks[data-selecting])) .michi-doc-block:not(:hover):not([data-active='true']):not([data-selected='true']):focus-within > .michi-doc-block__margin { opacity: 0; }
+/* A pointer shows a block's chrome on hover and focus, and while one of its
+   popups is open; a touch screen shows it on the block a tap selected (the
+   (hover: none) rule under Block chrome). Hidden, it takes no clicks. */
+@media (hover: hover) {
+  .michi-doc-block:hover > .michi-doc-toolbar,
+  .michi-doc-block:focus-within > .michi-doc-toolbar,
+  .michi-doc-block[data-active='true'] > .michi-doc-toolbar { opacity: 1; pointer-events: auto; }
+  /* One block's chrome at a time: with the pointer on a block, another that only
+     holds focus (a block just added, a button pressed in it) keeps its toolbar
+     and margin out of sight. One with a menu or popover open keeps them. */
+  .michi-doc:has(.michi-doc-block:hover) .michi-doc-block:not(:hover):not([data-active='true']):focus-within > .michi-doc-toolbar { opacity: 0; pointer-events: none; }
+  .michi-doc:has(.michi-doc-block:hover):not(:has(.michi-doc-blocks[data-selecting])) .michi-doc-block:not(:hover):not([data-active='true']):not([data-selected='true']):focus-within > .michi-doc-block__margin { opacity: 0; pointer-events: none; }
+}
+.michi-doc-toolbar:has(:focus-visible) { opacity: 1; pointer-events: auto; }
 .michi-doc-toolbar__btn {
   display: inline-flex;
   align-items: center;
@@ -215,22 +254,26 @@
   font-size: var(--fs-sm);
   white-space: nowrap;
   cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease);
 }
-.michi-doc-toolbar__btn:hover,
-.michi-doc-toolbar__btn[aria-expanded='true'] { background: var(--term-alt); }
-.michi-doc-toolbar__btn:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+@media (hover: hover) {
+  .michi-doc-toolbar__btn:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-toolbar__btn[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); }
+.michi-doc-toolbar__btn:active:not(:disabled) { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); }
+.michi-doc-toolbar__btn:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .michi-doc-toolbar__glyph { display: inline-flex; color: var(--term-mauve); }
 .michi-doc-h2 {
   margin: 0;
   color: var(--term-fg);
   font-family: var(--message-latin-font), var(--message-cjk-font);
-  font-size: 16.5px;
-  font-weight: 700;
+  font-size: var(--fs-2xl);
+  font-weight: 600;
   line-height: 1.3;
   letter-spacing: var(--ls-tight);
   overflow-wrap: anywhere;
 }
-.michi-doc-h2[data-level='1'] { font-size: 20px; }
+.michi-doc-h2[data-level='1'] { font-size: var(--fs-4xl); }
 .michi-doc-h2[data-level='3'] { font-size: 14px; }
 .michi-doc-h2__count { margin-left: 8px; color: var(--term-muted); font-size: var(--fs-md); font-weight: 400; }
 .michi-doc-block-title {
@@ -278,34 +321,43 @@
 .michi-doc-prose p + p { margin-top: 6px; }
 
 .michi-doc-unknown { margin: 0; color: var(--term-muted); font-size: var(--fs-md); }
+/* A failed read or write says so in the danger words; status lines stay muted. */
+.michi-doc-unknown[role='alert'] { color: var(--term-danger-text); }
 .michi-doc-retry { display: flex; align-items: center; gap: 10px; }
 
-/* callout */
+/* Corners on a page come in two: a container or card (a code frame, a card, media, a callout) is square, as Michi's
+   surfaces are; a control or badge takes --ui-radius (4px). Only round shapes (dots, radios, switches, avatars) stay round. */
+.michi-doc .michi-code-block { border-radius: 0; }
+
+/* callout: one quiet tinted box wherever it is drawn. The tone's mark sits on
+   the first line, beside a sentence-case title or the text's first line; the
+   tint is the tone's own colour, lighter than any status fill, so the box reads
+   as an aside and never as one more section. Info and a plain note share the
+   neutral tint; info keeps its mark. */
 .michi-doc-callout {
+  --callout-lh: 1.6;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 10px;
   padding: 12px 14px;
-  border: 1px solid var(--term-line);
-  border-left: 2px solid var(--tone, var(--term-line-s));
+  background: var(--callout-fill, color-mix(in srgb, var(--term-fg) 4%, transparent));
   color: var(--term-fg);
   font-size: var(--fs-lg);
-  line-height: 1.6;
+  line-height: var(--callout-lh);
 }
-.michi-doc-callout .michi-doc-caption { color: var(--tone, var(--term-muted)); }
+.michi-doc-callout[data-tone]:not([data-tone='info']) { --callout-fill: color-mix(in srgb, var(--tone) 8%, transparent); }
+.michi-doc-callout__icon { display: inline-flex; flex: none; align-items: center; height: calc(var(--callout-lh) * 1em); color: var(--tone, var(--term-muted)); }
+.michi-doc-callout[data-tone='info'] > .michi-doc-callout__icon { color: var(--term-muted); }
+.michi-doc-callout__body { display: flex; flex: 1 1 0; flex-direction: column; gap: 4px; min-width: 0; }
+.michi-doc-callout__title { margin: 0; color: var(--term-fg); font-size: inherit; font-weight: 600; line-height: inherit; }
 .michi-doc-callout p { margin: 0; overflow-wrap: anywhere; }
-/* Toned callouts are filled boxes: NOTE (info), BLOCKERS (warn), READY (success), CONFLICT (danger). */
-.michi-doc-callout[data-tone] { border: 0; padding: 14px 16px; }
-.michi-doc-callout[data-tone='info'] { background: var(--term-alt); }
-.michi-doc-callout[data-tone='info'] .michi-doc-caption { color: var(--term-muted); }
-.michi-doc-callout[data-tone='warn'] { background: var(--term-select-f); }
-.michi-doc-callout[data-tone='success'] { background: var(--term-digest-f); }
-.michi-doc-callout[data-tone='danger'] { background: var(--term-danger-f); }
 
-.michi-doc [data-tone='info'] { --tone: var(--term-accent); }
-.michi-doc [data-tone='warn'] { --tone: var(--term-select); }
-.michi-doc [data-tone='success'] { --tone: var(--term-digest); }
-.michi-doc [data-tone='danger'] { --tone: var(--term-danger); }
+/* A tone's mark colour, and the colour its words take (4.5:1 on the page). Read from the block itself, so a tone holds
+   wherever the block is drawn: a page, a chat answer, a native page, the component catalog. */
+:is([data-michi-block], [data-michi-block] *)[data-tone='info'] { --tone: var(--term-accent); --tone-text: var(--term-accent-text); }
+:is([data-michi-block], [data-michi-block] *)[data-tone='warn'] { --tone: var(--term-select); --tone-text: var(--term-waiting-text); }
+:is([data-michi-block], [data-michi-block] *)[data-tone='success'] { --tone: var(--term-digest); --tone-text: var(--term-digest); }
+:is([data-michi-block], [data-michi-block] *)[data-tone='danger'] { --tone: var(--term-danger); --tone-text: var(--term-danger-text); }
 
 .michi-doc-quote { margin: 0; padding-left: 14px; border-left: 2px solid var(--term-line-s); }
 .michi-doc-quote blockquote { margin: 0; color: var(--term-mid); font-size: var(--fs-xl); line-height: 1.6; }
@@ -325,7 +377,6 @@
   line-height: 1.55;
   white-space: pre;
 }
-.michi-doc-code-lang { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
 
 .michi-doc-kv {
   display: grid;
@@ -338,52 +389,49 @@
 .michi-doc-kv dd { margin: 0; color: var(--term-fg); overflow-wrap: anywhere; }
 
 .michi-doc-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.michi-doc-tag {
-  padding: 1px 8px;
-  border: 1px solid var(--tone, var(--term-line-s));
-  border-radius: var(--ui-radius);
-  color: var(--tone, var(--term-mid));
-  font-size: var(--fs-sm);
-  line-height: 1.6;
-}
-
-/* status: summary on the left, the verdict badge on the right; a narrow pane wraps the badge under it */
-.michi-doc-status {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 6px 16px;
-}
-.michi-doc-status__summary {
-  flex: 1 1 320px;
-  margin: 0;
-  color: var(--term-fg);
-  font-size: var(--fs-3xl);
-  font-weight: 500;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-.michi-doc-status__badge {
+/* Badges: one look for every label a block puts on a thing (a tag, the status
+   verdict, Picked, Leaning, Kept, where a version came from): a soft fill and
+   the body colour at 12px. A tone only tints the fill; a state (a toned tag,
+   the verdict) also leads with the tone's dot, so the tone is never colour
+   alone and the text keeps its contrast on every tint. The verdict is the
+   same badge a size up. */
+:is(.michi-doc-tag, .michi-doc-status__badge, .michi-doc-option__tag, .michi-doc-conflict__from) {
   display: inline-flex;
   flex: none;
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  padding: 3px 10px;
+  padding: 1px 8px;
+  border: 0;
   border-radius: var(--ui-radius);
-  background: var(--term-alt);
+  background: var(--badge-fill, color-mix(in srgb, var(--term-fg) 7%, transparent));
   color: var(--term-fg);
+  font-family: var(--ui-font);
   font-size: var(--fs-md);
   font-weight: 500;
   line-height: 1.5;
+  white-space: nowrap;
 }
-.michi-doc-status__badge[data-tone='info'] { background: var(--term-accent-f); }
-.michi-doc-status__badge[data-tone='warn'] { background: var(--term-select-f); }
-.michi-doc-status__badge[data-tone='success'] { background: var(--term-digest-f); }
-.michi-doc-status__badge[data-tone='danger'] { background: var(--term-danger-f); }
-.michi-doc-status__dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--tone, var(--term-muted)); }
-.michi-doc-status__note { flex-basis: 100%; margin: 0; color: var(--term-muted); font-size: var(--fs-md); }
+:is(.michi-doc-tag, .michi-doc-status__badge, .michi-doc-option__tag)[data-tone] { --badge-fill: color-mix(in srgb, var(--tone) 16%, transparent); }
+.michi-doc-dot { flex: none; width: 7px; height: 7px; border-radius: var(--ui-radius-pill); background: var(--tone, var(--term-muted)); }
+
+/* status: the verdict badge, the summary it stands for as a lead across the page, then what it rests on */
+.michi-doc-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+.michi-doc-status__summary {
+  margin: 0;
+  color: var(--term-fg);
+  font-size: var(--fs-3xl);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+.michi-doc-status__badge { padding: 3px 10px; white-space: normal; }
+.michi-doc-status__note { margin: -4px 0 0; color: var(--term-muted); font-size: var(--fs-md); }
 
 .michi-doc-link-card {
   display: flex;
@@ -394,10 +442,15 @@
   color: var(--term-fg);
   text-decoration: none;
 }
-a.michi-doc-link-card:hover { background: var(--term-alt); }
+/* A card that opens something hovers with its border and a faint shadow, never a fill (ST-03). */
+a.michi-doc-link-card { transition: border-color var(--t-quick) var(--t-ease), box-shadow var(--t-quick) var(--t-ease), background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  a.michi-doc-link-card:hover { border-color: var(--term-line-s); box-shadow: var(--term-composer-shadow-muted); }
+}
+a.michi-doc-link-card:active { background: color-mix(in srgb, var(--term-alt) 70%, var(--term-surface)); }
 .michi-doc-link-card__title { font-size: var(--fs-lg); font-weight: 600; }
 .michi-doc-link-card__desc { color: var(--term-mid); font-size: var(--fs-md); }
-.michi-doc-link-card__site { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.michi-doc-link-card__site { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); overflow-wrap: anywhere; }
 
 /* metrics / stat */
 .michi-doc-metrics {
@@ -424,22 +477,22 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   line-height: 1.2;
   overflow-wrap: anywhere;
 }
-.michi-doc-metric[data-tone='warn'] .michi-doc-metric__value { color: var(--term-select); }
-.michi-doc-metric[data-tone='accent'] .michi-doc-metric__value { color: var(--term-accent); }
-.michi-doc-metric__hint { color: var(--term-muted); font-size: var(--fs-sm); }
+.michi-doc-metric[data-tone='warn'] .michi-doc-metric__value { color: var(--term-waiting-text); }
+.michi-doc-metric[data-tone='accent'] .michi-doc-metric__value { color: var(--term-accent-text); }
+.michi-doc-metric__hint { color: var(--term-muted); font-size: var(--fs-md); line-height: 1.45; }
 .michi-doc-stat__delta { font-family: var(--font-mono); font-size: var(--fs-md); color: var(--term-muted); }
-.michi-doc-stat__delta[data-dir='up'] { color: var(--term-accent); }
-.michi-doc-stat__delta[data-dir='down'] { color: var(--term-select); }
+.michi-doc-stat__delta[data-dir='up'] { color: var(--term-accent-text); }
+.michi-doc-stat__delta[data-dir='down'] { color: var(--term-waiting-text); }
 .michi-doc-stat__spark { display: block; width: 100%; max-width: 160px; height: 28px; color: var(--term-accent); }
 
 /* progress */
 .michi-doc-progress { position: relative; height: 6px; background: var(--term-alt); }
 .michi-doc-progress__fill { position: absolute; inset: 0 auto 0 0; background: var(--term-accent); }
 .michi-doc-progress__mark { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; background: var(--term-fg); opacity: 0.55; }
-.michi-doc-progress__legend { margin-top: 8px; color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
+.michi-doc-progress__legend { margin-top: 8px; color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); }
 
 /* plan vs actual */
-.michi-doc-pa__legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--term-muted); font-size: var(--fs-sm); }
+.michi-doc-pa__legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--term-muted); font-size: var(--fs-md); }
 .michi-doc-pa__key { display: inline-flex; align-items: center; gap: 5px; }
 .michi-doc-pa__swatch { display: inline-block; width: 14px; height: 5px; box-sizing: border-box; }
 .michi-doc-pa__swatch[data-kind='plan'] { border: 1px solid var(--term-line-s); }
@@ -465,9 +518,10 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-pa__bar[data-kind='over'] { top: 11px; height: 6px; background: var(--term-select); }
 .michi-doc-pa__bar[data-kind='forecast'] { top: 11px; height: 6px; border: 1px dashed var(--term-accent); }
 .michi-doc-pa__today { position: absolute; top: -4px; bottom: -4px; width: 1px; background: var(--term-fg); opacity: 0.5; }
-.michi-doc-pa__nums { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); text-align: right; white-space: nowrap; }
-.michi-doc-pa__row[data-over='true'] .michi-doc-pa__nums { color: var(--term-select); }
-.michi-doc-pa__axis { position: relative; height: 14px; color: var(--term-fg); font-family: var(--font-mono); font-size: var(--fs-xs); }
+.michi-doc-pa__nums { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); text-align: right; white-space: nowrap; }
+.michi-doc-pa__row[data-over='true'] .michi-doc-pa__nums { color: var(--term-waiting-text); }
+/* The axis is labelled at a chart axis's size (11px): a scale's own ticks, read beside the bars, not words on their own. */
+.michi-doc-pa__axis { position: relative; height: 14px; color: var(--term-fg); font-family: var(--font-mono); font-size: var(--fs-sm); }
 .michi-doc-pa__axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 
 /* thread cards */
@@ -493,22 +547,26 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background var(--t-quick) ease;
+  transition: border-color var(--t-quick) var(--t-ease), box-shadow var(--t-quick) var(--t-ease), background var(--t-quick) var(--t-ease);
 }
-.michi-doc-thread:hover { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
-.michi-doc-thread:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+/* The card of a conversation that is gone opens nothing, so it neither hovers nor presses. */
+@media (hover: hover) {
+  .michi-doc-thread:hover:not([data-missing='true']) { border-color: var(--term-line-s); box-shadow: var(--term-composer-shadow-muted); }
+}
+.michi-doc-thread:active:not([data-missing='true']) { background: color-mix(in srgb, var(--term-alt) 70%, var(--term-surface)); }
+.michi-doc-thread:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .michi-doc-thread__title,
 .michi-doc-thread__stopped { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .michi-doc-thread__title { display: flex; align-items: center; gap: 6px; font-size: var(--fs-lg); }
 .michi-doc-thread__title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .michi-doc-thread__stopped { color: var(--term-muted); font-size: var(--fs-md); }
 .michi-doc-thread__app { display: inline-flex; justify-content: flex-end; }
-.michi-doc-thread__age { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); text-align: right; }
+.michi-doc-thread__age { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); text-align: right; }
 .michi-doc-agent-tag {
   flex-shrink: 0;
   padding: 0 4px;
   border: 1px dashed var(--term-digest);
-  border-radius: 3px;
+  border-radius: var(--ui-radius);
   color: var(--term-digest);
   font-size: var(--fs-2xs);
   line-height: 14px;
@@ -519,11 +577,15 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-checklist li { display: flex; align-items: center; gap: 10px; padding: 5px 4px; border-radius: var(--ui-radius); }
 .michi-doc-checklist li[data-done='true'] { color: var(--term-muted); text-decoration: line-through; }
 .michi-doc-checklist__text { flex: 1; min-width: 0; }
+/* Words that tick their item take the pointer, and their mark lights as the mark itself does under it. */
+.michi-doc-checklist__text[data-live] { cursor: pointer; }
+@media (hover: hover) {
+  .michi-doc-checklist li:has(> .michi-doc-checklist__text[data-live]:hover) > .michi-doc-check--live { border-color: var(--term-accent); }
+}
 /* Done items fold under one row; the chevron turns when they are shown. */
 .michi-doc-checklist__done-toggle { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 0; padding: 4px; color: var(--term-muted); }
-.michi-doc-checklist__chevron { transition: transform 120ms ease-out; }
+.michi-doc-checklist__chevron { transition: transform var(--t-soft) var(--t-ease); }
 .michi-doc-checklist__done-toggle[aria-expanded='true'] .michi-doc-checklist__chevron { transform: rotate(90deg); }
-@media (prefers-reduced-motion: reduce) { .michi-doc-checklist__chevron { transition: none; } }
 /* Ask about one item: shown on the row's hover or focus; touch screens have no hover, so it stays visible there, faint. */
 .michi-doc-checklist__ask {
   display: inline-flex;
@@ -540,11 +602,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   color: var(--term-muted);
   cursor: pointer;
   opacity: 0;
+  transition: opacity var(--t-quick) var(--t-ease), background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.michi-doc-checklist li:hover > .michi-doc-checklist__ask,
-.michi-doc-checklist li:focus-within > .michi-doc-checklist__ask { opacity: 1; }
-.michi-doc-checklist__ask:hover { color: var(--term-accent); background: var(--term-alt); }
-.michi-doc-checklist__ask:focus-visible { opacity: 1; outline: 1px solid var(--term-accent); outline-offset: 1px; }
+@media (hover: hover) {
+  .michi-doc-checklist li:hover > .michi-doc-checklist__ask { opacity: 1; }
+  .michi-doc-checklist__ask:hover { color: var(--term-accent); background: var(--term-hover-bg, var(--term-alt)); }
+}
+/* Keyboard focus in the row shows it; a click that left focus behind does not (ST-04). */
+.michi-doc-checklist li:has(:focus-visible) > .michi-doc-checklist__ask { opacity: 1; }
+.michi-doc-checklist__ask:active { color: var(--term-accent); background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); }
+.michi-doc-checklist__ask:focus-visible { opacity: 1; outline: var(--focus-ring); outline-offset: 1px; }
 @media (hover: none) {
   .michi-doc-checklist__ask { opacity: 0.6; width: 32px; height: 32px; margin: -8px -4px -8px 0; }
 }
@@ -556,8 +623,8 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   width: 13px;
   height: 13px;
   box-sizing: border-box;
-  border: 1px solid var(--term-line-s);
-  border-radius: 3px;
+  border: 1px solid var(--term-faint);
+  border-radius: var(--ui-radius);
   color: var(--term-surface);
 }
 .michi-doc-check[aria-checked='true'] { border-color: var(--term-digest); background: var(--term-digest); }
@@ -578,7 +645,8 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 
 /* choice */
 .michi-doc-choice { display: flex; flex-direction: column; gap: 6px; }
-.michi-doc-choice__q { margin: 0 0 4px; font-size: var(--fs-lg); }
+/* The question is set at its options' size and above them in weight, never smaller than what it asks about. */
+.michi-doc-choice__q { margin: 0 0 4px; font-weight: 600; }
 .michi-doc-choice__option {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr);
@@ -588,7 +656,6 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   border: 1px solid var(--term-line);
   font-size: var(--fs-lg);
 }
-.michi-doc-choice__option[aria-checked='true'] { border-color: var(--term-accent); background: var(--term-accent-f); }
 .michi-doc-radio {
   display: inline-flex;
   align-items: center;
@@ -597,16 +664,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   height: 12px;
   box-sizing: border-box;
   border: 1.5px solid var(--term-line-s);
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
 }
-[aria-checked='true'] > .michi-doc-radio { border-color: var(--term-accent); }
-[aria-checked='true'] > .michi-doc-radio::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--term-accent); }
+.michi-doc-choice__option[aria-pressed='true'] > .michi-doc-radio { border-color: var(--term-accent); }
+.michi-doc-choice__option[aria-pressed='true'] > .michi-doc-radio::after { content: ''; width: 6px; height: 6px; border-radius: var(--ui-radius-pill); background: var(--term-accent); }
 
 /* pros and cons */
 .michi-doc-pc { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
 .michi-doc-pc ul { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; font-size: var(--fs-lg); }
 .michi-doc-pc li { display: flex; gap: 8px; }
-.michi-doc-pc__mark { flex-shrink: 0; width: 14px; text-align: center; }
+.michi-doc-pc__mark { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 14px; height: 1lh; }
 .michi-doc-pc__mark[data-kind='pro'] { color: var(--term-digest); }
 .michi-doc-pc__mark[data-kind='con'] { color: var(--term-danger); }
 
@@ -618,6 +685,8 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--fs-md);
+  /* Figures take one width per digit, so a column of them lines up. */
+  font-variant-numeric: tabular-nums;
 }
 .michi-doc-table th {
   padding: 8px 14px;
@@ -628,15 +697,22 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   text-align: left;
   white-space: nowrap;
 }
-.michi-doc-table td { padding: 9px 14px; border-bottom: 1px solid var(--term-line); color: var(--term-fg); vertical-align: top; overflow-wrap: anywhere; }
+.michi-doc-table td { padding: 9px 14px; border-bottom: 1px solid var(--term-line); color: var(--term-fg); vertical-align: top; }
+/* The table fits its column: a long word in a sentence or a URL breaks inside its cell rather than widen the table.
+   A cell that is one short word (a ticket number, a branch) or a short phrase (a state, a name) is never cut in
+   two; should those alone be wider than the pane, the table scrolls inside its frame. */
+.michi-doc-table td:not([data-one-line]) { overflow-wrap: anywhere; }
+.michi-doc-table td[data-one-line] { white-space: nowrap; }
 .michi-doc-table tbody tr:last-child td { border-bottom: 0; }
 .michi-doc-table td[data-type='number'],
 .michi-doc-table td[data-type='progress'],
 .michi-doc-table td[data-type='date'] { font-family: var(--font-mono); white-space: nowrap; }
-.michi-doc-table a { color: var(--term-accent); }
+.michi-doc-table a { color: var(--term-accent-text); }
+/* A column of figures lines up at its right edge, its header with it. */
+.michi-doc-table :is(th, td)[data-align='end'] { text-align: right; }
 
 /* On Spaces pages an agent's Markdown table is open, like Michi's database table: a rule under each row,
-   no box and no header band. The header is the Spaces list table's caps label (.spaces-table th). */
+   no box and no header band. The header is a quiet label in the words' own case, so a CJK header reads at a size it can. */
 .space-doc [data-michi-block='markdown'] .prose table {
   width: 100%;
   margin: 4px 0 0;
@@ -646,6 +722,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   overflow: visible;
   font-size: var(--fs-lg);
   line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 .space-doc [data-michi-block='markdown'] .prose :is(th, td) {
   padding: 9px 10px;
@@ -658,14 +735,17 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   padding: 8px 10px;
   background: transparent;
   color: var(--term-muted);
-  font: 500 10.5px/1 var(--ui-font);
-  letter-spacing: var(--ls-caps-wide);
-  text-transform: uppercase;
+  font: 500 var(--fs-md)/1.4 var(--ui-font);
+  letter-spacing: normal;
+  text-transform: none;
   white-space: nowrap;
 }
 .space-doc [data-michi-block='markdown'] .prose tbody tr:last-child td { border-bottom: 1px solid var(--term-line); }
-.space-doc [data-michi-block='markdown'] .prose tbody tr:hover { background: transparent; }
-.space-doc [data-michi-block='markdown'] .prose tbody tr:hover td { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
+.space-doc [data-michi-block='markdown'] .prose tbody td { transition: background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  .space-doc [data-michi-block='markdown'] .prose tbody tr:hover { background: transparent; }
+  .space-doc [data-michi-block='markdown'] .prose tbody tr:hover td { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
+}
 /* Phones fit the table to the column: a long word (a branch or package name) breaks inside its cell
    rather than widening the table past the screen, which made the whole page pan sideways. */
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
@@ -673,12 +753,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   .space-doc [data-michi-block='markdown'] .prose th { white-space: normal; line-height: 1.3; }
 }
 
-/* Only the row under the pointer is tinted; the surrounding block stays bare. */
-[data-michi-block='markdown'] .prose li { border-radius: var(--ui-radius); }
-.michi-doc-checklist > li:hover,
-.michi-doc-steps__item:hover,
-[data-michi-block='markdown'] .prose li:hover:not(:has(li:hover)) {
-  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent);
+/* A row that holds an action (the checklist's Ask, a step's Start) is tinted under the pointer.
+   A Markdown list is a single column with nothing to act on, so its items stay bare. */
+.michi-doc-checklist > li,
+.michi-doc-steps__item { transition: background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  .michi-doc-checklist > li:hover,
+  .michi-doc-steps__item:hover { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
 }
 
 /* milestones: a track whose top rule marks each one passed, next or later; a narrow pane stacks it with the rule on the left */
@@ -703,11 +784,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-track__item[data-state='done'] { border-top-color: var(--term-digest); }
 .michi-doc-track__item[data-state='next'] { border-top-color: var(--term-accent); }
 .michi-doc-track__item[data-tone] { border-top-color: var(--tone); }
-.michi-doc-track__when { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); }
+.michi-doc-track__when { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); }
 .michi-doc-track__label { color: var(--term-fg); font-size: var(--fs-lg); font-weight: 600; overflow-wrap: anywhere; }
 .michi-doc-track__item[data-state='done'] .michi-doc-track__label { color: var(--term-mid); font-weight: 500; }
 .michi-doc-track__note { color: var(--term-muted); font-size: var(--fs-md); overflow-wrap: anywhere; }
-.michi-doc-track__item[data-tone] .michi-doc-track__note { color: var(--tone); }
+.michi-doc-track__item[data-tone] .michi-doc-track__note { color: var(--tone-text, var(--term-muted)); }
+/* A long run of steps always stacks, as a narrow pane stacks any track. */
+.michi-doc-track[data-stack] { grid-auto-flow: row; gap: 10px; }
+.michi-doc-track[data-stack] > .michi-doc-track__item { padding: 0 0 0 12px; border-top: 0; border-left: 2px solid var(--term-line-s); }
+.michi-doc-track[data-stack] > .michi-doc-track__item[data-state='done'] { border-left-color: var(--term-digest); }
+.michi-doc-track[data-stack] > .michi-doc-track__item[data-state='next'] { border-left-color: var(--term-accent); }
 @container (max-width: 480px) {
   .michi-doc-track { grid-auto-flow: row; gap: 10px; }
   .michi-doc-track__item { padding: 0 0 0 12px; border-top: 0; border-left: 2px solid var(--term-line-s); }
@@ -728,9 +814,9 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-size: var(--fs-lg);
 }
 .michi-doc-dated li:last-child { border-bottom: 0; }
-.michi-doc-dated__when { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); white-space: nowrap; }
+.michi-doc-dated__when { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-md); white-space: nowrap; }
 .michi-doc-dated__glyph { display: inline-flex; align-self: center; }
-.michi-doc-dated__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tone, var(--term-line-s)); }
+.michi-doc-dated__dot { width: 7px; height: 7px; border-radius: var(--ui-radius-pill); background: var(--tone, var(--term-line-s)); }
 .michi-doc-dated__text { grid-column: 3; color: var(--term-muted); font-size: var(--fs-md); }
 .michi-doc-dated__all {
   margin-left: auto;
@@ -741,40 +827,50 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   text-underline-offset: 3px;
 }
 
-/* next steps: who acts, the step and what it unblocks; Start a conversation shows on hover */
-.michi-doc-steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--term-line); }
+/* next steps: who acts (a quiet word on the step's first line), the step and what it unblocks; Start a conversation shows on hover */
+/* The list owns the two columns and each step takes them as a subgrid, so the who column is as wide as the
+   longest of its words across the whole list and every step's words start at the same place. */
+.michi-doc-steps {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
 .michi-doc-steps__item {
+  --steps-line: calc(var(--message-body-size-base) * 1.45);
   position: relative;
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 12px;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: start;
   padding: 10px 0;
-  border-bottom: 1px solid var(--term-line);
 }
-.michi-doc-steps__who { justify-self: start; color: var(--term-mid); border-color: var(--term-line); }
-.michi-doc-steps__who[data-who='user'] {
-  color: var(--term-accent);
-  border-color: var(--term-accent-f);
-  background: color-mix(in srgb, var(--term-accent-f) 25%, var(--term-surface));
-}
-.michi-doc-steps__what { min-width: 0; color: var(--term-fg); font-size: var(--message-body-size-base); line-height: 1.45; overflow-wrap: anywhere; }
-.michi-doc-steps__unblocks { display: block; margin-top: 2px; color: var(--term-muted); font-size: var(--fs-md); }
+.michi-doc-steps__item + .michi-doc-steps__item { border-top: 1px solid var(--term-line); }
+.michi-doc-steps__who { color: var(--term-muted); font-size: var(--fs-md); line-height: var(--steps-line); white-space: nowrap; }
+.michi-doc-steps__who[data-who='user'] { color: var(--term-accent-text); }
+.michi-doc-steps__what { min-width: 0; color: var(--term-fg); font-size: var(--message-body-size-base); line-height: var(--steps-line); overflow-wrap: anywhere; }
+.michi-doc-steps__unblocks { display: block; margin-top: 2px; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
 .michi-doc-steps__start {
   position: absolute;
   top: 8px;
   right: 0;
   opacity: 0;
-  transition: opacity var(--t-quick) ease;
+  pointer-events: none;
+  transition: opacity var(--t-quick) var(--t-ease);
 }
-.michi-doc-steps__item:hover > .michi-doc-steps__start,
-.michi-doc-steps__start:focus-visible { opacity: 1; }
+@media (hover: hover) {
+  .michi-doc-steps__item:hover > .michi-doc-steps__start { opacity: 1; pointer-events: auto; }
+}
+.michi-doc-steps__start:focus-visible { opacity: 1; pointer-events: auto; }
 
 /* containers */
 .michi-doc-columns { display: grid; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 860px) { .michi-doc-columns { grid-template-columns: minmax(0, 1fr); } }
 .michi-doc-slot { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-/* The + at the foot of a container's section, while the pointer or focus is in the section. */
+/* The + at the foot of a container's section, while the pointer or focus is in the section;
+   on a touch screen while a tap has selected its block. */
 .michi-doc-slot__add { display: flex; }
 .michi-doc-slot__add-btn {
   display: inline-flex;
@@ -789,11 +885,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   color: var(--term-muted);
   cursor: pointer;
   opacity: 0;
-  transition: opacity var(--t-quick) ease;
+  pointer-events: none;
+  transition: opacity var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.michi-doc-slot:is(:hover, :focus-within):not(:has(.michi-doc-slot:is(:hover, :focus-within))) > .michi-doc-slot__add > .michi-doc-slot__add-btn,
-.michi-doc-slot__add-btn[aria-expanded='true'] { opacity: 1; }
-.michi-doc-slot__add-btn:hover { border-color: var(--term-line-s); color: var(--term-fg); }
+@media (hover: hover) {
+  .michi-doc-slot:is(:hover, :focus-within):not(:has(.michi-doc-slot:is(:hover, :focus-within))) > .michi-doc-slot__add > .michi-doc-slot__add-btn { opacity: 1; pointer-events: auto; }
+  .michi-doc-slot__add-btn:hover { border-color: var(--term-line-s); color: var(--term-fg); }
+}
+.michi-doc-slot__add-btn:focus-visible,
+.michi-doc-slot__add-btn[aria-expanded='true'] { opacity: 1; pointer-events: auto; }
+.michi-doc-slot__add-btn:active { border-color: var(--term-line-s); color: var(--term-fg); }
 .michi-doc-tabs__list { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 12px; border-bottom: 1px solid var(--term-line); }
 .michi-doc-tabs__tab {
   margin-bottom: -1px;
@@ -805,18 +906,35 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-family: var(--ui-font);
   font-size: var(--fs-md);
   cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
+/* An underline tab hovers with its words (ST-01); the underline itself moves in one frame. */
+@media (hover: hover) {
+  .michi-doc-tabs__tab:hover { color: var(--term-fg); }
+}
+.michi-doc-tabs__tab:active { color: var(--term-fg); }
 .michi-doc-tabs__tab[aria-selected='true'] { border-bottom-color: var(--term-accent); color: var(--term-fg); }
-.michi-doc-tabs__tab:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+.michi-doc-tabs__tab:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+/* The title is a row: its fill reaches 6px past the words on each side and 4px
+   above and below, and the margins take that back so nothing moves. */
 .michi-doc-toggle > summary {
-  margin-bottom: 10px;
+  position: relative;
+  margin: -4px -6px 6px;
+  padding: 4px 6px;
+  border-radius: var(--ui-radius);
   list-style: none;
   color: var(--term-fg);
   font-size: var(--fs-lg);
   font-weight: 600;
   cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease);
 }
 .michi-doc-toggle > summary::-webkit-details-marker { display: none; }
+@media (hover: hover) {
+  .michi-doc-toggle > summary:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-toggle > summary:active { background: var(--term-hover-bg, var(--term-alt)); }
+.michi-doc-toggle > summary:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 
 /* ── Ask popover ─────────────────────────────────────────────── */
 .michi-ask { display: flex; flex-direction: column; gap: 10px; padding: 10px; }
@@ -826,7 +944,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   min-width: 0;
   padding: 1px 6px;
   overflow: hidden;
-  border-radius: 2px;
+  border-radius: var(--ui-radius-sm);
   background: var(--term-accent-f);
   color: var(--term-fg);
   text-overflow: ellipsis;
@@ -843,9 +961,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-family: var(--ui-font);
   font-size: var(--fs-sm);
   cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.michi-ask__suggestion:hover { color: var(--term-fg); }
-.michi-ask__suggestion:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+@media (hover: hover) {
+  .michi-ask__suggestion:hover { color: var(--term-fg); }
+}
+.michi-ask__suggestion:active { color: var(--term-fg); }
+.michi-ask__suggestion:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .michi-ask__field {
   display: flex;
   align-items: center;
@@ -856,12 +978,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   background: var(--term-bg);
 }
 .michi-ask__prompt { color: var(--term-accent); font-family: var(--font-mono); font-size: var(--fs-md); }
+.michi-ask__field:has(.michi-ask__input:focus-visible) { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-ask__input {
   flex: 1;
   min-width: 0;
   padding: 0;
   border: 0;
-  outline: 0;
+  outline: 2px solid transparent;
   background: transparent;
   color: var(--term-fg);
   font-family: var(--ui-font);
@@ -880,8 +1003,8 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   color: var(--term-fg);
   cursor: pointer;
 }
-.michi-ask__send:disabled { color: var(--term-faint); cursor: default; }
-.michi-ask__send:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+.michi-ask__send:disabled { color: var(--term-faint); cursor: not-allowed; }
+.michi-ask__send:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* ── Loading ─────────────────────────────────────────────────── */
 .michi-doc-skeleton { display: flex; flex-direction: column; gap: 14px; min-height: 360px; }
@@ -898,14 +1021,10 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   background: var(--term-accent-f);
 }
 .michi-doc-block[data-dragging='true'] { opacity: 0.45; }
-.michi-doc-block[data-flash] { animation: michi-doc-flash var(--t-slow, 600ms) ease-out; }
-@keyframes michi-doc-flash {
-  from { background: var(--term-accent-f); outline-color: var(--term-accent); }
-  to { background: transparent; }
-}
-/* A block revealed from elsewhere (revealPageTarget) is often still arriving on
-   a smooth scroll, so its flash runs twice the page's own plus a beat, ≈1.4s,
-   and holds the tint for the first 30%. */
+/* A block the Pages outline, a Contents block (use-peek.ts flashBlock) or another
+   surface (revealPageTarget) lands on is often still arriving on a smooth scroll,
+   so its flash runs twice --t-slow plus a beat, ≈1.4s, and holds the tint for
+   the first 30% (MO-24). */
 @keyframes michi-doc-reveal-flash {
   0%, 30% { background: var(--term-accent-f); }
   100% { background: transparent; }
@@ -932,12 +1051,27 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   min-height: 24px;
   padding: 0 3px 0 0;
   opacity: 0;
-  transition: opacity var(--t-quick) ease;
+  pointer-events: none;
+  transition: opacity var(--t-quick) var(--t-ease);
 }
-.michi-doc-block:hover > .michi-doc-block__margin,
-.michi-doc-block:focus-within > .michi-doc-block__margin,
-.michi-doc-block[data-active='true'] > .michi-doc-block__margin,
-.michi-doc-block[data-selected='true'] > .michi-doc-block__margin { opacity: 1; }
+@media (hover: hover) {
+  .michi-doc-block:hover > .michi-doc-block__margin,
+  .michi-doc-block:focus-within > .michi-doc-block__margin,
+  .michi-doc-block[data-active='true'] > .michi-doc-block__margin { opacity: 1; pointer-events: auto; }
+}
+/* A checked block keeps its box in sight on every screen. */
+.michi-doc-block[data-selected='true'] > .michi-doc-block__margin,
+.michi-doc-block__margin:has(:focus-visible) { opacity: 1; pointer-events: auto; }
+/* A touch screen has no hover: a tap selects a block (data-active, BlockFrame)
+   and brings out its chrome, which until then takes no taps, so the selecting
+   tap never runs a control; the next tap does. */
+@media (hover: none) {
+  .michi-doc-block[data-active='true'] > .michi-doc-toolbar,
+  .michi-doc-block[data-active='true'] > .michi-doc-block__margin,
+  .michi-doc-block[data-active='true'] .michi-doc-steps__start,
+  .michi-doc-block[data-active='true'] .michi-doc-slot__add-btn,
+  .michi-doc-block[data-active='true'] .michi-doc-editor__remove { opacity: 1; pointer-events: auto; }
+}
 .michi-doc-block__check,
 .michi-doc-block__add,
 .michi-doc-block__handle {
@@ -952,11 +1086,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   background: transparent;
   color: var(--term-muted);
   cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.michi-doc-block__add:hover,
-.michi-doc-block__handle:hover,
+@media (hover: hover) {
+  .michi-doc-block__add:hover,
+  .michi-doc-block__handle:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+}
 .michi-doc-block__add[aria-expanded='true'],
-.michi-doc-block__handle[aria-expanded='true'] { background: var(--term-alt); color: var(--term-fg); }
+.michi-doc-block__handle[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+.michi-doc-block__add:active,
+.michi-doc-block__handle:active { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); color: var(--term-fg); }
 .michi-doc-block__handle { cursor: grab; }
 .michi-doc-blocks[data-dragging] .michi-doc-block__handle { cursor: grabbing; }
 .michi-doc-block__check::before {
@@ -965,7 +1104,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   height: 12px;
   box-sizing: border-box;
   border: 1px solid var(--term-line-s);
-  border-radius: 3px;
+  border-radius: var(--ui-radius-sm);
 }
 .michi-doc-block__check[aria-checked='true']::before { display: none; }
 .michi-doc-block__check[aria-checked='true'] { color: var(--term-accent); }
@@ -975,9 +1114,9 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-toolbar__btn { touch-action: none; }
 .michi-doc-block__check:focus-visible,
 .michi-doc-block__add:focus-visible,
-.michi-doc-block__handle:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+.michi-doc-block__handle:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 /* While blocks are selected every block shows its box, so more can be picked. */
-.michi-doc-blocks[data-selecting] > .michi-doc-block > .michi-doc-block__margin { opacity: 1; }
+.michi-doc-blocks[data-selecting] > .michi-doc-block > .michi-doc-block__margin { opacity: 1; pointer-events: auto; }
 .michi-doc-blocks[data-selecting] > .michi-doc-block > .michi-doc-block__margin > :not(.michi-doc-block__check) { opacity: 0; }
 .michi-doc-blocks[data-selecting] > .michi-doc-block:hover > .michi-doc-block__margin > * { opacity: 1; }
 
@@ -991,7 +1130,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-drop {
   height: 2px;
   margin: -8px 0;
-  border-radius: 1px;
+  border-radius: var(--ui-radius-sm);
   background: var(--term-accent);
 }
 
@@ -1003,13 +1142,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   right: 12px;
   padding: 0 5px;
   border: 1px solid var(--term-mauve);
-  border-radius: 3px;
+  border-radius: var(--ui-radius-sm);
   background: var(--term-surface);
   color: var(--term-mauve);
   font-size: var(--fs-2xs);
   line-height: 14px;
   white-space: nowrap;
-  transition: opacity var(--t-quick) ease;
+  transition: opacity var(--t-quick) var(--t-ease);
 }
 .michi-doc-block:hover > .michi-doc-edited,
 .michi-doc-block:focus-within > .michi-doc-edited,
@@ -1035,7 +1174,6 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   box-sizing: border-box;
   padding: 0;
   border: 0;
-  outline: 0;
   resize: vertical;
   background: transparent;
   color: var(--term-fg);
@@ -1043,6 +1181,8 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-size: var(--fs-lg);
   line-height: 1.6;
 }
+/* The frame's accent border marks the editor; the ring marks which of its fields has focus. */
+.michi-doc-editor__field:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-doc-editor__field::placeholder { color: var(--term-faint); }
 .michi-doc-editor__field--line { resize: none; }
 .michi-doc-editor__title { font-weight: 600; }
@@ -1062,7 +1202,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-kbd {
   padding: 0 4px;
   border: 1px solid var(--term-line);
-  border-radius: 3px;
+  border-radius: var(--ui-radius-sm);
   background: var(--term-alt);
   color: var(--term-mid);
   font-family: var(--font-mono);
@@ -1085,15 +1225,19 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-family: var(--ui-font);
   font-size: var(--fs-sm);
   cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.michi-doc-editor__remove { opacity: 0; }
-.michi-doc-editor__items li:hover .michi-doc-editor__remove,
-.michi-doc-editor__remove:focus-visible { opacity: 1; }
-.michi-doc-editor__remove:hover,
-.michi-doc-editor__add:hover { color: var(--term-fg); }
+.michi-doc-editor__remove { opacity: 0; pointer-events: none; }
+@media (hover: hover) {
+  .michi-doc-editor__items li:hover .michi-doc-editor__remove { opacity: 1; pointer-events: auto; }
+  .michi-doc-editor__remove:hover,
+  .michi-doc-editor__add:hover:not(:disabled) { color: var(--term-fg); }
+}
+.michi-doc-editor__remove:focus-visible { opacity: 1; pointer-events: auto; }
+.michi-doc-editor__remove:active,
+.michi-doc-editor__add:active:not(:disabled) { color: var(--term-fg); }
 .michi-doc-editor__add { align-self: flex-start; }
-.michi-doc-editor__add:disabled { opacity: 0.5; cursor: default; }
-.michi-doc-editor__add:disabled:hover { color: var(--term-muted); }
+.michi-doc-editor__add:disabled { opacity: 0.5; cursor: not-allowed; }
 .michi-doc-editor__add-row { display: flex; align-items: center; gap: 8px; }
 .michi-doc-block__insert { margin-top: 12px; }
 .michi-doc-insert__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; color: var(--term-muted); font-size: var(--fs-sm); }
@@ -1152,11 +1296,13 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-menu__keys {
   padding: 0 4px;
   border: 1px solid var(--term-line);
-  border-radius: 3px;
+  border-radius: var(--ui-radius-sm);
   font-family: var(--font-mono);
 }
 
 .michi-doc-sources { display: flex; flex-direction: column; gap: 8px; padding: 12px 12px 8px; }
+/* Takes focus from script only when no source opens (ST-08, exception 2). */
+.michi-doc-sources:focus { outline: none; }
 .michi-doc-sources__list { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .michi-doc-sources__row {
   display: flex;
@@ -1172,9 +1318,12 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-size: var(--fs-md);
   text-align: left;
 }
-.michi-doc-sources__row--link { cursor: pointer; }
-.michi-doc-sources__row--link:hover { background: var(--term-alt); }
-.michi-doc-sources__row--link:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+.michi-doc-sources__row--link { cursor: pointer; transition: background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  .michi-doc-sources__row--link:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-sources__row--link:active { background: var(--term-hover-bg, var(--term-alt)); }
+.michi-doc-sources__row--link:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .michi-doc-sources__glyph { display: inline-flex; color: var(--term-muted); }
 .michi-doc-sources__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .michi-doc-sources__detail { color: var(--term-muted); font-size: var(--fs-sm); }
@@ -1187,24 +1336,17 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-thread__toolbar .michi-doc-toolbar__btn svg { color: var(--term-muted); }
 
 /* compare: picking an option comes later */
-.michi-doc-option__pick {
-  align-self: stretch;
-  margin-top: auto;
-  padding: 3px 8px;
-  border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--term-faint);
-  font-family: var(--ui-font);
-  font-size: var(--fs-sm);
-  text-align: left;
-  cursor: not-allowed;
-}
+/* Pick this is the page's ordinary button (ui-btn) across the card's foot, at a pointer's height. */
+.michi-doc-option__pick { align-self: stretch; min-height: 32px; margin-top: auto; }
 
 /* a checklist the person may tick */
-.michi-doc-check--live { padding: 0; background: transparent; cursor: pointer; }
-.michi-doc-check--live:hover { border-color: var(--term-accent); }
-.michi-doc-check--live:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+.michi-doc-check--live { position: relative; padding: 0; background: transparent; cursor: pointer; transition: border-color var(--t-quick) var(--t-ease); }
+.michi-doc-check--live::after { content: ''; position: absolute; inset: -6px; }
+@media (hover: hover) {
+  .michi-doc-check--live:hover { border-color: var(--term-accent); }
+}
+.michi-doc-check--live:active { border-color: var(--term-accent); }
+.michi-doc-check--live:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* ── Since you left: git facts from the last read ────────────── */
 .michi-doc-since__stale { margin: 0; color: var(--term-muted); font-size: var(--fs-sm); }
@@ -1237,39 +1379,6 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 }
 .michi-doc-stale__glyph { display: inline-flex; }
 
-/* ── Foot: quiet and ignored threads ─────────────────────────── */
-.michi-doc-foot { display: flex; flex-direction: column; border-top: 1px solid var(--term-line); }
-.michi-doc-foot__row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--term-line);
-  color: var(--term-mid);
-  font-size: var(--fs-md);
-}
-.michi-doc-foot__list { display: flex; flex-direction: column; margin: 0; padding: 4px 0; list-style: none; border-bottom: 1px solid var(--term-line); }
-.michi-doc-foot__list li { display: flex; align-items: center; gap: 10px; }
-.michi-doc-foot__thread {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 7px 4px;
-  border: 0;
-  background: transparent;
-  color: var(--term-fg);
-  font: inherit;
-  font-size: var(--fs-md);
-  text-align: left;
-  cursor: pointer;
-}
-.michi-doc-foot__thread:hover { background: var(--term-alt); }
-.michi-doc-foot__thread:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
-.michi-doc-foot__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 /* ── Sandboxed widget, turned off ────────────────────────────── */
 .michi-doc-widget { border: 1px solid var(--term-line); border-radius: var(--ui-radius); overflow: hidden; }
 .michi-doc-widget__head {
@@ -1287,7 +1396,7 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-widget__state {
   padding: 0 5px;
   border: 1px solid var(--term-line-s);
-  border-radius: 3px;
+  border-radius: var(--ui-radius);
   color: var(--term-muted);
   font-size: var(--fs-2xs);
   line-height: 15px;
@@ -1302,51 +1411,6 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-size: var(--fs-md);
 }
 .michi-doc-widget__body p { margin: 0; }
-
-/* ── Blocks batch bar ────────────────────────────────────────── */
-.michi-doc-batch-dock {
-  position: sticky;
-  bottom: 20px;
-  z-index: var(--z-pane-overlay);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  height: 0;
-  overflow: visible;
-  pointer-events: none;
-}
-.michi-doc-batch {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 6px 4px 12px;
-  border: 1px solid var(--sel-bar-line);
-  border-radius: var(--ui-radius);
-  background: var(--sel-bar-bg);
-  color: var(--sel-bar-fg);
-  font-family: var(--ui-font);
-  font-size: var(--fs-md);
-  box-shadow: var(--sel-bar-shadow);
-  transform: translateY(-100%);
-  pointer-events: auto;
-}
-.michi-doc-batch__count { margin-right: 6px; color: var(--sel-bar-mid); font-family: var(--font-mono); font-size: var(--fs-sm); }
-.michi-doc-batch__sep { width: 1px; height: 16px; margin-right: 4px; background: var(--sel-bar-line); }
-.michi-doc-batch__btn {
-  display: inline-flex;
-  align-items: center;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--sel-bar-fg);
-  font: inherit;
-  cursor: pointer;
-}
-.michi-doc-batch__btn:hover { background: var(--sel-bar-hover); }
-.michi-doc-batch__btn:focus-visible { outline: 2px solid var(--sel-bar-fg); outline-offset: -2px; }
-.michi-doc-batch__close { padding: 0 8px; color: var(--sel-bar-mid); }
 
 /* ── Add background ──────────────────────────────────────────── */
 .michi-doc-background { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px 16px; }
@@ -1370,11 +1434,16 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   font-size: var(--fs-sm);
 }
 
+/* Reduced motion, by the OS setting or the app's own switch (MO-14): the block
+   that was located holds a still tint for as long as the flash would have run,
+   and the loading bars rest. The catch-all in index.css already cuts every
+   transition here, under both triggers. */
 @media (prefers-reduced-motion: reduce) {
-  .michi-doc-block, .michi-doc-toolbar, .michi-doc-thread, .michi-doc-ghost, .michi-doc-block__margin { transition: none; }
-  .michi-doc-block[data-flash], .michi-doc-block[data-reveal-flash] { animation: none; background: var(--term-accent-f); }
+  .michi-doc-block[data-reveal-flash] { animation: none; background: var(--term-accent-f); }
   .michi-doc-skeleton span { animation: none; }
 }
+:root[data-reduce-motion='on'] .michi-doc-block[data-reveal-flash] { animation: none; background: var(--term-accent-f); }
+:root[data-reduce-motion='on'] .michi-doc-skeleton span { animation: none; }
 
 /* ── Page components a native page adds: a plan in days, picks, conflicts, criteria, charts, pictures, reminders ── */
 
@@ -1388,30 +1457,17 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
 .michi-doc-option__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .michi-doc-option__head .michi-doc-option__name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .michi-doc-option[data-picked='true'] { border-color: var(--term-accent); box-shadow: 0 0 0 1px var(--term-accent); }
-.michi-doc-option__tag {
-  flex-shrink: 0;
-  padding: 0 5px;
-  border: 1px solid currentColor;
-  border-radius: var(--ui-radius-sm);
-  color: var(--term-accent);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  line-height: 16px;
-  white-space: nowrap;
-}
-.michi-doc-option__value small { color: var(--term-muted); font-size: var(--fs-sm); }
+.michi-doc-option__value small { color: var(--term-muted); font-size: var(--fs-md); }
 .michi-doc-option__lines { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; color: var(--term-mid); font-size: var(--fs-md); }
 .michi-doc-option__lines li::before { font-family: var(--font-mono); }
 .michi-doc-option__lines li[data-kind='pro']::before { content: '+ '; color: var(--term-digest); }
 .michi-doc-option__lines li[data-kind='con']::before { content: '− '; color: var(--term-danger-text); }
-.michi-doc-option__pick:not(:disabled) { color: var(--term-fg); cursor: pointer; transition: background var(--t-quick) ease; }
-.michi-doc-option__pick:not(:disabled):hover { background: var(--term-alt); }
-.michi-doc-option__pick:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
-.michi-doc-option[data-picked='true'] .michi-doc-option__pick { color: var(--term-muted); cursor: default; }
+/* The picked option's button only says so: muted words, not a control turned off. */
+.michi-doc-option[data-picked='true'] .michi-doc-option__pick:disabled { opacity: 1; color: var(--term-muted); cursor: default; }
 
 /* conflict: each version with where it came from; Keep this / Both are fine */
 .michi-doc-conflict { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; padding: 0; border: 0; }
-.michi-doc-conflict__q { padding: 0 0 8px; color: var(--term-fg); font-size: var(--fs-lg); }
+.michi-doc-conflict__q { padding: 0 0 8px; color: var(--term-fg); font-size: var(--fs-lg); font-weight: 600; }
 .michi-doc-conflict__option {
   display: grid;
   grid-template-columns: 14px minmax(0, 1fr) auto;
@@ -1422,26 +1478,29 @@ a.michi-doc-link-card:hover { background: var(--term-alt); }
   color: var(--term-fg);
   font-size: var(--fs-lg);
   cursor: pointer;
-  transition: background var(--t-quick) ease;
+  transition: background var(--t-quick) var(--t-ease);
 }
-.michi-doc-conflict__option:has(input:disabled) { cursor: default; }
+/* A version that can still be chosen lights under the pointer; the chosen one keeps its accent fill. */
+@media (hover: hover) {
+  .michi-doc-conflict__option:hover:not([data-on='true']):not(:has(input:disabled)) { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-conflict__option:active:not([data-on='true']):not(:has(input:disabled)) { background: var(--term-hover-bg, var(--term-alt)); }
+.michi-doc-conflict__option:has(input:disabled) { cursor: not-allowed; }
 .michi-doc-conflict__option[data-on='true'] { border-color: var(--term-accent); background: var(--term-accent-f); }
 .michi-doc-conflict__option[data-muted='true'] { color: var(--term-muted); }
+/* On its tint the muted grey would fall under 4.5:1; the version's source steps back one grey less. */
+.michi-doc-conflict__option[data-muted='true'] .michi-doc-conflict__from { color: var(--term-mid); }
+/* On the kept version's accent tint the muted grey falls under 4.5:1 (4.13 on bone); its date takes the mid grey. */
+.michi-doc-conflict__option[data-on='true'] .michi-doc-conflict__meta { color: var(--term-mid); }
 .michi-doc-conflict__option input { width: 14px; height: 14px; margin: 0; accent-color: var(--term-accent); }
 .michi-doc-conflict__text { min-width: 0; overflow-wrap: anywhere; }
-.michi-doc-conflict__meta { display: inline-flex; align-items: center; gap: 8px; color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; }
-.michi-doc-conflict__from {
-  padding: 0 5px;
-  border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-sm);
-  background: transparent;
-  color: var(--term-muted);
-  font: inherit;
-  line-height: 16px;
+.michi-doc-conflict__meta { display: inline-flex; align-items: center; gap: 8px; color: var(--term-muted); font-size: var(--fs-md); font-variant-numeric: tabular-nums; white-space: nowrap; }
+button.michi-doc-conflict__from { cursor: pointer; transition: background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  button.michi-doc-conflict__from:hover { --badge-fill: color-mix(in srgb, var(--term-fg) 12%, transparent); }
 }
-button.michi-doc-conflict__from { cursor: pointer; }
-button.michi-doc-conflict__from:hover { border-color: var(--term-line-s); color: var(--term-fg); }
-button.michi-doc-conflict__from:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+button.michi-doc-conflict__from:active { --badge-fill: color-mix(in srgb, var(--term-fg) 12%, transparent); }
+button.michi-doc-conflict__from:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-doc-conflict__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
 
 /* success criteria: the state glyph and the figure, and where the figure comes from */
@@ -1450,25 +1509,26 @@ button.michi-doc-conflict__from:focus-visible { outline: 1px solid var(--term-ac
 .michi-doc-criteria__now[data-state='not-started'] { color: var(--term-muted); }
 .michi-doc-criteria__from { color: var(--term-muted); font-size: var(--fs-md); }
 
-/* A native page draws its tables open, as its Markdown tables are: a rule under each row and a caps header. */
+/* A native page draws its tables open, as its Markdown tables are: a rule under each row and a quiet header in the words' own case. */
 [data-native-page] .michi-doc-table { border: 0; border-collapse: collapse; font-size: var(--fs-lg); line-height: 1.5; }
 [data-native-page] .michi-doc-table th {
   padding: 8px 10px;
   background: transparent;
   color: var(--term-muted);
-  font: 500 10.5px/1 var(--ui-font);
-  letter-spacing: var(--ls-caps-wide);
-  text-transform: uppercase;
+  font: 500 var(--fs-md)/1.4 var(--ui-font);
 }
 [data-native-page] .michi-doc-table td { padding: 9px 10px; }
 [data-native-page] .michi-doc-table tbody tr:last-child td { border-bottom: 1px solid var(--term-line); }
-[data-native-page] .michi-doc-table tbody tr:hover td { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
+[data-native-page] .michi-doc-table tbody td { transition: background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  [data-native-page] .michi-doc-table tbody tr:hover td { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 50%, transparent); }
+}
 
 /* chart: the legend above, a column per label, the labels below */
 .michi-doc-chart { display: flex; flex-direction: column; gap: 6px; min-width: 0; margin: 0; }
-.michi-doc-chart__legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--term-muted); font-size: var(--fs-sm); }
+.michi-doc-chart__legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--term-muted); font-size: var(--fs-md); }
 .michi-doc-chart__key { display: inline-flex; align-items: center; gap: 5px; }
-.michi-doc-chart__swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.michi-doc-chart__swatch { display: inline-block; width: 10px; height: 10px; border-radius: var(--ui-radius-sm); }
 .michi-doc-chart__plot {
   position: relative;
   display: grid;
@@ -1483,7 +1543,7 @@ button.michi-doc-conflict__from:focus-visible { outline: 1px solid var(--term-ac
 .michi-doc-chart__col[data-stacked='true'] i { flex: none; max-width: none; }
 .michi-doc-chart__col i:not([data-empty]) { min-height: 2px; }
 .michi-doc-chart__lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-.michi-doc-chart__point { position: absolute; width: 6px; height: 6px; border-radius: 50%; transform: translate(-50%, 50%); }
+.michi-doc-chart__point { position: absolute; width: 6px; height: 6px; border-radius: var(--ui-radius-pill); transform: translate(-50%, 50%); }
 .michi-doc-chart__x {
   display: grid;
   grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
@@ -1504,7 +1564,13 @@ button.michi-doc-conflict__from:focus-visible { outline: 1px solid var(--term-ac
 }
 .michi-doc-picture:not([data-state='shown']) .michi-doc-picture__frame { background: var(--term-bg); }
 .michi-doc-picture__link { display: block; width: 100%; height: 100%; }
-.michi-doc-picture__link:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+/* A picture that opens is a card: its frame's border answers the pointer (ST-03). */
+.michi-doc-picture { transition: border-color var(--t-quick) var(--t-ease), box-shadow var(--t-quick) var(--t-ease), background var(--t-quick) var(--t-ease); }
+@media (hover: hover) {
+  .michi-doc-picture:has(.michi-doc-picture__link:hover) { border-color: var(--term-line-s); box-shadow: var(--term-composer-shadow-muted); }
+}
+.michi-doc-picture:has(.michi-doc-picture__link:active) { border-color: var(--term-line-s); background: color-mix(in srgb, var(--term-alt) 70%, var(--term-surface)); }
+.michi-doc-picture__link:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .michi-doc-picture__frame img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .michi-doc-picture__fallback {
   display: flex;
@@ -1515,41 +1581,90 @@ button.michi-doc-conflict__from:focus-visible { outline: 1px solid var(--term-ac
   height: 100%;
   padding: 8px;
   color: var(--term-muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   text-align: center;
 }
-.michi-doc-picture__fallback .michi-doc-link-btn { font-size: var(--fs-xs); }
-.michi-doc-picture__host { max-width: 100%; color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-2xs); overflow-wrap: anywhere; }
-.michi-doc-picture figcaption { padding: 6px 8px; color: var(--term-mid); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.michi-doc-picture__host { max-width: 100%; color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.michi-doc-picture figcaption { padding: 6px 8px; color: var(--term-mid); font-size: var(--fs-md); overflow-wrap: anywhere; }
 
-/* you may have forgotten: what shipped and how to use it, what stopped halfway */
+/* you may have forgotten: what shipped (its mark and the day) and how to use it, what stopped halfway */
 .michi-doc-forgot { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .michi-doc-forgot__item {
+  --forgot-line: calc(var(--fs-lg) * 1.45);
   display: grid;
   grid-template-columns: 12px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 3px 10px;
-  padding: 9px 0;
-  border-bottom: 1px solid var(--term-line);
+  align-items: start;
+  gap: 2px 10px;
+  padding: 10px 0;
 }
-.michi-doc-forgot__item:last-child { border-bottom: 0; }
-.michi-doc-forgot__glyph { display: inline-flex; }
-.michi-doc-forgot__title { min-width: 0; color: var(--term-fg); font-size: var(--fs-lg); overflow-wrap: anywhere; }
-.michi-doc-forgot__meta { color: var(--term-muted); font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; }
-.michi-doc-forgot__detail { grid-column: 2 / 4; color: var(--term-muted); font-size: var(--fs-md); overflow-wrap: anywhere; }
+.michi-doc-forgot__item + .michi-doc-forgot__item { border-top: 1px solid var(--term-line); }
+/* The mark and the day sit on the title's first line. */
+.michi-doc-forgot__glyph { display: inline-flex; align-items: center; height: var(--forgot-line); }
+.michi-doc-forgot__title { min-width: 0; color: var(--term-fg); font-size: var(--fs-lg); line-height: var(--forgot-line); overflow-wrap: anywhere; }
+/* The day is set in the mono face, where digits line up; the words beside the other rows are not. */
+.michi-doc-forgot__meta { color: var(--term-muted); font-size: var(--fs-md); line-height: var(--forgot-line); white-space: nowrap; }
+.michi-doc-forgot__meta time { font-family: var(--font-mono); }
+.michi-doc-forgot__detail { grid-column: 2 / 4; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; overflow-wrap: anywhere; }
 
 /* a thread card whose conversation is gone */
 .michi-doc-thread[data-missing='true'] { cursor: default; }
-.michi-doc-thread[data-missing='true']:hover { background: transparent; }
 
 /* Compact numeric metrics use the document's rhythm; long values need cards. */
 .michi-doc-metrics[data-layout='row'] { display: flex; flex-wrap: wrap; gap: 18px 32px; }
 .michi-doc-metrics[data-layout='row'] .michi-doc-metric { flex: 1 1 120px; border: 0; background: none; padding: 0; }
 .michi-doc-metrics[data-layout='cards'] { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
 .michi-doc-choice { border: 0; padding: 0; margin: 0; min-width: 0; }
-.michi-doc-choice__option { text-align: left; color: var(--term-fg); font: inherit; cursor: pointer; }
+.michi-doc-choice__option { text-align: left; background: transparent; color: var(--term-fg); font: inherit; cursor: pointer; transition: background var(--t-quick) var(--t-ease); }
+/* An answer that can still be given lights under the pointer; the given one keeps its accent fill. */
+@media (hover: hover) {
+  .michi-doc-choice__option:hover:not(:disabled):not([aria-pressed='true']) { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-choice__option:active:not(:disabled):not([aria-pressed='true']) { background: var(--term-hover-bg, var(--term-alt)); }
 .michi-doc-choice__option[aria-pressed='true'] { border-color: var(--term-accent); background: var(--term-accent-f); }
-.michi-doc-choice:disabled .michi-doc-choice__option { cursor: default; }
-.michi-doc-toggle > summary { list-style: none; display: flex; align-items: center; gap: 8px; }
-.michi-doc-toggle > summary::before { content: '›'; display: inline-block; color: var(--term-muted); transform: rotate(0deg); }
+.michi-doc-choice:disabled .michi-doc-choice__option { cursor: not-allowed; }
+.michi-doc-toggle > summary { display: flex; align-items: center; gap: 8px; }
+.michi-doc-toggle > summary::before { content: '›'; display: inline-block; color: var(--term-muted); transform: rotate(0deg); transition: transform var(--t-soft) var(--t-ease); }
 .michi-doc-toggle[open] > summary::before { transform: rotate(90deg); }
+
+/* ── Touch: a finger needs more than a pointer's targets (ST-21) ──
+   Rows reach 44px and buttons 40px. Nothing is drawn larger: an invisible
+   ::after carries the bigger target, as it already does on the checklist's box. */
+@media (hover: none) and (pointer: coarse) {
+  .michi-doc-link-btn,
+  .michi-doc-toolbar__btn,
+  .michi-doc-tabs__tab,
+  .michi-doc-option__pick,
+  .michi-doc-checklist__ask,
+  .michi-doc-block__check,
+  .michi-doc-block__add,
+  .michi-doc-block__handle,
+  .michi-doc-conflict__actions .ui-btn { position: relative; }
+  .michi-doc-link-btn::after,
+  .michi-doc-toolbar__btn::after,
+  .michi-doc-tabs__tab::after,
+  .michi-doc-option__pick::after,
+  .michi-doc-checklist__ask::after,
+  .michi-doc-block__check::after,
+  .michi-doc-block__add::after,
+  .michi-doc-block__handle::after,
+  .michi-doc-conflict__actions .ui-btn::after,
+  .michi-doc-steps__start::after,
+  .michi-doc-toggle > summary::after { content: ''; position: absolute; inset: -10px 0; }
+  /* A checklist row holds its box and Ask: the row is 44px, the box and Ask 40px inside it. */
+  .michi-doc-checklist li { min-height: 44px; box-sizing: border-box; }
+  .michi-doc-check--live::after { inset: -14px; }
+  .michi-doc-checklist__ask::after { inset: -4px; }
+  /* The toolbar's buttons widen to 40px; its bar keeps its height. */
+  .michi-doc-toolbar__btn { min-width: 40px; justify-content: center; }
+  .michi-doc-toolbar__btn::after { inset: -9px 0; }
+  /* The three margin controls share a 60px gutter, so they grow in height only. */
+  .michi-doc-block__check::after,
+  .michi-doc-block__add::after,
+  .michi-doc-block__handle::after { inset: -9px 0; }
+  .michi-doc-tabs__tab::after { inset: -6px 0; }
+  .michi-doc-option__pick::after { inset: -4px 0; }
+  .michi-doc-conflict__actions .ui-btn::after,
+  .michi-doc-steps__start::after { inset: -11px 0; }
+  /* The title row's target stays clear of the content it opens. */
+  .michi-doc-toggle > summary::after { inset: -10px 0 -6px; }
+}

@@ -108,6 +108,7 @@ export interface PopoverSurfaceProps {
   /** Mouse handlers — used by callers that need to stop propagation
    *  (e.g. a popover nested inside another popover). */
   onMouseDown?: React.MouseEventHandler<HTMLDivElement>;
+  onMouseLeave?: React.MouseEventHandler<HTMLDivElement>;
   onClick?: React.MouseEventHandler<HTMLDivElement>;
   onContextMenu?: React.MouseEventHandler<HTMLDivElement>;
   children: React.ReactNode;
@@ -141,6 +142,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
       style,
       className,
       onMouseDown,
+      onMouseLeave,
       onClick,
       onContextMenu,
       children,
@@ -198,6 +200,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
           solidGlass={solidGlass}
           style={baseStyle}
           onMouseDown={onMouseDown}
+          onMouseLeave={onMouseLeave}
           onClick={onClick}
           onContextMenu={onContextMenu}
         >
@@ -219,6 +222,7 @@ export const PopoverSurface = React.forwardRef<HTMLDivElement, PopoverSurfacePro
         data-menu-animate={menuKind && animate ? 'true' : undefined}
         style={baseStyle}
         onMouseDown={onMouseDown}
+        onMouseLeave={onMouseLeave}
         onClick={onClick}
         onContextMenu={onContextMenu}
       >
@@ -280,6 +284,7 @@ function GrowingSurface({
   solidGlass,
   style,
   onMouseDown,
+  onMouseLeave,
   onClick,
   onContextMenu,
   children,
@@ -295,6 +300,7 @@ function GrowingSurface({
   solidGlass: boolean;
   style: React.CSSProperties;
   onMouseDown?: React.MouseEventHandler<HTMLDivElement>;
+  onMouseLeave?: React.MouseEventHandler<HTMLDivElement>;
   onClick?: React.MouseEventHandler<HTMLDivElement>;
   onContextMenu?: React.MouseEventHandler<HTMLDivElement>;
   children: React.ReactNode;
@@ -373,6 +379,7 @@ function GrowingSurface({
       style={{ ...style, pointerEvents: leaving ? 'none' : style.pointerEvents }}
       exit={exit}
       onMouseDown={leaving ? undefined : onMouseDown}
+      onMouseLeave={leaving ? undefined : onMouseLeave}
       onClick={leaving ? undefined : onClick}
       onContextMenu={onContextMenu}
     >
@@ -397,13 +404,16 @@ interface TooltipAnchorProps {
  * Compact tooltip pill anchored to a button's bounding rect. Centers
  * horizontally below the anchor, then clamps inside the viewport and flips
  * above when there is no room below. Uses the tooltip variant of
- * PopoverSurface so it inherits the shared tooltip tokens.
+ * PopoverSurface so it inherits the shared tooltip tokens. It takes the
+ * pointer, and a transparent bridge (.ui-tooltip) spans the `offset` gap to
+ * the anchor, so a pointer can move onto it (WCAG 1.4.13).
  *
  * Renders nothing when it mounts right after a tap: the tap's synthetic hover
  * would otherwise leave the pill up until the next tap elsewhere.
  */
 export function Tooltip({
   anchorRef,
+  tipRef,
   id,
   label,
   kbd,
@@ -411,8 +421,12 @@ export function Tooltip({
   zIndex,
   animate = false,
   side = 'bottom',
+  onMouseLeave,
+  onMouseDown,
 }: {
   anchorRef: React.RefObject<HTMLElement | null>;
+  /** Receives the pill's element. */
+  tipRef?: React.RefObject<HTMLDivElement | null>;
   /** Set on the label, for the anchor's aria-describedby. */
   id?: string;
   label: React.ReactNode;
@@ -423,10 +437,13 @@ export function Tooltip({
   animate?: boolean;
   /** Preferred placement. `right` is used by the collapsed rail. */
   side?: TooltipSide;
+  onMouseLeave?: React.MouseEventHandler<HTMLDivElement>;
+  onMouseDown?: React.MouseEventHandler<HTMLDivElement>;
 }) {
   const [pos, setPos] = React.useState<{ left: number; top: number } | null>(null);
   const [fromTouch] = React.useState(lastInputWasTouch);
-  const bubbleRef = React.useRef<HTMLDivElement>(null);
+  const ownRef = React.useRef<HTMLDivElement>(null);
+  const bubbleRef = tipRef ?? ownRef;
 
   const measure = React.useCallback(() => {
     const el = anchorRef.current;
@@ -465,7 +482,7 @@ export function Tooltip({
         ? prev
         : { left, top }
     ));
-  }, [anchorRef, fromTouch, offset, side]);
+  }, [anchorRef, bubbleRef, fromTouch, offset, side]);
 
   // Run once before paint, then again after the pill mounts so the clamp and
   // flip use its real size. `hasPosition` flips once and triggers the second pass.
@@ -491,18 +508,19 @@ export function Tooltip({
       zIndex={zIndex}
       role="tooltip"
       animate={animate}
+      className="ui-tooltip"
+      onMouseLeave={onMouseLeave}
+      onMouseDown={onMouseDown}
       style={{
+        '--tip-gap': `${offset}px`,
         padding: '3px 7px',
         color: 'var(--term-mid)',
         whiteSpace: 'nowrap',
-        pointerEvents: 'none',
         display: 'flex',
         alignItems: 'center',
         gap: 6,
         maxWidth: 'calc(100vw - 16px)',
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-      }}
+      } as React.CSSProperties}
     >
       <span id={id} style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
       {kbd && <span style={{ flex: 'none', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>{kbd}</span>}
@@ -532,12 +550,18 @@ const HOVER_TIP_WARM_MS = 600;
  * Attach a delayed hover/focus tooltip to one anchor element. The anchor is
  * cloned (no wrapper DOM) so layout is unchanged, and its own handlers/ref are
  * chained ahead of the tooltip's. Hover uses `delayMs`; keyboard focus is
- * immediate, and a click's focus opens nothing. Esc closes it.
+ * immediate, and a click's focus opens nothing. The anchor, the tip and the
+ * gap between them are one hover area: the tip stays while the pointer moves
+ * onto it and closes once the pointer has left both (WCAG 1.4.13). Esc, blur
+ * and a press close it.
  */
+/** How long the pointer rests on an anchor before its tip shows (TR-14). */
+export const HOVER_TIP_DELAY_MS = 450;
+
 export function HoverTip({
   label,
   kbd,
-  delayMs = 450,
+  delayMs = HOVER_TIP_DELAY_MS,
   disabled = false,
   offset,
   zIndex,
@@ -545,6 +569,7 @@ export function HoverTip({
   children,
 }: HoverTipProps) {
   const anchorRef = React.useRef<HTMLElement | null>(null);
+  const tipRef = React.useRef<HTMLDivElement | null>(null);
   const timerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [open, setOpen] = React.useState(false);
   const tipId = React.useId();
@@ -603,6 +628,11 @@ export function HoverTip({
     }
   }, [childRef]);
 
+  /** A pointer that leaves the anchor for its tip, or the tip for its anchor, is still in the hover area. */
+  const hideUnlessInto = (other: React.RefObject<HTMLElement | null>, to: EventTarget | null) => {
+    if (!(to instanceof Node && other.current?.contains(to))) hide();
+  };
+
   const shown = open && !disabled;
   const anchor = React.cloneElement(children, {
     ref: setAnchor,
@@ -613,7 +643,7 @@ export function HoverTip({
     },
     onMouseLeave: (event: React.MouseEvent<HTMLElement>) => {
       children.props.onMouseLeave?.(event);
-      hide();
+      hideUnlessInto(tipRef, event.relatedTarget);
     },
     onFocus: (event: React.FocusEvent<HTMLElement>) => {
       children.props.onFocus?.(event);
@@ -635,6 +665,7 @@ export function HoverTip({
       {shown && (
         <Tooltip
           anchorRef={anchorRef}
+          tipRef={tipRef}
           id={tipId}
           label={label}
           kbd={kbd}
@@ -642,6 +673,8 @@ export function HoverTip({
           zIndex={zIndex}
           side={side}
           animate
+          onMouseLeave={(event) => hideUnlessInto(anchorRef, event.relatedTarget)}
+          onMouseDown={hide}
         />
       )}
     </>
@@ -664,6 +697,8 @@ export interface MenuItemProps {
   onContextMenu?: React.MouseEventHandler<HTMLLIElement>;
   title?: string;
   role?: string;
+  /** -1 for a menu whose rows take DOM focus (roving focus, ContextMenu). */
+  tabIndex?: number;
   /** DOM id, e.g. for a list's aria-activedescendant. */
   id?: string;
   'aria-selected'?: boolean;
@@ -695,6 +730,7 @@ export function MenuItem(props: MenuItemProps) {
     onContextMenu,
     title,
     role,
+    tabIndex,
     id,
     style,
     className,
@@ -706,6 +742,7 @@ export function MenuItem(props: MenuItemProps) {
     <li
       id={id}
       role={role}
+      tabIndex={tabIndex}
       title={title}
       aria-selected={ariaSelected}
       aria-disabled={disabled || undefined}

@@ -16,13 +16,6 @@ const KNOWN = [
   'index.css .t-action-kbd',
   // Rendered by nothing (no .michi-home-row producer, Home.test.tsx).
   'components/terminal/content/home/michiHome.css .michi-home-row__check',
-  // Page block chrome: always shown it would clutter a document; it needs a
-  // tap-to-activate design rather than the shared reveal.
-  'components/terminal/content/page/michiPage.css .michi-doc-block__margin',
-  'components/terminal/content/page/michiPage.css .michi-doc-editor__remove',
-  'components/terminal/content/page/michiPage.css .michi-doc-slot__add-btn',
-  'components/terminal/content/page/michiPage.css .michi-doc-steps__start',
-  'components/terminal/content/page/michiPage.css .michi-doc-toolbar',
 ];
 
 const root = dirname(fileURLToPath(import.meta.url));

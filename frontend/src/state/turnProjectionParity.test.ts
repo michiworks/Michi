@@ -11,6 +11,8 @@ function event(name: ChatStreamEvent['event'], data: Record<string, unknown>): C
 
 afterEach(() => vi.useRealTimers());
 
+const SHOWN_BLOCKS = [{ type: 'poll', id: 'cb-1', question: 'Q?', options: ['A', 'B'] }];
+
 describe('frontend canonical turn projection parity', () => {
   it('hides a real Codex TITLE trace while retaining raw blocks and the exact persisted answer', () => {
     const marker = 'METADATA_241465eefa4f4ed2b64ea1853e7fe395';
@@ -115,6 +117,7 @@ describe('frontend canonical turn projection parity', () => {
       { stream: event('tool_call_update', { toolCallId: 'tool-1', title: 'Read', status: 'running', inputJson: '{"path":"/tmp/app.ts"}' }), action: { type: 'tool-call-update', nodeId: 'node-1', assistantId, tool: { id: 'tool-1', title: 'Read', status: 'running', inputJson: '{"path":"/tmp/app.ts"}' } } },
       { stream: event('chunk', { text: 'answer ' }), action: { type: 'chunk', nodeId: 'node-1', assistantId, text: 'answer ' } },
       { stream: event('image', { path: '.attachments/a.png', caption: 'A', mimeType: 'image/png', size: 42 }), action: { type: 'image-block', nodeId: 'node-1', assistantId, path: '.attachments/a.png', caption: 'A', mimeType: 'image/png', size: 42 } },
+      { stream: event('blocks', { blocks: SHOWN_BLOCKS, title: 'Pick', fallbackText: 'Pick\n\nQ?\n- A\n- B' }), action: { type: 'chat-blocks', nodeId: 'node-1', assistantId, blocks: SHOWN_BLOCKS, title: 'Pick', fallbackText: 'Pick\n\nQ?\n- A\n- B' } },
       { stream: event('plan', { entries: [{ content: 'ship', priority: 'high', status: 'completed' }] }), action: { type: 'plan', nodeId: 'node-1', assistantId, entries: [{ content: 'ship', priority: 'high', status: 'completed' }] } },
       { stream: event('tool_call_update', { toolCallId: 'tool-1', title: '', status: 'completed', output: 'ok' }), action: { type: 'tool-call-update', nodeId: 'node-1', assistantId, tool: { id: 'tool-1', title: '', status: 'completed', output: 'ok' } } },
       { stream: event('title', { title: 'Canonical title' }), action: { type: 'set-title', nodeId: 'node-1', title: 'Canonical title' } },

@@ -1,9 +1,10 @@
-import React from 'react';
 import type { DigestSummary } from './derive';
+import ManageListEmpty from './ManageListEmpty';
 
 interface Props {
   digests: DigestSummary[];
   filter: string;
+  onClearFilter?: () => void;
   onOpen: (nodeId: string) => void;
   onRebuild: (nodeId: string) => void;
   onExport: (nodeId: string) => void;
@@ -19,32 +20,12 @@ function relative(ts: number): string {
   return d < 7 ? `${d}d ago` : `${Math.floor(d / 7)}w ago`;
 }
 
-const linkBtn: React.CSSProperties = {
-  border: 'none',
-  background: 'transparent',
-  cursor: 'pointer',
-  font: 'inherit',
-  color: 'inherit',
-  padding: 0,
-};
-
-export default function DigestList({ digests, filter, onOpen, onRebuild, onExport }: Props) {
+export default function DigestList({ digests, filter, onClearFilter, onOpen, onRebuild, onExport }: Props) {
   const norm = filter.trim().toLowerCase();
   const filtered = norm ? digests.filter((d) => d.title.toLowerCase().includes(norm)) : digests;
 
   if (filtered.length === 0) {
-    return (
-      <div
-        style={{
-          padding: '20px 0',
-          fontFamily: 'var(--ui-font)',
-          fontSize: 'var(--fs-lg)',
-          color: 'var(--term-muted)',
-        }}
-      >
-        no digests yet
-      </div>
-    );
+    return <ManageListEmpty query={filter.trim()} empty="no digests yet" onClearFilter={onClearFilter} />;
   }
 
   return (
@@ -53,7 +34,7 @@ export default function DigestList({ digests, filter, onOpen, onRebuild, onExpor
         <article
           key={d.nodeId}
           style={{
-            background: 'var(--term-surface, #fff)',
+            background: 'var(--term-surface)',
             border: '1px solid var(--term-line)',
             padding: '20px 22px',
             marginBottom: 14,
@@ -63,8 +44,8 @@ export default function DigestList({ digests, filter, onOpen, onRebuild, onExpor
             <span
               style={{
                 fontSize: 'var(--fs-xs)',
-                color: 'var(--term-digest, #2f6b4e)',
-                background: 'var(--term-digest-f, #d7e7df)',
+                color: 'var(--term-digest)',
+                background: 'var(--term-digest-f)',
                 padding: '2px 7px',
                 letterSpacing: 'var(--ls-caps)',
                 fontWeight: 600,
@@ -111,19 +92,11 @@ export default function DigestList({ digests, filter, onOpen, onRebuild, onExpor
           >
             {d.excerpt || '(empty)'}
           </div>
-          <div
-            style={{
-              display: 'flex',
-              gap: 14,
-              marginTop: 14,
-              fontSize: 'var(--fs-md)',
-              color: 'var(--term-muted)',
-              fontFamily: 'var(--ui-font)',
-            }}
-          >
-            <button type="button" onClick={() => onOpen(d.nodeId)} style={linkBtn}>→ open</button>
-            <button type="button" onClick={() => onRebuild(d.nodeId)} style={linkBtn}>↻ rebuild</button>
-            <button type="button" onClick={() => onExport(d.nodeId)} style={linkBtn}>⤓ export</button>
+          {/* Text buttons; the row starts at their labels, not their padding. */}
+          <div style={{ display: 'flex', gap: 6, marginTop: 10, marginLeft: -8 }}>
+            <button type="button" className="t-text-btn" onClick={() => onOpen(d.nodeId)}>→ open</button>
+            <button type="button" className="t-text-btn" onClick={() => onRebuild(d.nodeId)}>↻ rebuild</button>
+            <button type="button" className="t-text-btn" onClick={() => onExport(d.nodeId)}>⤓ export</button>
           </div>
         </article>
       ))}

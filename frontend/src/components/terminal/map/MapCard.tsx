@@ -3,6 +3,7 @@ import type { ChatNodeState } from '../../../state/chatTypes';
 import { latestOverviewFirstSentence, nodeHeat, overviewTrail, type NodeHeat } from '../../../state/mapOverviewSelectors';
 import { relativeTime } from '../../../lib/relativeTime';
 import { nodeMessageCount } from '../../../state/nodeMessageCount';
+import { DisclosureChevron } from '../primitives';
 
 export interface MapCardProps {
   node: ChatNodeState;
@@ -28,9 +29,6 @@ export interface MapCardProps {
   isMerge?: boolean;
 }
 
-// Darkened accent used for the small ASKED / MAIN labels (the references render
-// this at ~#a03d1b — a browner, quieter terracotta than the live accent).
-const ACCENT_DARK = 'color-mix(in srgb, var(--term-accent) 80%, var(--term-fg))';
 // Neutral ASKED strip fill (references: #f2efe8).
 const ASKED_BG = 'color-mix(in srgb, var(--term-alt) 55%, var(--term-surface))';
 // Trail container hairlines (references: #f2efe8).
@@ -72,7 +70,6 @@ export function MapCard({
         border: '1px solid color-mix(in srgb, var(--term-fg) 9%, transparent)',
         // Sharp corners everywhere — this is paper, not a chip.
         borderRadius: 0,
-        overflow: 'hidden',
         cursor: 'pointer',
         opacity: dim ? 0.45 : 1,
         boxShadow: '0 2px 6px color-mix(in srgb, var(--term-fg) 5%, transparent), 0 16px 40px -20px color-mix(in srgb, var(--term-fg) 22%, transparent)',
@@ -80,9 +77,12 @@ export function MapCard({
     >
       {unread && <span className="map-card__unread-dot" />}
 
+      {/* The card's content clips here, not on the card: the streaming
+          glow (.map-card--breathe::after) is drawn outside its box. */}
+      <div style={{ overflow: 'hidden' }}>
       {/* Head: everything shown while collapsed. Map.tsx measures this box
           for the layout height, so it must not include the expand area. */}
-      <div data-map-card-head={node.nodeId}>
+      <div data-map-card-head={node.nodeId} style={{ position: 'relative' }}>
       {/* Heat bar — a 3px top strip whose warmth tracks recency. */}
       <div style={{ height: 3, width: '100%', background: heatBar(heat) }} />
 
@@ -96,7 +96,7 @@ export function MapCard({
         }}>
           <span style={{
             fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps-wide)',
-            color: ACCENT_DARK,
+            color: 'var(--term-accent-text)',
           }}>ASKED</span>
           <span style={{
             fontSize: 'var(--fs-lg)', lineHeight: 1.5, color: 'var(--term-mid)',
@@ -116,9 +116,7 @@ export function MapCard({
           }}>
             {node.title ?? ''}
           </div>
-          <span style={{ fontSize: 'var(--fs-md)', lineHeight: 1.8, color: 'var(--term-faint)' }}>
-            {expanded ? '▴' : '▾'}
-          </span>
+          <DisclosureChevron open={expanded} style={{ fontSize: 'var(--fs-md)', lineHeight: 1.8, color: 'var(--term-faint)' }} />
         </div>
         {!expanded && body && (
           <div style={{
@@ -127,11 +125,11 @@ export function MapCard({
           }}>{body}</div>
         )}
         <div style={{ marginTop: 10, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-          {isMain && <span style={chipStyle(ACCENT_DARK, 'var(--term-accent-f)')}>MAIN</span>}
+          {isMain && <span style={chipStyle('var(--term-accent-text)', 'var(--term-accent-f)')}>MAIN</span>}
           {isMerge && <span style={chipStyle('var(--term-mauve)', 'var(--term-mauve-f)')}>MERGED</span>}
           {msgCount > 0 && <span style={chipStyle('var(--term-muted)', 'var(--term-alt)')}>{msgCount} msgs</span>}
           {streaming ? (
-            <span style={{ fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-accent)' }}>
+            <span style={{ fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-accent-text)' }}>
               <span className="map-card__live-dot">●</span> streaming
             </span>
           ) : node.lastAssistantAt ? (
@@ -141,6 +139,15 @@ export function MapCard({
           ) : null}
         </div>
       </div>
+      {/* The card's keyboard handle, laid over the head. Map.tsx's wrapper
+          takes its click and its Space. */}
+      <button
+        type="button"
+        className="map-card__head-btn t-row-focus"
+        aria-expanded={expanded}
+        aria-label={node.title || 'Untitled'}
+        style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', cursor: 'pointer' }}
+      />
       </div>
 
       {/* Expanded — overview trail + hairline footer. Always mounted; the
@@ -185,13 +192,13 @@ export function MapCard({
               width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
               padding: '9px 16px', border: 'none', borderTop: '1px dashed var(--term-line)',
               fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-sm)', letterSpacing: 'var(--ls-wide)',
-              color: 'var(--term-muted)', background: 'transparent', cursor: 'pointer',
+              cursor: 'pointer',
             }}
           >
             <span>Open in pane</span>
-            <span>↗</span>
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

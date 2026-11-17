@@ -57,6 +57,17 @@ describe('formatAssistantContext', () => {
       .toBe('- node: Other (michi://node/n2)');
   });
 
+  it('gives a remote machine’s pane, document or item no link, since the assistant’s tools read only this machine', () => {
+    expect(formatAssistantContext({ kind: 'pane', nodeId: 'remote:dev-box:n9', title: 'Fix CI' }, [
+      { kind: 'thread', id: 'remote:dev-box:t7', title: 'Docs', text: 'Two links left' },
+    ])).toBe([
+      'On screen: Michi thread “Fix CI”, on a remote machine, which your tools can\'t read',
+      '- thread: Docs (on a remote machine, which your tools can\'t read) — Two links left',
+    ].join('\n'));
+    expect(formatAssistantContext({ kind: 'page', projectId: 'remote:dev-box:p1', title: 'Plan' }, []))
+      .toBe('On screen: Workspace document “Plan”, on a remote machine, which your tools can\'t read');
+  });
+
   it('clips an item to 600 characters', () => {
     const long = 'x'.repeat(CONTEXT_TEXT_LIMIT + 50);
     const line = formatAssistantContext(null, [{ kind: 'row', id: 'r', title: 'Long', text: long }])!;

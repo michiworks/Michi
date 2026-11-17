@@ -44,7 +44,8 @@ import {
   type StepTone,
   type ThreadActions,
 } from '../multiModel/multiModelPresentation';
-import { ColumnsIcon, ForkIcon } from '../icons';
+import { CheckIcon, CloseIcon, ColumnsIcon, ForkIcon, StopIcon } from '../icons';
+import { DisclosureChevron } from '../primitives';
 import { MultiModelModelPicker, useReadyModels } from '../multiModel/MultiModelModelPicker';
 import { useMultiModelCommands } from '../multiModel/useMultiModelCommands';
 import { FullRun } from './WorkflowWorkCard';
@@ -66,7 +67,7 @@ const MONO = 'var(--font-mono)';
 const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
 const TONE_COLOR: Record<StepTone, string> = {
-  ok: 'var(--term-digest)', run: 'var(--term-run)', wait: 'var(--term-select)', fail: 'var(--term-danger-text)',
+  ok: 'var(--term-digest)', run: 'var(--term-run)', wait: 'var(--term-waiting-text)', fail: 'var(--term-danger-text)',
   stop: 'var(--term-muted)', skip: 'var(--term-muted)', idle: 'var(--term-faint)',
 };
 
@@ -203,7 +204,7 @@ function ApprovalLine({ view, approval, actions }: { view: MultiModelRunView; ap
           </button>
         )}
         {long && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, fontSize: 'var(--fs-sm)', color: 'var(--term-select)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, fontSize: 'var(--fs-sm)', color: 'var(--term-waiting-text)' }}>
             Long request: check it in the branch
             {actions.openNode && child && (
               <button type="button" onClick={() => actions.openNode?.(child)} className="mm-dlink">Open branch</button>
@@ -237,7 +238,7 @@ function earlierExcerpt(thread: MultiModelThreadView, before: number): { text: s
 function rowLine(run: WorkflowRunDtoV1, thread: MultiModelThreadView, step: MultiModelStepView, index: number): { text: string; color: string; now?: true } | undefined {
   if (step.status === 'waiting') {
     const text = approvalForRow(run, thread.key, index) ? 'Waiting for your approval, see above' : 'Waiting for your answer in the branch';
-    return { text, color: 'var(--term-select)' };
+    return { text, color: 'var(--term-waiting-text)' };
   }
   if (step.status === 'running' && step.now) return { text: step.now, color: 'var(--term-muted)', now: true };
   if (step.status === 'completed') return step.summary ? { text: step.summary, color: 'var(--term-mid)' } : undefined;
@@ -330,13 +331,13 @@ function ThreadRow({ run, thread, index, first, open, onToggle, now, actions }: 
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0, fontSize: 'var(--fs-xs)', color: TONE_COLOR[icon.tone], whiteSpace: 'nowrap' }}>
             {icon.icon === 'dot'
               ? <span aria-hidden className={step.status === 'running' ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} style={{ width: 6, height: 6, background: 'currentColor', opacity: 1 }} />
-              : <span aria-hidden>{icon.icon}</span>}
+              : typeof icon.icon === 'string' ? <span aria-hidden>{icon.icon}</span> : <icon.icon size="sm" />}
             {label}
           </span>
           <span style={{ flexShrink: 0, minWidth: 42, textAlign: 'right', fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontVariantNumeric: 'tabular-nums' }}>
             {step.status === 'skipped' ? '—' : elapsed !== undefined ? formatDuration(elapsed) : ''}
           </span>
-          <span aria-hidden style={{ marginLeft: 2, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>
+          <DisclosureChevron open={open} style={{ marginLeft: 2, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
         </span>
         {line && (
           <span style={{ display: 'block', margin: '3px 0 0 26px', minWidth: 0, lineHeight: 1.5, color: line.color, ...(line.now ? { ...ellipsis, fontFamily: MONO, fontSize: 'var(--fs-xs)' } : { fontSize: 'var(--fs-sm)' }) }}>
@@ -344,7 +345,7 @@ function ThreadRow({ run, thread, index, first, open, onToggle, now, actions }: 
           </span>
         )}
         {step.notice && (
-          <span data-testid="multi-model-notice" style={{ display: 'block', margin: '2px 0 0 26px', minWidth: 0, fontSize: 'var(--fs-xs)', lineHeight: 1.5, color: 'var(--term-select)' }}>
+          <span data-testid="multi-model-notice" style={{ display: 'block', margin: '2px 0 0 26px', minWidth: 0, fontSize: 'var(--fs-xs)', lineHeight: 1.5, color: 'var(--term-waiting-text)' }}>
             {step.notice}
           </span>
         )}
@@ -376,14 +377,14 @@ function ThreadRow({ run, thread, index, first, open, onToggle, now, actions }: 
 function StepMark({ state, number }: { state: StepState; number: number }) {
   const base: React.CSSProperties = {
     position: 'absolute', left: 0, top: 1, width: 15, height: 15, boxSizing: 'border-box', display: 'grid', placeItems: 'center',
-    border: '1px solid var(--term-line-s)', borderRadius: '50%', background: 'var(--term-surface)',
+    border: '1px solid var(--term-line-s)', borderRadius: 'var(--ui-radius-pill)', background: 'var(--term-surface)',
     fontFamily: MONO, fontSize: 'var(--fs-2xs)', fontWeight: 500, lineHeight: 1, color: 'var(--term-mid)',
   };
-  if (state === 'done') return <span aria-hidden style={{ ...base, background: 'var(--term-digest-f)', color: 'var(--term-digest)', borderColor: 'color-mix(in srgb, var(--term-digest) 40%, transparent)' }}>✓</span>;
+  if (state === 'done') return <span aria-hidden style={{ ...base, background: 'var(--term-digest-f)', color: 'var(--term-digest)', borderColor: 'color-mix(in srgb, var(--term-digest) 40%, transparent)' }}><CheckIcon size="sm" /></span>;
   if (state === 'running') return <span aria-hidden style={{ ...base, borderColor: 'var(--term-run)', color: 'var(--term-run)', boxShadow: '0 0 0 3px color-mix(in srgb, var(--term-run) 18%, transparent)' }}>{number}</span>;
-  if (state === 'failed') return <span aria-hidden style={{ ...base, color: 'var(--term-danger-text)' }}>✕</span>;
-  // An intentional stop is not an error: a neutral mark, as the rows' ■.
-  if (state === 'stopped') return <span aria-hidden style={{ ...base, color: 'var(--term-muted)' }}>■</span>;
+  if (state === 'failed') return <span aria-hidden style={{ ...base, color: 'var(--term-danger-text)' }}><CloseIcon size="sm" /></span>;
+  // An intentional stop is not an error: a neutral mark, as the rows' StopIcon.
+  if (state === 'stopped') return <span aria-hidden style={{ ...base, color: 'var(--term-muted)' }}><StopIcon size="sm" /></span>;
   return <span aria-hidden style={{ ...base, color: 'var(--term-faint)' }}>{number}</span>;
 }
 
@@ -455,6 +456,7 @@ export const MultiModelWorkCard = React.memo(function MultiModelWorkCard({ runKe
    * request applies its focus while the card stays mounted.
    */
   focus?: { threadKey: string; step?: number; seq: number };
+  /** Closes the drawer in one frame, once a chat or panes opened from the card show (TR-39). */
   onClose: () => void;
   /** The Replace model menu opened or closed: Escape belongs to it, not to the drawer, while it is open. */
   onMenuOpenChange?: (open: boolean) => void;
@@ -586,7 +588,7 @@ export const MultiModelWorkCard = React.memo(function MultiModelWorkCard({ runKe
   const retryInStatus = !!retry && (retry.target === 'run' || (retry.target === 'rows' && !firstFailed));
   const detail = view.phase !== 'running' ? run.statusDetail : undefined;
   const synthesisBody = synthesis.status === 'completed'
-    ? <p style={sdStyle}><span style={{ color: 'var(--term-digest)' }}>✓</span> Written to the chat</p>
+    ? <p style={sdStyle}><CheckIcon size="sm" style={{ ...ICON_STYLE, color: 'var(--term-digest)' }} /> Written to the chat</p>
     : synthesis.status === 'queued' || synthesis.status === 'running'
       ? <p style={sdStyle}>{callerGlyph} Writing the synthesis…</p>
       : note
@@ -630,7 +632,7 @@ export const MultiModelWorkCard = React.memo(function MultiModelWorkCard({ runKe
 
         {approvals.length > 0 && (
           <div data-testid="workflow-approvals" style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', borderRadius: INNER_RADIUS, border: '1px solid color-mix(in srgb, var(--term-select) 45%, transparent)', background: 'color-mix(in srgb, var(--term-select-f) 70%, transparent)' }}>
-            <div style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-select)' }}>Needs your approval</div>
+            <div style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-waiting-text)' }}>Needs your approval</div>
             {approvals.map((approval) => <ApprovalLine key={approval.id} view={view} approval={approval} actions={actions} />)}
           </div>
         )}
@@ -654,15 +656,15 @@ export const MultiModelWorkCard = React.memo(function MultiModelWorkCard({ runKe
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-fg)' }}>
               {callerGlyph} Synthesis · {view.callerModelLabel}
               {openNode && (
-                <button type="button" onClick={() => openNode(view.callerNodeId, synthesis.messageId)} className="mm-dlink is-dim" style={{ marginLeft: 'auto', fontWeight: 400 }}>View in chat ↗</button>
+                <button type="button" onClick={() => openNode(view.callerNodeId, synthesis.messageId)} className="mm-dlink is-dim" style={{ marginLeft: 'auto', fontWeight: 400 }}>View in chat</button>
               )}
             </div>
             {synthesis.summary && <p style={{ margin: '6px 0 0', fontSize: 'var(--fs-lg)', lineHeight: 1.55, color: 'var(--term-mid)' }}>{synthesis.summary}</p>}
             {addendum && (
               <p data-testid="multi-model-addendum" style={{ margin: '6px 0 0', display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 8px', fontSize: 'var(--fs-sm)', color: addendum.tone === 'fail' ? 'var(--term-danger-text)' : 'var(--term-muted)' }}>
-                <span>{addendum.tone === 'ok' && <span style={{ color: 'var(--term-digest)' }}>✓ </span>}{addendum.text}</span>
+                <span>{addendum.tone === 'ok' && <><CheckIcon size="sm" style={{ ...ICON_STYLE, color: 'var(--term-digest)' }} />{' '}</>}{addendum.text}</span>
                 {addendum.tone === 'ok' && openNode && view.lastMessageId && (
-                  <button type="button" onClick={() => openNode(view.callerNodeId, view.lastMessageId)} className="mm-dlink is-dim">View ↗</button>
+                  <button type="button" onClick={() => openNode(view.callerNodeId, view.lastMessageId)} className="mm-dlink is-dim">View</button>
                 )}
                 {retry?.target === 'addendum' && retryButton()}
               </p>

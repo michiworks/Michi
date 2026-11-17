@@ -23,6 +23,14 @@ describe('RailAfterglow', () => {
     expect(screen.queryByTestId('rail-afterglow')).toBeNull();
   });
 
+  it('drops a fade already playing when the finished reply turns out unread, since the rail stays', () => {
+    const { rerender } = render(<RailAfterglow live right={3} />);
+    rerender(<RailAfterglow live={false} right={3} />);
+    expect(screen.getByTestId('rail-afterglow')).toBeTruthy();
+    rerender(<RailAfterglow live={false} right={3} handoff />);
+    expect(screen.queryByTestId('rail-afterglow')).toBeNull();
+  });
+
   it('drops the afterglow when a new run starts mid-fade', () => {
     const { rerender } = render(<RailAfterglow live right={2} />);
     rerender(<RailAfterglow live={false} right={2} />);

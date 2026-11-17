@@ -4,6 +4,7 @@ import MarkdownContent, { type MarkdownFeatureProfile } from '../../../../Markdo
 import { INHERIT_PROSE_STYLE, MESSAGE_PROSE_STYLE, TERM_PROSE_CLASS, UNTRUSTED_MARKDOWN } from '../../../../markdownProse';
 import type { BlockProps } from '../blockTypes';
 import { httpsUrl, objects, str } from '../michiPageModel';
+import { CheckIcon, ErrorIcon, InfoIcon, WarningIcon } from '../../../icons';
 
 const TONES = new Set(['info', 'warn', 'success', 'danger']);
 export const toneOf = (v: unknown): string | undefined => (typeof v === 'string' && TONES.has(v) ? v : undefined);
@@ -48,6 +49,8 @@ export function TextBlock({ block }: BlockProps) {
 
 /** What a callout's tone says, read out before its words: the colour alone carries nothing. */
 const TONE_WORDS: Record<string, string> = { info: 'Note', warn: 'Warning', success: 'Ready', danger: 'Problem' };
+/** The mark a toned callout leads with, so its tone shows where the page draws it without a fill. */
+const TONE_ICONS = { info: InfoIcon, warn: WarningIcon, success: CheckIcon, danger: ErrorIcon } as const;
 
 const THEMATIC_BREAK = /^([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const LINE_START = /^(?:#{1,6}(?=[ \t]|$)|>|[-+*](?=[ \t]|$)|`{3,}|~{3,})/;
@@ -59,7 +62,7 @@ export function markdownLineAsText(line: string): string {
   return line.replace(ORDERED, '$1\\$2');
 }
 
-const INLINE_CLASS = 'wrap-break-word [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent) [&_code]:text-(--term-fg)';
+const INLINE_CLASS = 'wrap-break-word [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent-text) [&_code]:text-(--term-fg)';
 
 /**
  * Plain text split into paragraphs on line breaks, like `Paragraphs`, with
@@ -73,17 +76,21 @@ export function InlineMarkdownParagraphs({ text }: { text: string }) {
 }
 
 /**
- * A boxed note, tinted by its tone: info a quiet note, warn the page's
+ * A note, tinted and marked by its tone: info a quiet note, warn the page's
  * Blockers, success ready, danger a conflict. Its title is the caption.
  */
 export function CalloutBlock({ block }: BlockProps) {
   const tone = toneOf(block.tone);
   const title = str(block.title).trim();
+  const ToneIcon = tone ? TONE_ICONS[tone as keyof typeof TONE_ICONS] : null;
   return (
     <div className="michi-doc-callout" data-tone={tone} data-michi-block="callout">
-      {tone && <span className="sr-only">{TONE_WORDS[tone]}: </span>}
-      {title && <h3 className="michi-doc-caption">{title}</h3>}
-      <InlineMarkdownParagraphs text={str(block.text)} />
+      {ToneIcon && <span className="michi-doc-callout__icon" aria-hidden="true"><ToneIcon /></span>}
+      <div className="michi-doc-callout__body">
+        {tone && <span className="sr-only">{TONE_WORDS[tone]}: </span>}
+        {title && <h3 className="michi-doc-callout__title">{title}</h3>}
+        <InlineMarkdownParagraphs text={str(block.text)} />
+      </div>
     </div>
   );
 }
@@ -124,41 +131,43 @@ export function TagsBlock({ block }: BlockProps) {
   return (
     <ul className="michi-doc-tags" data-michi-block="tags">
       {items.map((it, i) => (
-        <li key={i} className="michi-doc-tag" data-tone={toneOf(it.tone)}>{str(it.label)}</li>
+        <li key={i} className="michi-doc-tag" data-tone={toneOf(it.tone)}>
+          {toneOf(it.tone) && <span className="michi-doc-dot" aria-hidden="true" />}
+          {str(it.label)}
+        </li>
       ))}
     </ul>
   );
 }
 
-/** The page's overall verdict: a toned badge beside a one-sentence summary, and a muted note on what it rests on. */
+/** The page's overall verdict: a toned badge, the summary it stands for as the lead under it, and a muted note on what it rests on. */
 export function StatusBlock({ block }: BlockProps) {
   const label = str(block.label).trim();
   const summary = str(block.summary).trim();
   const note = str(block.note).trim();
   return (
     <div className="michi-doc-status" data-michi-block="status">
-      {summary && <p className="michi-doc-status__summary">{summary}</p>}
       {label && (
         <span className="michi-doc-status__badge" data-tone={toneOf(block.tone)}>
-          <span className="michi-doc-status__dot" aria-hidden="true" />
+          <span className="michi-doc-dot" aria-hidden="true" />
           {label}
         </span>
       )}
+      {summary && <p className="michi-doc-status__summary">{summary}</p>}
       {note && <p className="michi-doc-status__note">{note}</p>}
     </div>
   );
 }
 
-/** Code is shown, never run. Only https addresses link, as in LinkBlock. */
+/** Code is shown, never run. Only https addresses link, as in LinkBlock. The code's own header names its language. */
 export function CodeBlock({ block }: BlockProps) {
   const title = str(block.title).trim();
   const lang = str(block.lang).trim();
   return (
     <div data-michi-block="code">
-      {(title || lang) && (
+      {title && (
         <div className="michi-doc-block-head">
-          {title ? <h3 className="michi-doc-block-title">{title}</h3> : <span />}
-          {lang && <span className="michi-doc-code-lang">{lang}</span>}
+          <h3 className="michi-doc-block-title">{title}</h3>
         </div>
       )}
       <LegacyCodeBlock text={str(block.code)} language={lang} httpsLinksOnly />

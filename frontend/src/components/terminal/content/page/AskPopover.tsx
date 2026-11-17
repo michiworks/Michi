@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUp } from 'lucide-react';
-import { PopoverSurface } from '../../../ui/Popover';
+import { useIsPresent } from 'motion/react';
+import { measureSurface, PopoverSurface } from '../../../ui/Popover';
 import { useBackLayer } from '../../../../lib/backStack';
 import { placeBelowAnchor } from '../../../ui/useAnchoredPosition';
-import { BranchIcon } from '../../icons';
+import { ArrowUpIcon, BranchIcon } from '../../icons';
 import { BorderBtn } from '../../primitives';
 import { isImeComposing } from '../../../../lib/ime';
 import './michiPage.css';
@@ -42,10 +42,11 @@ export function AskPopover({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // Right-aligned under the anchor; above it when the viewport runs out.
+  // Right-aligned under the anchor; above it when the viewport runs out. Sized
+  // as it settles, not by the scaled box it grows in from.
   const place = useCallback(() => {
-    const box = surfaceRef.current?.getBoundingClientRect();
-    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || WIDTH, height: box?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
+    const size = surfaceRef.current ? measureSurface(surfaceRef.current) : null;
+    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: size?.width || WIDTH, height: size?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
     setPosition((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }));
   }, [anchor]);
 
@@ -59,9 +60,12 @@ export function AskPopover({
     anchor.focus({ preventScroll: true });
     onCloseRef.current();
   }, [anchor]);
-  useBackLayer(true, { back: close });
+  // Closed, it fades out for a moment (PopoverSurface) and takes no keys, presses or Back.
+  const present = useIsPresent();
+  useBackLayer(present, { back: close });
 
   useEffect(() => {
+    if (!present) return;
     const onKey = (event: KeyboardEvent) => {
       if (isImeComposing(event)) return;
       if (event.key === 'Escape') {
@@ -104,7 +108,7 @@ export function AskPopover({
       window.removeEventListener('resize', place);
       window.removeEventListener('scroll', place, true);
     };
-  }, [anchor, close, place]);
+  }, [present, anchor, close, place]);
 
   const submit = (text: string) => {
     const question = text.trim();
@@ -123,12 +127,11 @@ export function AskPopover({
       maxWidth={`calc(100vw - ${PAD * 2}px)`}
       left={position?.left ?? 0}
       top={position?.top ?? 0}
-      animate={false}
       style={position ? undefined : { visibility: 'hidden' }}
     >
       <div className="michi-ask">
         <div className="michi-ask__about">
-          <span className="michi-ask__about-glyph" aria-hidden="true"><BranchIcon size={12} /></span>
+          <span className="michi-ask__about-glyph" aria-hidden="true"><BranchIcon size="sm" /></span>
           About
           <span className="michi-ask__chip" title={label}>{label}</span>
         </div>
@@ -154,7 +157,7 @@ export function AskPopover({
             onChange={(event) => setValue(event.target.value)}
           />
           <button type="submit" className="michi-ask__send" aria-label="Send" disabled={!value.trim()}>
-            <ArrowUp size={13} strokeWidth={2} aria-hidden="true" />
+            <ArrowUpIcon aria-hidden="true" />
           </button>
         </form>
       </div>

@@ -1,13 +1,10 @@
-import { readFileSync } from 'node:fs';
 import type { KnipConfig } from 'knip';
 
-// Agent Desk's block code, mirrored under Desk's own paths (see its README.md). Only
-// scripts/page-block-source-sync.mjs changes the copies, and the shims export what the Desk
-// modules they stand in for export (shared/i18n.ts has Desk's LANGS, lang and setLang).
+// Michi's block renderers that started as a copy of Agent Desk's, under Desk's paths (see its
+// README.md). They still carry Desk's export surface: modules export more than Michi imports, and
+// the shims export what the Desk modules they stood in for exported (shared/i18n.ts has LANGS,
+// lang and setLang). An unused file there is reported like any other.
 const VENDOR_BLOCKS = 'frontend/src/components/terminal/content/page/vendor-blocks';
-const vendorManifest: { verbatim: string[]; patched: string[] } = JSON.parse(
-  readFileSync(new URL(`./${VENDOR_BLOCKS}/manifest.json`, import.meta.url), 'utf8'),
-);
 
 const config: KnipConfig = {
   workspaces: {
@@ -45,6 +42,7 @@ const config: KnipConfig = {
         'src/server.ts!',
         'src/services/dbWorkerThread.ts!',
         'src/services/metaAgentMetricsWorker.ts!',
+        'src/services/searchWorker.ts!',
         'src/agents/pi/piSdkBundle.ts!',
         'test/**/*.test.ts',
         'scripts/**/*.{ts,mjs,cjs}',
@@ -77,7 +75,6 @@ const config: KnipConfig = {
         // Pages acceptance runs, started by hand; the .mjs starts its .cjs under Electron.
         'scripts/pages-*-acceptance.{mjs,cjs}',
         'scripts/pages-real-runtime-inventory.mjs',
-        'scripts/page-block-source-sync.mjs',
         'scripts/pi-baseline-run.mjs',
         'scripts/verify-claude-sdk-sidecar.mjs',
         'scripts/verification/*.mjs',
@@ -98,10 +95,6 @@ const config: KnipConfig = {
   ignore: ['.claude/**', '**/dist/**', '**/build/**'],
   ignoreIssues: {
     [`${VENDOR_BLOCKS}/**`]: ['exports', 'types'],
-    // A file Desk ships stays even when Michi imports none of it; an unused shim is still reported.
-    ...Object.fromEntries(
-      [...vendorManifest.verbatim, ...vendorManifest.patched].map((file) => [`${VENDOR_BLOCKS}/${file}`, ['files']]),
-    ),
   },
   ignoreExportsUsedInFile: true,
   includeEntryExports: false,

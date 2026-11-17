@@ -8,6 +8,7 @@ import WorkspaceTree from './WorkspaceTree';
 import ActivityView from './ActivityView';
 import TreeSelectionBar from './TreeSelectionBar';
 import ResizeHandle from '../ResizeHandle';
+import { useOverlayFocus } from '../ui/useOverlayFocus';
 import { rowGeom, rowPadding, spinePadding, WORKSPACE_ICON_SIZE, WORKSPACE_ICON_GAP, type RowGeom } from './sidebarRowStyle';
 import './sidebar.css';
 import { AgentIcon, UserIcon } from './icons';
@@ -52,7 +53,7 @@ interface NarrowOverlayDrag {
 }
 
 /** Sidebar scrollbars appear on pointer/focus entry, then linger this long. */
-const SCROLLBAR_LINGER_MS = 2000;
+const SCROLLBAR_LINGER_MS = 700;
 /** Fallback settle if the width transitionend never fires (reduced motion,
  *  an interrupted transition, or a browser that skips the event). The
  *  authoritative clock is the transition itself (`--t-enter`, 180ms). */
@@ -157,7 +158,7 @@ export default function TerminalSidebar({
           searchDisabled={!workspaceReady}
         />
       )}
-      {areaContent ?? <SidebarContents activePage={activePage} workspaceReady={workspaceReady} customAgentsEnabled={customAgentsEnabled} onNav={onNav} />}
+      {areaContent ?? <SidebarContents activePage={activePage} workspaceReady={workspaceReady} customAgentsEnabled={customAgentsEnabled} onNav={onNav} phoneDrawer={narrowMode} />}
       <SidebarConnectionChip />
     </>,
     [areaContent, activePage, workspaceReady, customAgentsEnabled, onNav, narrowMode, hasNewThread, hasPalette, newThread, openPalette],
@@ -241,7 +242,7 @@ export default function TerminalSidebar({
   const collapsed = !narrowMode && prefs.sidebarCollapsed;
 
   const d = SIDEBAR_DENSITY[prefs.sidebarDensity];
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const densityVars = {
     '--sb-fs': d.fs,
     '--sb-row-py': `${d.rowPy}px`,
@@ -389,7 +390,9 @@ export default function TerminalSidebar({
       {!collapsed && (
         <ResizeHandle
           paneRef={asideRef}
+          label="Resize sidebar"
           min={MIN_SIDEBAR_WIDTH}
+          max={() => MAX_SIDEBAR_WIDTH}
           onResize={(w) => {
             const next = Math.min(MAX_SIDEBAR_WIDTH, w);
             dragWidthRef.current = next;
@@ -456,6 +459,10 @@ function adjustsSelection(target: EventTarget | null): boolean {
  * way out is no longer a layer: it drops `data-escape-layer` (Esc routing,
  * escapeLayers.ts), leaves the accessibility tree, takes no focus or taps, and
  * its scrim no longer closes anything. Reopening mid-exit turns it around.
+ * It is modal (the shell makes the page inert): open, it holds the focus and
+ * Tab; a dismissal gives the focus back to where it was, the ≡ that opened
+ * it. A choice that opens another surface (Settings, a dialog) leaves the
+ * focus there, so only focus left on the drawer or on <body> comes back.
  */
 function NarrowSidebarOverlay({
   asideRef,
@@ -478,6 +485,7 @@ function NarrowSidebarOverlay({
 }) {
   const present = useIsPresent();
   const dragging = !!drag?.active;
+  useOverlayFocus({ open: present, panelRef: asideRef, initialFocus: 'panel' });
   // A drag in the drawer layer scrolls only a drawer list with more than it
   // shows. One anywhere else (the scrim, the area tabs, the bottom rows, a
   // list too short to scroll) is cancelled, so nothing behind it moves; iOS
@@ -520,7 +528,8 @@ function NarrowSidebarOverlay({
     <>
       <motion.div
         ref={scrimRef}
-        onMouseDown={present ? onClose : undefined}
+        // Without its default the press keeps the focus the close hands back.
+        onMouseDown={present ? (event) => { event.preventDefault(); onClose?.(); } : undefined}
         initial={{ opacity: 0 }}
         animate={dragging ? undefined : { opacity: 1 }}
         exit={{ opacity: 0, transition: OVERLAY_SCRIM_EXIT }}
@@ -528,7 +537,7 @@ function NarrowSidebarOverlay({
         style={{
           position: 'absolute',
           inset: 0,
-          background: 'rgba(0,0,0,0.32)',
+          background: 'var(--scrim-drawer)',
           zIndex: 'var(--z-sidebar-scrim)',
           pointerEvents: present ? undefined : 'none',
           opacity: drag?.scrim,
@@ -544,6 +553,7 @@ function NarrowSidebarOverlay({
         data-scrollbars={scrollbars}
         aria-hidden={present ? undefined : true}
         inert={!present}
+        tabIndex={-1}
         initial={{ x: '-100%' }}
         animate={dragging ? undefined : { x: 0 }}
         exit={{ x: '-100%', transition: OVERLAY_PANEL_EXIT }}
@@ -557,14 +567,15 @@ function NarrowSidebarOverlay({
   );
 }
 
-function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNav }: {
+function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNav, phoneDrawer }: {
   activePage: PageId;
   workspaceReady: boolean;
   customAgentsEnabled: boolean;
   onNav: (p: PageId) => void;
+  phoneDrawer: boolean;
 }) {
   const { prefs } = usePrefs();
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const tabsId = useSidebarViewTabsId();
   const onActivate = React.useCallback(() => onNav('dashboard'), [onNav]);
   const onOpenWorkspaces = React.useCallback(() => onNav('workspaces'), [onNav]);
@@ -581,13 +592,14 @@ function SidebarContents({ activePage, workspaceReady, customAgentsEnabled, onNa
     <TreeSelectionBar />
     <SidebarViewPanel tabsId={tabsId}>
       {prefs.sidebarView === 'activity' ? (
-        <ActivityView onActivate={onActivate} chatViewActive={activePage === 'dashboard'} />
+        <ActivityView onActivate={onActivate} chatViewActive={activePage === 'dashboard'} phoneDrawer={phoneDrawer} />
       ) : (
         <WorkspaceTree
           onActivate={onActivate}
           chatViewActive={activePage === 'dashboard'}
           onOpenWorkspaces={onOpenWorkspaces}
           workspacesPageOpen={activePage === 'workspaces'}
+          phoneDrawer={phoneDrawer}
         />
       )}
     </SidebarViewPanel>
@@ -746,10 +758,10 @@ function BottomNav({
       }}
     >
       {customAgentsEnabled && (
-        <BottomNavItem {...nav} id="agents" glyph={<AgentIcon size={15} />} label="Agents" />
+        <BottomNavItem {...nav} id="agents" glyph={<AgentIcon />} label="Agents" />
       )}
       {PROFILE_PAGE_ENABLED && (
-        <BottomNavItem {...nav} id="profile" glyph={<UserIcon size={15} />} label="Profile" />
+        <BottomNavItem {...nav} id="profile" glyph={<UserIcon />} label="Profile" />
       )}
     </div>
   );

@@ -4,7 +4,7 @@ function diffLineStyle(line: string): React.CSSProperties {
   if (line.startsWith('+++') || line.startsWith('---')) return { color: 'var(--term-muted)' };
   if (line.startsWith('+')) return { color: 'var(--term-digest)', background: 'color-mix(in srgb, var(--term-digest) 8%, transparent)' };
   if (line.startsWith('-')) return { color: 'var(--term-danger-text)', background: 'color-mix(in srgb, var(--term-danger) 8%, transparent)' };
-  if (line.startsWith('@@')) return { color: 'var(--term-accent)', background: 'color-mix(in srgb, var(--term-accent) 7%, transparent)' };
+  if (line.startsWith('@@')) return { color: 'var(--term-accent-text)', background: 'color-mix(in srgb, var(--term-accent) 7%, transparent)' };
   if (line.startsWith('diff ') || line.startsWith('index ')) return { color: 'var(--term-muted)' };
   return { color: 'var(--term-mid)' };
 }

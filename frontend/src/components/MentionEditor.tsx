@@ -18,11 +18,11 @@ import type { SuggestionProps, SuggestionKeyDownProps } from '@tiptap/suggestion
 import { exitSuggestion } from '@tiptap/suggestion';
 import type { EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
-import type { ArtifactEntry, ChatNodeState } from '../state/chatStore';
+import type { ArtifactEntry } from '../state/chatStore';
 import type { SessionMode } from '../services/api';
 import { keepsSlashPick, type SlashEntry } from '../state/slashEntries';
 import type { MentionRecord } from '../lib/mentions';
-import { buildAtMentionItems, type AtMentionItem } from './mentionItems';
+import { buildAtMentionItems, NO_MENTION_CANDIDATES, type AtMentionItem, type MentionCandidates } from './mentionItems';
 import {
   matchSlashContext,
   buildSlashItems,
@@ -37,6 +37,7 @@ import { markComposerEscape } from './composerEscape';
 import { ChatIcon, DocIcon, FileIcon, ImageIcon, LinkIcon } from './terminal/icons';
 import { usePhoneLayout } from '../hooks/usePhoneLayout';
 import { prefersReducedMotion } from '../hooks/useReducedMotion';
+import { EASE } from '../motion/tokens';
 import { isImeComposing } from '../lib/ime';
 import { spaceBeforeMention } from './mentionSpacing';
 
@@ -108,10 +109,12 @@ export interface MentionEditorProps {
 
   /** @-mention suggestion data source (was AtMentionPopup's props). */
   artifacts: ArtifactEntry[];
-  sameTreeNodes: ChatNodeState[];
   currentNodeId: string;
-  /** Nodes from other threads in the same workspace, grouped by thread title. */
-  crossTreeNodes?: import('./mentionItems').CrossTreeGroup[];
+  /**
+   * The conversations the @ menu lists, asked for each time the menu builds
+   * its rows (useMentionCandidates), never on render. None when absent.
+   */
+  getMentionCandidates?: () => MentionCandidates;
 
   /** /-command data sources (were SlashPopup's props): the chat's commands and
    *  skills (buildSlashEntries), the composer's own commands when absent. */
@@ -219,7 +222,7 @@ type PopupState = {
 };
 
 /** Rows ride up into the room the ones above them left (a FLIP on transform). */
-const ROW_SETTLE = { duration: 160, easing: 'cubic-bezier(.32, .72, 0, 1)' } as const;
+const ROW_SETTLE = { duration: 160, easing: `cubic-bezier(${EASE.drawer.join(', ')})` } as const;
 
 function SuggestionPopup({
   state,
@@ -300,7 +303,6 @@ function SuggestionPopup({
       minWidth="min(280px, calc(100vw - 16px))"
       maxWidth={`min(${POPUP_MAX}px, calc(100vw - 16px))`}
       maxHeight={`max(80px, ${anchorTop - 14}px)`}
-      zIndex={60}
       role="listbox"
       aria-label="Mentions"
       style={{ overflow: 'hidden' }}
@@ -450,7 +452,6 @@ function SlashCommandPopup({
         maxWidth: 'min(480px, calc(100vw - 16px))',
       })}
       maxHeight={`max(80px, ${rect.top - 14}px)`}
-      zIndex={60}
       role="listbox"
       aria-label="Slash commands"
       style={{ overflow: 'hidden' }}
@@ -520,9 +521,8 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
     disabled,
     className,
     artifacts,
-    sameTreeNodes,
     currentNodeId,
-    crossTreeNodes,
+    getMentionCandidates,
     slashEntries,
     onSlashOpen,
     onSlashPick,
@@ -542,8 +542,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
 
   // Refs the (mount-time) ProseMirror plugin callbacks read for fresh values.
   const contextsRef = useRef(artifacts);
-  const nodesRef = useRef(sameTreeNodes);
-  const crossTreeNodesRef = useRef(crossTreeNodes);
+  const mentionCandidatesRef = useRef(getMentionCandidates);
   const currentNodeIdRef = useRef(currentNodeId);
   const onSubmitRef = useRef(onSubmit);
   const onPasteRef = useRef(onPaste);
@@ -551,8 +550,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   const onSlashOpenRef = useRef(onSlashOpen);
   const onSlashPickRef = useRef(onSlashPick);
   contextsRef.current = artifacts;
-  nodesRef.current = sameTreeNodes;
-  crossTreeNodesRef.current = crossTreeNodes;
+  mentionCandidatesRef.current = getMentionCandidates;
   currentNodeIdRef.current = currentNodeId;
   onSubmitRef.current = onSubmit;
   onPasteRef.current = onPaste;
@@ -621,8 +619,10 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
         renderText: ({ node }) => `@${node.attrs.label ?? node.attrs.refId ?? ''}`,
         suggestion: {
           char: '@',
-          items: ({ query }) =>
-            buildAtMentionItems(query, contextsRef.current, nodesRef.current, currentNodeIdRef.current, crossTreeNodesRef.current),
+          items: ({ query }) => {
+            const { sameTree, crossTree } = mentionCandidatesRef.current?.() ?? NO_MENTION_CANDIDATES;
+            return buildAtMentionItems(query, contextsRef.current, sameTree, currentNodeIdRef.current, crossTree);
+          },
           command: ({ editor: ed, range, props: picked }) => {
             const item = picked as unknown as AtMentionItem;
             const refId = item.kind === 'context' ? item.token : item.token.replace(/^node:/, '');
@@ -986,7 +986,7 @@ const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>(functi
   );
 
   return (
-    <div ref={hostRef} style={{ position: 'relative', flex: 1, minWidth: 0 }} className="mention-editor-host" data-handles-links="" data-empty={editor?.isEmpty ? 'true' : undefined}>
+    <div ref={hostRef} style={{ position: 'relative', flex: 1, minWidth: 0 }} className="mention-editor-host" data-handles-links="" data-empty={editor?.isEmpty ? 'true' : undefined} data-disabled={disabled || undefined}>
       {props.placeholder && <span className="mention-editor-placeholder" aria-hidden="true">{props.placeholder}</span>}
       <EditorContent editor={editor} className={className} data-testid={props['data-testid']} />
       <SuggestionPopup state={popup} selected={selected} anchor={hostRef.current} onHover={setSelected}

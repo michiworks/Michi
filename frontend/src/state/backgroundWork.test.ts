@@ -99,6 +99,8 @@ describe('conversationSubagents', () => {
     expect(entry.subagent.currentTool).toBeUndefined();
     expect(entry.subagent.statusMessage).toBeUndefined();
     expect(entry.subagent.background).toBeUndefined();
+    // It still ran in the background: its launch copy says so.
+    expect(entry.backgrounded).toBe(true);
     // What it lacks comes from the launch copy, the launch turn's steps included.
     expect(entry.subagent).toMatchObject({ agentName: 'Explore', prompt: 'Map it', description: 'Map the repo', model: 'haiku', startedAt: 1_000 });
     expect(entry.subagent.activity).toBe(steps);
@@ -216,6 +218,29 @@ describe('conversationSubagents', () => {
     expect(folded.endedAt).toBeUndefined();
     expect(folded.usage).toEqual({ toolUses: 4 });
     expect(isSubagentActive(folded)).toBe(true);
+  });
+
+  it('reports an agent under the newest turn with news of it, not under turns that only repeat its end', () => {
+    // Kiro V2 republishes a finished crew's stages, bare terminated, in later turns.
+    const repeat = (patch: Partial<SubagentInfo> = {}) => subagent({ sessionId: 'a', status: 'terminated', parentToolCallId: 'crew', ...patch });
+    const reported = (messages: ChatMessage[], live?: SubagentInfo[]) => conversationSubagents(chat(messages, { subagents: live }))[0].reportMessageId;
+    const first = assistant('a1', { subagents: [done('a', { outcome: 'cancelled', parentToolCallId: 'crew' })] });
+    const step = { id: 's', kind: 'tool' as const, title: 'Read', status: 'completed' };
+
+    expect(reported([user('u1'), first, user('u2'), assistant('a2', { subagents: [repeat()] }), user('u3'), assistant('a3', { subagents: [repeat()] })])).toBe('a1');
+    // The streaming tail's live roster repeats it too.
+    expect(reported([user('u1'), first, user('u2'), assistant('a2')], [repeat()])).toBe('a1');
+    // An earlier outcome is no news after a bare copy came in between.
+    expect(reported([user('u1'), first, user('u2'), assistant('a2', { subagents: [repeat()] }), user('u3'), assistant('a3', { subagents: [repeat({ outcome: 'cancelled' })] })])).toBe('a1');
+    // Working again, steps of its own, a new outcome, or a launch by this turn's tool call is news.
+    for (const later of [
+      assistant('a2', { subagents: [repeat({ status: 'working' })] }),
+      assistant('a2', { subagents: [repeat({ activity: [step] })] }),
+      assistant('a2', { subagents: [repeat({ outcome: 'completed', result: 'two' })] }),
+      assistant('a2', { subagents: [repeat({ parentToolCallId: 'again' })], toolCalls: [{ id: 'again', title: 'Spawning agent crew', status: 'completed', kind: 'tool' }] }),
+    ]) {
+      expect(reported([user('u1'), first, user('u2'), later])).toBe('a2');
+    }
   });
 
   it('reads the live node roster for a tail message without a durable roster', () => {

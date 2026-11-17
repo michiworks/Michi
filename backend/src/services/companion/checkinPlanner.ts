@@ -17,8 +17,6 @@
  *   wake           interrupting items, or items that need the user, appeared:
  *                  after a minute of batching and at least ten minutes after
  *                  the last wake, not in away mode;
- *   brief          once on each of its days at its time (briefSchedule.ts), not
- *                  away: then when the user is back;
  *   heartbeat      the work heartbeat (D18, Q24): an hour after the last one
  *                  (or the welcome), whatever changed, away too; the model
  *                  decides what it can move, and ends with nothing_to_do when
@@ -28,10 +26,7 @@
  */
 
 import { COMPANION_LIMITS, isOpenCompanionItem, type CompanionItemDto, type CompanionItemSubtype, type CompanionSettings } from 'michi-shared';
-import { isCompanionBriefPending } from './briefSchedule';
-import { atLocalClock, localDateKey } from './clock';
 import {
-  briefForDate,
   closeDelegation,
   companionHiddenItemTest,
   companionWelcomeDoneAt,
@@ -60,8 +55,6 @@ export const CHECKIN_ERROR_RETRY_MS = 10 * MINUTE_MS;
 export const COMPANION_HEARTBEAT_MS = 60 * MINUTE_MS;
 const PREEMPT_RETRY_MS = 2 * MINUTE_MS;
 const SKIP_RETRY_MS = MINUTE_MS;
-/** A brief turn cut short this many times gives way to the fallback. */
-const BRIEF_MAX_ATTEMPTS = 3;
 /** A worker report that failed this many times goes out as a "Worker finished" notice instead. */
 const WORKER_REPORT_MAX_ERRORS = 2;
 /** A delegation with nothing sent or reported for a day closes; so does any after three days (DESIGN-v2 §4). */
@@ -76,7 +69,6 @@ const NO_WAKE: ReadonlySet<CompanionItemSubtype> = new Set<CompanionItemSubtype>
 export type CheckinPlan =
   | { kind: 'worker_report'; reports: CompanionWorkerReport[] }
   | { kind: 'wake'; changes: CompanionEventRecord[]; cursor: number }
-  | { kind: 'brief'; changes: CompanionEventRecord[]; cursor: number; date: string }
   | { kind: 'heartbeat' };
 
 export interface CheckinCandidate {
@@ -96,33 +88,29 @@ export interface CheckinGates {
 export interface CheckinLook {
   /** By priority: the engine starts the first it can. Empty: nothing to start now. */
   candidates: CheckinCandidate[];
-  /** Away: what came in goes to the brief, so the acting engine moves the wake's cursor to this. */
+  /** Away: what came in waits for Today, so the acting engine moves the wake's cursor to this. */
   wakeCursorWhileAway: number | null;
 }
 
 /**
  * Where a look reads what earlier check-ins covered: the wake's cursor and
- * time, the brief's cursor, whether the day has its brief, the reply a
- * delegation reported last. The acting engine's are the database's
- * (dbCheckinCursors); the shadow keeps its own (checkinShadow.ts).
+ * time, and the reply a delegation reported last. The acting engine's are the
+ * database's (dbCheckinCursors); the shadow keeps its own (checkinShadow.ts).
  */
 export interface CheckinCursors {
   meta(key: CompanionMetaKey): number | null;
-  briefToday(date: string): boolean;
   lastReported(delegation: CompanionDelegationRecord): string | null;
 }
 
 export const dbCheckinCursors: CheckinCursors = {
   meta: (key) => getCompanionMetaNumber(key),
-  briefToday: (date) => briefForDate(date) !== null,
   lastReported: (delegation) => delegation.lastReportedMessageId,
 };
 
-/** What one engine keeps between looks: the wake's batching start, each kind's retry time, brief tries, report failures. */
+/** What one engine keeps between looks: the wake's batching start, each kind's retry time, report failures. */
 export class CheckinPlanState {
   wakePendingSince: number | null = null;
   readonly retryAfter = new Map<CompanionTurnKind, number>();
-  readonly briefAttempts = new Map<string, number>();
   readonly workerErrors = new Map<string, number>();
 
   mayTry(kind: CompanionTurnKind, now: number): boolean {
@@ -159,27 +147,10 @@ function currentEvents(events: readonly CompanionEventRecord[], now: number, kee
 }
 
 /**
- * The brief's changes: every event since its cursor (what was done and
- * resolved too), but baseline sightings and the events of items out of sight
- * (B15: a source the user turned off; its items are not resolved, so the brief
- * must not hear of them as done either). Oldest first.
- */
-function briefChanges(events: readonly CompanionEventRecord[]): CompanionEventRecord[] {
-  const hidden = companionHiddenItemTest();
-  const items = new Map<string, CompanionItemDto | null>();
-  return events.filter((event) => {
-    if (event.kind === 'baseline') return false;
-    if (!items.has(event.itemId)) items.set(event.itemId, getItem(event.itemId));
-    const item = items.get(event.itemId);
-    return !item || !hidden(item);
-  });
-}
-
-/**
  * The wake's changes: interrupting items (rated now) and items that need the
  * user (the heartbeat's new needs-you, D3), of a subtype that wakes and that
  * the user's feedback did not quiet. Digest changes (an item entering stalled)
- * wait for the brief.
+ * wait for Today.
  */
 function wakeMaterial(now: number, cursors: CheckinCursors): { changes: CompanionEventRecord[]; cursor: number } {
   const { events, cursor } = checkinEventsAfter('companion:wake_cursor', cursors);
@@ -197,7 +168,7 @@ function workerStatus(worker: CompanionWorkerState): string {
 
 /**
  * Delegated conversations that ended a turn with a reply the user has not
- * seen: the turn that answered the brief or the agent's last follow-up (the
+ * seen: the turn that answered it or the agent's last follow-up (the
  * latest turn: a follow-up only goes into an idle conversation). Acting, it
  * closes what is over on the way (R2.8, DESIGN-v2 §4): the conversation went
  * or was stopped, the user wrote in it (the agent's own follow-ups do not
@@ -250,15 +221,6 @@ function workerReports(michi: Pick<CompanionMichiSource, 'workerStates'> | null,
 }
 
 /**
- * Today's brief is still to come: on, one of its days, none yet, and the
- * welcome was before its time (that day the welcome is the look). The one
- * rule of briefSchedule.ts, which status.nextBriefAt follows too (B24).
- */
-function briefPending(settings: CompanionSettings, now: number, cursors: CheckinCursors): boolean {
-  return isCompanionBriefPending({ settings, now, welcomeAt: companionWelcomeDoneAt(), briefToday: cursors.briefToday(localDateKey(now)) });
-}
-
-/**
  * One look: updates the wake's batching in `state` and says which check-ins
  * could start now, by priority. `act`: this engine starts what it finds, so
  * the look may settle delegations on its way.
@@ -278,7 +240,7 @@ export function lookForCheckin(input: {
   if (!isCompanionWelcomeDone() || settings.paused) return none;
 
   // The wake's minute of batching starts when an item for it is first seen, whatever else holds the turn back.
-  // What came in while away goes to the brief and "Since you left" instead.
+  // What came in while away waits for Today instead.
   const wake = wakeMaterial(now, cursors);
   let wakeCursorWhileAway: number | null = null;
   if (gates.away) {
@@ -303,11 +265,6 @@ export function lookForCheckin(input: {
     }
   }
 
-  if (briefPending(settings, now, cursors) && now >= atLocalClock(now, settings.brief.time) && !gates.away && state.mayTry('brief', now)) {
-    const changes = checkinEventsAfter('companion:brief_cursor', cursors);
-    candidates.push({ plan: { kind: 'brief', changes: briefChanges(changes.events), cursor: changes.cursor, date: localDateKey(now) }, trigger: 'schedule' });
-  }
-
   const lastHeartbeat = cursors.meta('companion:last_heartbeat_at') ?? companionWelcomeDoneAt();
   if (lastHeartbeat !== null && now - lastHeartbeat >= COMPANION_HEARTBEAT_MS && state.mayTry('heartbeat', now)) {
     candidates.push({ plan: { kind: 'heartbeat' }, trigger: 'schedule' });
@@ -327,14 +284,12 @@ export interface CheckinSettleEffects {
   markReported(nodeId: string, messageId: string): void;
   /** The reports that failed twice: Michi's "Worker finished" notices instead. */
   reportByNotice(reports: readonly CompanionWorkerReport[]): void;
-  /** Today's brief is settled: `published` when the agent wrote it, else Michi's fallback is due. */
-  briefSettled(plan: Extract<CheckinPlan, { kind: 'brief' }>, published: boolean): void;
 }
 
 /**
  * What a finished check-in covered (the coordinator's afterTurn for these
  * kinds): each kind's retry, the wake's cursor and time, the reports and their
- * failures, the day's brief. One the user's message superseded ran too (the
+ * failures. One the user's message superseded ran too (the
  * model saw its material; the user is in the conversation now), but a worker's
  * report it did not post is still owed. True when it ran.
  */
@@ -343,7 +298,6 @@ export function settleCheckin(input: {
   outcome: 'spoke' | 'quiet' | 'error' | 'skipped' | 'preempted' | 'superseded';
   now: number;
   state: CheckinPlanState;
-  briefPublished: (date: string) => boolean;
   effects: CheckinSettleEffects;
 }): boolean {
   const { plan, outcome, now, state, effects } = input;
@@ -375,12 +329,6 @@ export function settleCheckin(input: {
         state.wakePendingSince = null;
       }
       break;
-    case 'brief': {
-      const attempts = outcome === 'preempted' || outcome === 'skipped' ? (state.briefAttempts.get(plan.date) ?? 0) + 1 : 0;
-      if (attempts > 0) state.briefAttempts.set(plan.date, attempts);
-      if (ran || outcome === 'error' || attempts >= BRIEF_MAX_ATTEMPTS) effects.briefSettled(plan, input.briefPublished(plan.date));
-      break;
-    }
     case 'heartbeat':
       // The next one an hour from this one's end; one that did not run waits out its kind's retry.
       if (ran) effects.setMeta('companion:last_heartbeat_at', Math.floor(now));

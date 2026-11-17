@@ -2,8 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { companionItem, companionSnapshot } from '../../test/companionFixtures';
 import {
   companionAgo,
-  companionBriefPostId,
-  companionBriefSchedule,
   companionItemTime,
   companionPipelineWatchLine,
   companionSnoozeTimes,
@@ -39,57 +37,6 @@ describe('when a feed row says the object last moved', () => {
     expect(row({ source: 'calendar', subtype: 'meeting_soon', facts: {} })).toBe('10m ago');
     expect(row({ source: 'pipeline', subtype: 'pipeline_blocked', facts: { blockedSince: NOW - 3 * HOUR } })).toBe('10m ago');
     expect(row({ source: 'system', subtype: 'system_auth', facts: {} })).toBe('10m ago');
-  });
-});
-
-describe('when Today says the next brief comes', () => {
-  const at = (day: number, hours: number, minutes = 0) => new Date(2026, 10, day, hours, minutes).getTime();
-  const base = companionSnapshot();
-  const schedule = (nextBriefAt: number | null, options: { firstBrief?: boolean; settings?: Partial<typeof base.settings>; now?: number } = {}) => companionBriefSchedule(
-    companionSnapshot({ settings: { ...base.settings, ...options.settings }, status: { ...base.status, nextBriefAt } }),
-    options.now ?? NOW,
-    { firstBrief: options.firstBrief ?? false },
-  );
-
-  it('reads the time the backend reports, whatever the brief setting says', () => {
-    expect(schedule(at(5, 16, 30), { now: at(5, 8) })).toEqual({ line: 'Your brief arrives at 16:30.', steerLabel: 'Today, focus on…', steerSaved: 'Noted for today’s brief' });
-    expect(schedule(at(6, 9)).line).toBe('Next brief: tomorrow at 09:00.');
-    expect(schedule(at(6, 9), { firstBrief: true }).line).toBe('Your first brief arrives tomorrow at 09:00.');
-    expect(schedule(at(6, 9)).steerLabel).toBe('Tomorrow, focus on…');
-    expect(schedule(at(6, 9)).steerSaved).toBe('Noted for tomorrow’s brief');
-    // Thursday 14:30 → Monday: the weekday.
-    expect(schedule(at(9, 9))).toEqual({ line: 'Next brief: Monday at 09:00.', steerLabel: 'Monday, focus on…', steerSaved: 'Noted for Monday’s brief' });
-    expect(schedule(at(9, 9), { firstBrief: true }).line).toBe('Your first brief arrives Monday at 09:00.');
-    // A week or more away: the date.
-    expect(schedule(at(16, 9)).line).toBe('Next brief: Nov 16 at 09:00.');
-  });
-
-  it('never promises a time that has passed: a brief due today is on its way', () => {
-    expect(schedule(at(5, 9)).line).toBe('Today’s brief is on its way.');
-    expect(schedule(at(5, 9)).steerLabel).toBe('Today, focus on…');
-  });
-
-  it('promises nothing without a next brief, and says briefs resume when the agent, by its name, is off or paused', () => {
-    expect(schedule(null).line).toBe('No brief is scheduled.');
-    expect(schedule(null).steerLabel).toBe('Next brief, focus on…');
-    expect(schedule(at(6, 9), { settings: { enabled: false } }).line).toBe('Briefs resume when Michi is on.');
-    expect(schedule(null, { settings: { paused: true, displayName: 'Robin' } }).line).toBe('Briefs resume when Robin is resumed.');
-    expect(schedule(null, { settings: { paused: true } }).steerSaved).toBe('Noted for the next brief');
-  });
-});
-
-describe('the post a brief card’s action replies to (D9)', () => {
-  const run = (id: string, startedAt: number, finishedAt: number | null, postedMessageId?: string | null) => ({ id, startedAt, finishedAt, postedMessageId });
-
-  it('is the post of the run that was running when the brief was written', () => {
-    const brief = { id: 'b1', createdAt: 150 };
-    expect(companionBriefPostId(brief, [run('r0', 10, 20, 'cmp-post-r0'), run('r1', 100, 200, 'cmp-post-r1')])).toBe('cmp-post-r1');
-    // The run posted nothing (yet): its post id all the same.
-    expect(companionBriefPostId(brief, [run('r1', 100, null)])).toBe('cmp-post-r1');
-    // No run spans it: the latest that started before it.
-    expect(companionBriefPostId(brief, [run('r0', 10, 20), run('r2', 90, 120, 'cmp-post-r2')])).toBe('cmp-post-r2');
-    // Nothing in the activity list: still a reply to a post, so the turn starts in Ask.
-    expect(companionBriefPostId(brief, [])).toBe('cmp-post-b1');
   });
 });
 

@@ -16,8 +16,8 @@ import { setupMichiRoutes } from '../src/routes/michi';
 import type { ChatManager } from '../src/services/chatManager';
 import {
   FILE_MUTATION_WORDS, PARSED_INPUT_TOOLS, PARSED_OUTPUT_TOOLS, TOOL_NAME_SEPARATORS, TOOL_OUTPUT_TRANSPORT_LIMIT, WHOLE_INPUT_KEYS,
-  WRAPPER_TOOLS, createToolOutputStreamProjector, headTailOutput, isParsedInputTool, isParsedOutputTool,
-  projectMessageRowsForTransport, projectToolInput, projectToolOutput,
+  WRAPPER_TOOLS, createToolOutputStreamProjector, deferToolCallBody, headTailOutput, isParsedInputTool, isParsedOutputTool,
+  projectMessageRowForDisplay, projectMessageRowsForTransport, projectToolInput, projectToolOutput,
 } from '../src/routes/toolOutputTransport';
 
 const MARKER = /\n… \[(\d+) chars omitted\] …\n/;
@@ -246,6 +246,49 @@ describe('frontend parser contract', () => {
   });
 });
 
+describe('display page bodies', () => {
+  const LONG = 'line\n'.repeat(100);
+  const bash = { id: 'b', title: 'Bash', kind: 'tool', status: 'completed', startedAt: 1, endedAt: 2,
+    detail: 'Run the unit tests', inputJson: JSON.stringify({ command: `npm test ${'x'.repeat(400)}`, description: 'd'.repeat(120) }),
+    output: `Exit code 1\n${LONG}` };
+
+  test('a finished call keeps what its rows read and says what it left out', () => {
+    const lean = deferToolCallBody(bash) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(lean).sort(), ['deferred', 'detail', 'endedAt', 'hasOutput', 'id', 'inputJson', 'kind', 'output', 'startedAt', 'status', 'title']);
+    assert.equal(lean.output, 'Exit code 1', 'the exit line a row shows stays');
+    assert.equal(lean.detail, 'Run the unit tests', 'a short purpose stays');
+    const input = JSON.parse(lean.inputJson as string) as Record<string, string>;
+    assert.equal(input.command.length, 301);
+    assert.equal(input.description, `${'d'.repeat(80)}…`);
+    // A JSON detail repeats the input; without an input it is the input.
+    const dump = JSON.stringify({ file_path: '/a', content: 'c'.repeat(500) });
+    assert.equal((deferToolCallBody({ ...bash, detail: dump }) as Record<string, unknown>).detail, undefined);
+    const fromDetail = deferToolCallBody({ ...bash, inputJson: undefined, detail: dump }) as Record<string, unknown>;
+    assert.equal(JSON.parse(fromDetail.detail as string).file_path, '/a');
+  });
+
+  test('passes whole: running and failed calls, parsed tools, file edits, wrappers, delegations, turn metadata, short calls', () => {
+    const whole = [
+      { ...bash, status: 'in_progress' }, { ...bash, status: 'failed' }, { ...bash, status: undefined },
+      { ...bash, title: 'mcp____michi_internal____read_page' }, { ...bash, title: 'Write' }, { ...bash, kind: 'edit', title: 'Editing x' },
+      { ...bash, title: 'michi_call_tool', inputJson: '{"tool":"read_page"}' }, { ...bash, title: 'Task' },
+      { ...bash, detail: '{"subagent_type":"reviewer"}' }, { ...bash, title: 'mcp____michi_internal____set_branch_overview' },
+      { id: 's', title: 'Bash', status: 'completed', detail: 'List files', inputJson: '{"command":"ls"}', output: 'a\nb' },
+    ];
+    for (const call of whole) assert.equal(deferToolCallBody(call), call, JSON.stringify(call).slice(0, 80));
+  });
+
+  test("a finished assistant message's calls are deferred; a running turn's message and other rows pass as projected", () => {
+    const row = { id: 'a', role: 'assistant', tool_calls: JSON.stringify([bash]) };
+    assert.equal((JSON.parse(projectMessageRowForDisplay(row, { active: false }).tool_calls!) as Array<Record<string, unknown>>)[0].deferred, true);
+    assert.equal(projectMessageRowForDisplay(row, { active: true }), row);
+    const user = { ...row, role: 'user' };
+    assert.equal(projectMessageRowForDisplay(user, { active: false }), user);
+    const none = { id: 'n', role: 'assistant', tool_calls: null };
+    assert.equal(projectMessageRowForDisplay(none, { active: false }), none);
+  });
+});
+
 describe('stream projector', () => {
   const frame = (event: 'tool_call' | 'tool_call_update', data: Record<string, unknown>) =>
     ({ event, data: { chatId: 'n', status: 'completed', ...data } }) as ChatStreamEvent;
@@ -384,6 +427,44 @@ describe('HTTP writers', () => {
     assertProjected(all.workspaces[0].messages);
     const turn = await (await fetch(`${base}/chats/node/turns/turn-1`)).json() as { message: { id: string; tool_calls: string } };
     assertProjected([turn.message, { id: 'm-small', tool_calls: '[{"id":"a","title":"Bash","output":"hi"}]' }]);
+    assert.equal(storedRows(), stored, 'no stored row changes');
+  });
+
+  test('display pages leave finished calls\' bodies for the tool-call read, which brings them back projected', async () => {
+    const lean = await (await fetch(`${base}/workspaces/ws/trees/tree/messages?limit=50&toolCalls=lean`)).json() as { messages: Array<{ id: string; tool_calls: string }> };
+    const calls = JSON.parse(lean.messages.find((m) => m.id === 'm-tools')!.tool_calls) as Array<Record<string, unknown>>;
+    assert.equal(calls[0].output, IMAGE_PLACEHOLDER_OUTPUT, 'a short output travels whole');
+    assert.equal(calls[0].deferred, undefined);
+    assert.deepEqual([calls[1].output, calls[1].hasOutput, calls[1].deferred], [undefined, true, true]);
+    assert.equal(calls[1].inputJson, `${LONG_LOG.slice(0, 300)}…`);
+    assert.equal(calls[2].output, PAGE_RECEIPT, 'a parsed tool travels whole');
+    assert.equal(calls[3].output, 'ok');
+    assert.deepEqual(calls[4].output, { kept: true });
+    assert.equal(JSON.parse(calls[5].inputJson as string).script, `${LONG_LOG.slice(0, 80)}…`);
+    assert.equal(calls[6].inputJson, WRITE_INPUT, 'a write keeps its content for the diff receipt');
+    assert.equal(JSON.parse(calls[7].inputJson as string).command, `${LONG_LOG.slice(0, 300)}…`);
+
+    const whole = await (await fetch(`${base}/workspaces/ws/trees/tree/tool-calls?nodeId=node&messageId=m-tools&messageId=gone`)).json() as { messages: Array<{ id: string; tool_calls: string }> };
+    assert.deepEqual(whole.messages.map((m) => m.id), ['m-tools']);
+    assertProjected([...whole.messages, { id: 'm-small', tool_calls: '[{"id":"a","title":"Bash","output":"hi"}]' }]);
+    assert.deepEqual(await (await fetch(`${base}/workspaces/ws/trees/other/tool-calls?nodeId=node&messageId=m-tools`)).json(), { messages: [] });
+    for (const query of ['messageId=m-tools', 'nodeId=node', `nodeId=node&${Array.from({ length: 51 }, (_, i) => `messageId=m${i}`).join('&')}`]) {
+      const response = await fetch(`${base}/workspaces/ws/trees/tree/tool-calls?${query}`);
+      assert.equal(response.status, 400, query);
+      await response.body?.cancel();
+    }
+    const invalid = await fetch(`${base}/workspaces/ws/trees/tree/messages?limit=50&toolCalls=full`);
+    assert.equal(invalid.status, 400);
+    await invalid.body?.cancel();
+
+    // A turn still running keeps its message as the transport carries it: its replay continues it.
+    getDb().prepare("UPDATE turns SET completed_at = NULL WHERE turn_id = 'turn-1'").run();
+    try {
+      const live = await (await fetch(`${base}/workspaces/ws/trees/tree/messages?limit=50&toolCalls=lean`)).json() as { messages: Array<{ id: string; tool_calls: string }> };
+      assertProjected(live.messages);
+    } finally {
+      getDb().prepare("UPDATE turns SET completed_at = 2 WHERE turn_id = 'turn-1'").run();
+    }
     assert.equal(storedRows(), stored, 'no stored row changes');
   });
 

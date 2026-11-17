@@ -1298,7 +1298,8 @@ describe('MultiModelOrchestrator', () => {
     const workflowStore = memoryWorkflowStore();
     const h = harness({ workflowStore });
     const runId = await started(h);
-    h.chat.gates.set(h.caller, new Promise<void>((resolve) => setTimeout(resolve, 30)));
+    let releaseSynthesis!: () => void;
+    h.chat.gates.set(h.caller, new Promise<void>((resolve) => { releaseSynthesis = resolve; }));
     h.chat.answer(h.chat.turnOf('t1', 0), 'B0');
     h.chat.answer(h.chat.turnOf('t2', 0), 'G0');
     await until(() => h.chat.turnOf('t1', 1) !== undefined && h.chat.turnOf('t2', 1) !== undefined, 'reviews');
@@ -1306,6 +1307,7 @@ describe('MultiModelOrchestrator', () => {
     h.chat.answer(h.chat.turnOf('t2', 1), 'G1');
     await until(() => h.record(runId).state.synthesis.status === 'queued', 'synthesis queued');
     h.chat.shuttingDown = true;
+    releaseSynthesis();
     await until(() => h.record(runId).state.synthesis.status === 'interrupted', 'interrupted');
     assert.equal(h.record(runId).status, 'running');
 

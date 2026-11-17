@@ -39,7 +39,7 @@ export const MICHI_TOOL_EFFECTS: Readonly<Record<string, MichiToolEffect>> = Obj
   // Conversations, panes, docs and the skill library; Kiro Crew's relay listing of Michi's tools.
   ...of('read', [
     'michi_docs', 'michi_skills', 'list_workspaces', 'list_threads', 'search_messages', 'read_node', 'read_node_overview',
-    'list_panes', 'inspect_pane', 'read_pane_output', 'wait_pane', 'read_conversation_updates', 'show_image', 'michi_list_tools',
+    'list_panes', 'inspect_pane', 'read_pane_output', 'wait_pane', 'read_conversation_updates', 'show_image', 'show_blocks', 'michi_list_tools',
   ]),
   // Pages, databases, tasks, Home and components; preview_page hands out a read-only loopback link.
   ...of('read', [
@@ -62,7 +62,7 @@ export const MICHI_TOOL_EFFECTS: Readonly<Record<string, MichiToolEffect>> = Obj
   ...of('outside_read', ['companion_check_now']),
   ...of('michi_write', [
     'companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal',
-    'companion_publish_brief', 'companion_set_name', 'companion_set_notifications',
+    'companion_set_name', 'companion_set_notifications',
   ]),
   ...of('channel', ['companion_propose', 'companion_headline', 'nothing_to_do', 'ask_user', 'submit_agent_result']),
   // Michi Memory: the user's own memories.

@@ -20,7 +20,9 @@ import type {
   SkillTurnInvocation,
   SteerResult,
 } from '../../contract/types';
-import type { NormalizedEvent } from '../../contract/events';
+import type { FormField, NormalizedEvent, UserInputAnswer } from '../../contract/events';
+import { askUserAnswers } from '../../mcp-host/askUser';
+import type { AskUserAnswers } from '../../mcp-host/types';
 import { interactiveOwner, sameOwner } from '../../contract/types';
 import type { McpSlotCallbacks, McpSlotProvider } from '../../contract/mcp';
 import {
@@ -96,6 +98,20 @@ const ASSISTANT_UNVERIFIED = 'The Michi assistant\'s tools are unavailable: Clau
  * whose RuntimeConfigPort.features.nativeMemory is false.
  */
 const AUTO_MEMORY_OFF_ENV: Readonly<NodeJS.ProcessEnv> = Object.freeze({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' });
+
+/**
+ * The CLI's variables a spawn adds. CLAUDE_CODE_RESUME_SOURCE_ALIVE holds a
+ * fork boundary: on start the CLI reports, as stopped, each background task
+ * launched in the transcript with no completion record ("didn't finish
+ * before the previous session ended"), except those launched before it.
+ */
+function claudeSpawnEnvOverrides(input: { autoMemoryOff: boolean; forkBoundaryAt?: string | null }): { env?: NodeJS.ProcessEnv } {
+  const env: NodeJS.ProcessEnv = {
+    ...(input.autoMemoryOff ? AUTO_MEMORY_OFF_ENV : {}),
+    ...(input.forkBoundaryAt ? { CLAUDE_CODE_RESUME_SOURCE_ALIVE: input.forkBoundaryAt } : {}),
+  };
+  return Object.keys(env).length > 0 ? { env } : {};
+}
 // The PreToolUse hook's reason when the host requires its own approval (ClaudeAdapterOptions.requireHostApproval).
 const HOST_APPROVAL_REQUIRED = 'This tool call needs the user\'s approval in this turn';
 
@@ -276,7 +292,21 @@ export class ClaudeSession implements AgentSession {
   private persistNativeIdentity: boolean;
   /** ClaudeSessionDeps.ephemeral: no transcript, no telemetry, never restored. */
   readonly ephemeral: boolean;
+  /** Last acquisition, turn start or turn end (see getIdleSince). */
   private lastUsedAt = Date.now();
+  /**
+   * The live process's background tasks that are activity (shells, Monitor,
+   * agents, workflows; not the CLI's ambient housekeeping), from its
+   * background_tasks_changed level, and when that level last changed. Empty
+   * for a CLI that predates the level.
+   */
+  private nativeBackgroundTasks: ReadonlySet<string> = new Set();
+  private nativeBackgroundChangedAt = 0;
+  /**
+   * A native fork spawned and no turn run yet: the CLI writes the child's
+   * transcript with its first turn, so until then the child id resumes nothing.
+   */
+  private forkUnstarted = false;
   private readonly stderrWarningsSent = new Set<string>();
   /** The host's follow-up protocol, fixed at construction. */
   private readonly followUpsExperimentMode: FollowUpsExperimentMode;
@@ -379,7 +409,7 @@ export class ClaudeSession implements AgentSession {
   >();
   private readonly pendingUserInputs = new Map<
     number,
-    { resolve: (answers: Array<{ question: string; answer: string }> | null) => void; timer: NodeJS.Timeout }
+    { resolve: (answers: UserInputAnswer[] | null) => void; timer: NodeJS.Timeout }
   >();
 
   // Disposed callback
@@ -449,7 +479,54 @@ export class ClaudeSession implements AgentSession {
    * idle with no turn yet reporting its outcome.
    */
   hasBackgroundWork(): boolean {
-    return this.workflowTap.hasOpenRuns() || this.translatorHasBackgroundSubagents?.() === true;
+    return this.workflowTap.hasOpenRuns() || this.translatorHasBackgroundSubagents?.() === true
+      || this.nativeBackgroundTasks.size > 0;
+  }
+
+  /**
+   * The CLI's background_tasks_changed: the whole set, replacing the last.
+   * It names background shells and Monitor tasks, which the subagent tracker
+   * does not follow. Ambient tasks are the CLI's own housekeeping: counting
+   * them, or their coming and going, would keep every session.
+   */
+  private observeNativeBackgroundTasks(tasks: unknown): void {
+    const ids = new Set<string>();
+    for (const task of Array.isArray(tasks) ? tasks : []) {
+      const entry = task as { task_id?: unknown; ambient?: unknown } | null;
+      if (entry && typeof entry.task_id === 'string' && entry.ambient !== true) ids.add(entry.task_id);
+    }
+    const previous = this.nativeBackgroundTasks;
+    if (ids.size === previous.size && [...ids].every((id) => previous.has(id))) return;
+    this.nativeBackgroundTasks = ids;
+    // A task that ended is reported by a turn the CLI starts next.
+    this.nativeBackgroundChangedAt = Date.now();
+  }
+
+  /**
+   * Why this chat's process must stay now, as far as the session can tell,
+   * or null when it may be released once idle long enough (getIdleSince):
+   * it is not idle, a turn still holds it, a question or approval waits, a
+   * steer is queued, a native fork has not run yet, or background work runs
+   * in the process.
+   */
+  idleReleaseBlocker(): string | null {
+    if (this.state !== 'idle') return this.state;
+    if (this.turn || this.turnAbort || this.cancellation || this.retirement) return 'busy';
+    if (this.pendingPermissions.size > 0 || this.pendingUserInputs.size > 0) return 'pending_interaction';
+    if (this.pendingSteers.size > 0 || this.heldTurnEnd) return 'steer';
+    if (this.forkUnstarted) return 'fork_unstarted';
+    if (this.hasBackgroundWork()) return 'background_work';
+    return null;
+  }
+
+  /** Since when nothing has used the session: its last use, or its process's background set changing. */
+  getIdleSince(): number {
+    return Math.max(this.lastUsedAt, this.nativeBackgroundChangedAt);
+  }
+
+  /** Refresh idle retention (session directory lookups and reuse). */
+  touch(): void {
+    this.lastUsedAt = Date.now();
   }
 
   /**
@@ -1158,6 +1235,7 @@ export class ClaudeSession implements AgentSession {
           this.getNativeForkAnchor = null;
           this.translatorHasBackgroundSubagents = null;
           this.translatorPendingBackgroundSubagents = null;
+          this.nativeBackgroundTasks = new Set();
           this.takeTranslatorCompaction = null;
           this.releaseHeldTurn = null;
         }
@@ -1623,7 +1701,7 @@ export class ClaudeSession implements AgentSession {
     entry.resolve(null);
   }
 
-  respondToUserInput(requestId: number, answers: Array<{ question: string; answer: string }>): void {
+  respondToUserInput(requestId: number, answers: UserInputAnswer[]): void {
     const entry = this.pendingUserInputs.get(requestId);
     if (!entry) return;
     clearTimeout(entry.timer);
@@ -1857,8 +1935,15 @@ export class ClaudeSession implements AgentSession {
     const sessionId = randomUUID();
     // Pin the CHILD identity before init, never the source token. Forking must
     // not repair, append to, or publish the parent's JSONL as the child's state.
-    if (forkFrom) this.externalSessionId = sessionId;
-    await this.doSpawn({ sessionId, resumeSessionId: forkFrom, forkSession: !!forkFrom, mcpConfig });
+    let forkBoundaryAt: string | null = null;
+    if (forkFrom) {
+      this.externalSessionId = sessionId;
+      forkBoundaryAt = new Date().toISOString();
+      if (ownerMode(this.owner) === 'interactive') {
+        this.host.bindings.forkAnchors.saveClaudeForkBoundary({ nodeId: this.nodeId, nativeSessionId: sessionId, boundaryAt: forkBoundaryAt });
+      }
+    }
+    await this.doSpawn({ sessionId, resumeSessionId: forkFrom, forkSession: !!forkFrom, mcpConfig, forkBoundaryAt });
     this.perf.measure('claude:spawn_fresh', tSpawnFresh, { sid: this.id });
   }
 
@@ -1910,16 +1995,30 @@ export class ClaudeSession implements AgentSession {
       // The assistant has no ToolSearch to load deferred tools: its Michi tools load up front.
       alwaysLoad: ownerMode(this.owner) === 'headless' || this.host.profile.isRestricted(this.toolProfile),
     });
-    await this.doSpawn({ resumeSessionId: externalSessionId, mcpConfig });
+    const forkBoundaryAt = ownerMode(this.owner) === 'interactive'
+      ? this.host.bindings.forkAnchors.readClaudeForkBoundary(this.nodeId, externalSessionId)
+      : null;
+    await this.doSpawn({ resumeSessionId: externalSessionId, mcpConfig, forkBoundaryAt });
   }
 
   // ---- Private helpers -------------------------------------------------------
 
-  private async doSpawn(opts: { sessionId?: string; resumeSessionId?: string; forkSession?: boolean; mcpConfig: string }): Promise<void> {
+  /**
+   * `forkBoundaryAt`: when this chat's native session was forked from its
+   * parent's (ClaudeForkBoundary). The CLI then leaves out the background
+   * work launched before it when it reports what a previous process left
+   * unfinished: that work runs in the parent and reports there.
+   */
+  private async doSpawn(opts: {
+    sessionId?: string; resumeSessionId?: string; forkSession?: boolean; mcpConfig: string; forkBoundaryAt?: string | null;
+  }): Promise<void> {
     this.turnAbort?.signal.throwIfAborted();
     if (this.state === 'disposed') throw new Error('Claude session was disposed during startup');
     this.state = 'spawning';
     this.resumePending = !!opts.resumeSessionId;
+    this.forkUnstarted = !!opts.forkSession;
+    // The level is per process: a new one starts with no background tasks.
+    this.nativeBackgroundTasks = new Set();
     this.assistantInitVerified = false;
     this.lastFailure = null;
     this.lastGuardError = null;
@@ -2010,6 +2109,10 @@ export class ClaudeSession implements AgentSession {
           if (this.transport) this.observeNativeCommands(this.transport, envelope.commands, true);
           return;
         }
+        if (envelope.type === 'system' && envelope.subtype === 'background_tasks_changed') {
+          this.observeNativeBackgroundTasks(envelope.tasks);
+          return;
+        }
         if (envelope.type === 'system' && envelope.subtype === 'api_retry' && envelope.error === 'authentication_failed') {
           // Let the CLI's first retry renew expired credentials unseen; fail
           // fast if its credentials are still rejected, rather than back off.
@@ -2098,6 +2201,7 @@ export class ClaudeSession implements AgentSession {
           }
           if (this.resumePending) queue.push({ kind: 'retry_end' });
           this.resumePending = false;
+          this.forkUnstarted = false;
         } else if (!this.firstModelEnvelopeThisTurn && this.stdinWriteAt) {
           // First non-system envelope after stdin write — Anthropic actually responded.
           this.firstModelEnvelopeThisTurn = true;
@@ -2199,7 +2303,10 @@ export class ClaudeSession implements AgentSession {
         // its ~/.claude default.
         configDir: this.options.configDir?.(),
         systemPromptAppend,
-        ...(this.host.config.features.nativeMemory?.('claude', this.ownerUserId) === false ? { env: { ...AUTO_MEMORY_OFF_ENV } } : {}),
+        ...claudeSpawnEnvOverrides({
+          autoMemoryOff: this.host.config.features.nativeMemory?.('claude', this.ownerUserId) === false,
+          forkBoundaryAt: opts.forkBoundaryAt,
+        }),
         // Library skills load with the user's settings. Isolated and bare
         // processes do not load them: the assistant has no library at all,
         // and bare chats and Agent Runs reach it through michi_skills where
@@ -2472,7 +2579,10 @@ export class ClaudeSession implements AgentSession {
         if (permission.behavior === 'deny') return permission;
       }
       if (!Array.isArray(input.questions)) return { behavior: 'deny', message: 'Invalid user questions' };
-      const answers = await this.makeOnAskUser()(input.questions as Parameters<ReturnType<ClaudeSession['makeOnAskUser']>>[0], signal);
+      // Claude's own tool asks choices only: a field it was sent is not drawn.
+      const questions = (input.questions as Parameters<ReturnType<ClaudeSession['makeOnAskUser']>>[0])
+        .map((question) => (question && typeof question === 'object' && 'field' in question ? { ...question, field: undefined } : question));
+      const answers = await this.makeOnAskUser()(questions, signal);
       return answers && !signal.aborted && !questionTurn?.signal.aborted && this.turnAbort === questionTurn
         ? { behavior: 'allow', updatedInput: { ...input, answers } } : { behavior: 'deny', message: 'User input cancelled' };
     }
@@ -2764,7 +2874,8 @@ export class ClaudeSession implements AgentSession {
       header?: string;
       options: Array<{ label: string; description?: string }>;
       multiSelect: boolean;
-    }>, signal?: AbortSignal): Promise<Record<string, string> | null> => {
+      field?: FormField;
+    }>, signal?: AbortSignal): Promise<AskUserAnswers | null> => {
       if (signal?.aborted || this.turnAbort?.signal.aborted) return null;
       const questionTurn = this.ensureSelfTurnController();
       const queue = this.queue;
@@ -2772,7 +2883,7 @@ export class ClaudeSession implements AgentSession {
 
       const abort = () => this.skipUserInput(requestId);
       signal?.addEventListener('abort', abort, { once: true });
-      const answers = await new Promise<Array<{ question: string; answer: string }> | null>((resolve) => {
+      const answers = await new Promise<UserInputAnswer[] | null>((resolve) => {
         const timer = setTimeout(() => {
           this.pendingUserInputs.delete(requestId);
           resolve(null);
@@ -2783,9 +2894,7 @@ export class ClaudeSession implements AgentSession {
 
       if (answers && !signal?.aborted && !questionTurn?.signal.aborted && this.turnAbort === questionTurn && this.queue === queue) {
         queue.push({ kind: 'user_input_resolved', requestId, answers });
-        const result: Record<string, string> = {};
-        for (const a of answers) result[a.question] = a.answer;
-        return result;
+        return askUserAnswers(questions, answers);
       }
 
       queue.push({ kind: 'user_input_resolved', requestId, answers: [] });

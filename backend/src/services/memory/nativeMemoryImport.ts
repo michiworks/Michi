@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  MEMORY_BODY_MAX_CHARS, MEMORY_TOPIC_MAX_CHARS, isSystemWorkspaceSettings, type MemoryImportSource, type MemoryKind, type MemoryRecord,
+  MEMORY_BODY_MAX_CHARS, isSystemWorkspaceSettings, type MemoryImportSource, type MemoryKind, type MemoryRecord,
   type MemoryScope,
 } from 'michi-shared';
 import { claudeProjectSlug } from 'michi-runtime/internal/adapters/claude/claudeProjectsPath';
@@ -108,8 +108,6 @@ interface ImportItem {
   body: string;
   kind: MemoryKind;
   observedAt: number | null;
-  /** The note's title as its topic (every part of a split note shares it), clipped as memoryService stores it; null without one. */
-  topic: string | null;
 }
 
 /** An item and the scope it goes to (null: the user's). */
@@ -243,18 +241,16 @@ function splitText(text: string, budget: number): string[] {
 /**
  * A note as items: one, its title and text, when it fits a memory; else its
  * text cut at paragraphs, each part headed by the title and its number. The
- * first part keeps `ref`, a later one adds '#<n>'. `name`: the note's short
- * name, its topic (default the title).
+ * first part keeps `ref`, a later one adds '#<n>'. Its topic is the topic
+ * pass's (memoryTopics.ts): a file's name names one note, not an area.
  */
-function noteItems(ref: string, title: string, text: string, kind: MemoryKind, observedAt: number | null, name = title): ImportItem[] {
+function noteItems(ref: string, title: string, text: string, kind: MemoryKind, observedAt: number | null): ImportItem[] {
   let head = title.replace(/\s+/gu, ' ').trim();
   if (head.length > MAX_TITLE_CHARS) head = `${head.slice(0, MAX_TITLE_CHARS - 1)}…`;
   const body = text.replace(/\r\n?/gu, '\n').trim();
   const whole = [head, body].filter(Boolean).join('\n\n');
   if (!whole) return [];
-  const short = name.replace(/\s+/gu, ' ').trim();
-  const topic = short ? Array.from(short).slice(0, MEMORY_TOPIC_MAX_CHARS).join('').trim() : null;
-  if (whole.length <= MEMORY_BODY_MAX_CHARS) return [{ ref, body: whole, kind, observedAt, topic }];
+  if (whole.length <= MEMORY_BODY_MAX_CHARS) return [{ ref, body: whole, kind, observedAt }];
   // Room for the head's " (12/34)" and the blank line after it.
   const parts = splitText(body, MEMORY_BODY_MAX_CHARS - head.length - 12);
   return parts.map((part, index) => ({
@@ -262,7 +258,6 @@ function noteItems(ref: string, title: string, text: string, kind: MemoryKind, o
     body: head ? `${head} (${index + 1}/${parts.length})\n\n${part}` : part,
     kind,
     observedAt,
-    topic,
   }));
 }
 
@@ -324,7 +319,7 @@ function claudeTopicItems(ref: string, file: string, name: string, title: string
   const { fields, body } = frontMatter(text);
   const heading = title || fields.name || name.replace(/\.md$/u, '');
   const header = fields.description ? `${heading}: ${fields.description}` : heading;
-  return noteItems(ref, header, body, 'fact', parseTime(fields.modified) ?? mtimeOf(file), heading);
+  return noteItems(ref, header, body, 'fact', parseTime(fields.modified) ?? mtimeOf(file));
 }
 
 /** The files of one project's auto memory directory (`project`: its directory name, the refs' first segment). */
@@ -584,7 +579,7 @@ function kiroItems(fileRef: string, rows: readonly KiroMemoryRow[], inScope: (sc
       row.how_to_apply?.trim() ? `How to apply: ${row.how_to_apply.trim()}` : '',
     ].filter(Boolean).join('\n\n');
     return noteItems(`${fileRef}#${refSegment(String(row.id))}`, header, text, row.memory_type === 'USER_PREFERENCE' ? 'preference' : 'fact',
-      parseTime(row.updated_at) ?? parseTime(row.created_at), title);
+      parseTime(row.updated_at) ?? parseTime(row.created_at));
   });
 }
 
@@ -801,11 +796,9 @@ function reconcile(ownerUserId: string, source: MemoryImportSource, fileRef: str
       if (bodyHash !== row.body_hash) fresh.push(item);
       continue;
     }
-    // Topics compare as memoryService spells them (one spelling per owner, any case).
-    const sameTopic = (memory?.topic ?? '').toLowerCase() === (item.topic ?? '').toLowerCase();
-    if (!memory || (bodyHash === row.body_hash && memory.kind === item.kind && sameTopic)) continue;
+    if (!memory || (bodyHash === row.body_hash && memory.kind === item.kind)) continue;
     if (attempt('update', () => {
-      const updated = updateMemory(caller, memory.id, { body: item.body, kind: item.kind, topic: item.topic }, memory.version);
+      const updated = updateMemory(caller, memory.id, { body: item.body, kind: item.kind }, memory.version);
       saveRow(ownerUserId, workspaceId, source, item.ref, memory.id, bodyHash, updated.version);
     })) summary.updated += 1;
   }
@@ -831,7 +824,7 @@ function reconcile(ownerUserId: string, source: MemoryImportSource, fileRef: str
     const scope = memoryScope(workspaceId);
     if (attempt('create', () => {
       const record = createMemory(caller, {
-        scope, kind: item.kind, body: item.body, status: 'active', origin: 'extracted', observedAt: item.observedAt, topic: item.topic,
+        scope, kind: item.kind, body: item.body, status: 'active', origin: 'extracted', observedAt: item.observedAt,
       });
       markImported(ownerUserId, record.id, source, item.ref);
       saveRow(ownerUserId, workspaceId, source, item.ref, record.id, bodyHash, record.version);

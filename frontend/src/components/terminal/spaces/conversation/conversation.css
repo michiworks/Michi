@@ -25,6 +25,7 @@
   cursor: pointer;
 }
 .space-new-chat__ws:hover:not(:disabled) { border-color: var(--term-line-s); background: var(--term-hover-bg, var(--term-alt)); }
+.space-new-chat__ws[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
 .space-new-chat__ws:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .space-new-chat__ws span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .space-new-chat__spacer { flex: 1; min-width: 0; }
@@ -50,7 +51,7 @@
   padding: 10px 12px;
   border: 1px solid var(--term-line);
   border-left: 3px solid var(--term-run);
-  border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
+  border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
   background: var(--term-surface);
 }
 .space-live-card[data-status='done'] { border-left-color: var(--term-digest); }

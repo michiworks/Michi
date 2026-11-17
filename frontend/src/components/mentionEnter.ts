@@ -4,11 +4,10 @@ import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
 /**
  * A chip picked from the @ menu grows out of the query it replaces instead of
- * swapping in at full width. For one beat the new mention node carries
- * `.mention-chip--enter` (index.css): its fill opens from the typed query's
- * width to the whole label, its padding eases in so the text after it moves
- * rather than jumps, and the typed `@query` (drawn from `data-from`) fades
- * into the label.
+ * appearing whole. For one beat the new mention node carries
+ * `.mention-chip--enter` (index.css): the chip takes its full width at once,
+ * its fill opens from the typed query's width to the whole label, and the
+ * typed `@query` (drawn from `data-from`) fades into the label.
  *
  * It is a node decoration, so ProseMirror owns the class and attributes and
  * maps them through any typing that follows; the chip's own DOM is the one

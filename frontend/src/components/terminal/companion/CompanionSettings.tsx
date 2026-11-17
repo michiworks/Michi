@@ -3,12 +3,12 @@ import {
   COMPANION_LIMITS,
   companionAgo,
   companionStatusLine,
-  isCompanionClock,
   type CompanionGoalDto,
   type CompanionItemSubtype,
   type CompanionSourceStatus,
 } from 'michi-shared';
 import { useRuntimeCatalog } from '../../../hooks/useRuntimeCatalog';
+import { isImeComposing } from '../../../lib/ime';
 import type { AssistantInfo } from '../../../services/api/assistant';
 import {
   addCompanionGoal,
@@ -39,11 +39,6 @@ import { PAGES_UPKEEP_TITLE } from '../rail/settingsPages';
 import { BackgroundWorkSettings, PagesUpkeepSettings, useLocalAgentStatus } from '../settings/metaAgent/MetaAgentSettings';
 import { metaAgentRuntimeLabel } from '../settings/metaAgent/runtimeCopy';
 import './companion.css';
-
-const DAYS: ReadonlyArray<{ day: number; label: string }> = [
-  { day: 1, label: 'Mon' }, { day: 2, label: 'Tue' }, { day: 3, label: 'Wed' }, { day: 4, label: 'Thu' },
-  { day: 5, label: 'Fri' }, { day: 6, label: 'Sat' }, { day: 0, label: 'Sun' },
-];
 
 const SOURCE_NAME: Record<CompanionSourceStatus['kind'], string> = {
   michi: 'Michi conversations', cr: 'Code reviews', pipeline: 'Pipelines', email: 'Email', calendar: 'Calendar',
@@ -87,14 +82,7 @@ function TextField({ id, value, placeholder, maxLength, label, onCommit, width =
   return (
     <input id={id} className="ui-input" value={draft} placeholder={placeholder} maxLength={maxLength} aria-label={label} style={{ width }}
       onChange={(event) => setDraft(event.target.value)} onBlur={commit}
-      onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); commit(); } }} />
-  );
-}
-
-function TimeField({ value, label, onCommit }: { value: string; label: string; onCommit(value: string): void }) {
-  return (
-    <input className="ui-input" type="time" value={value} aria-label={label} style={{ width: 120 }}
-      onChange={(event) => { if (isCompanionClock(event.target.value)) onCommit(event.target.value); }} />
+      onKeyDown={(event) => { if (isImeComposing(event)) return; if (event.key === 'Enter') { event.preventDefault(); commit(); } }} />
   );
 }
 
@@ -175,15 +163,6 @@ function EditToggle({ open, label, onToggle }: { open: boolean; label: string; o
   return <Button size="sm" aria-expanded={open} aria-label={open ? `Done editing ${label}` : `Edit ${label}`} onClick={onToggle}>{open ? 'Done' : 'Edit'}</Button>;
 }
 
-/** The morning brief's days as one choice: weekdays, every day, or the days picked under Custom. */
-type BriefDays = 'weekdays' | 'every' | 'custom';
-const WEEKDAYS = [1, 2, 3, 4, 5];
-const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
-const sameDays = (a: readonly number[], b: readonly number[]) => a.length === b.length && b.every((day) => a.includes(day));
-function briefDaysOf(days: readonly number[]): BriefDays {
-  return sameDays(days, WEEKDAYS) ? 'weekdays' : sameDays(days, EVERY_DAY) ? 'every' : 'custom';
-}
-
 /**
  * Model: conversations run on Settings › Runtime & model (and the composer's
  * pick), shown here only; Background work, what check-ins and Pages upkeep
@@ -250,7 +229,7 @@ function GoalsEditor({ goals, name }: { goals: readonly CompanionGoalDto[]; name
               <>
                 <input className="ui-input" value={editing.text} maxLength={COMPANION_LIMITS.maxGoalChars} aria-label="Goal" style={{ flex: 1 }}
                   onChange={(event) => setEditing({ id: goal.id, text: event.target.value })}
-                  onKeyDown={(event) => { if (event.key === 'Enter' && editing.text.trim()) void save(goal.id, editing.text); if (event.key === 'Escape') setEditing(null); }} />
+                  onKeyDown={(event) => { if (isImeComposing(event)) return; if (event.key === 'Enter' && editing.text.trim()) void save(goal.id, editing.text); if (event.key === 'Escape') setEditing(null); }} />
                 <Button size="sm" disabled={!editing.text.trim()} onClick={() => { void save(goal.id, editing.text); }}>Save</Button>
                 <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
               </>
@@ -279,7 +258,7 @@ function GoalsEditor({ goals, name }: { goals: readonly CompanionGoalDto[]; name
       {goals.length < COMPANION_LIMITS.maxGoals && (
         <div className="companion-settings-actions">
           <input className="ui-input" value={text} maxLength={COMPANION_LIMITS.maxGoalChars} placeholder="Add a goal" aria-label="New goal" style={{ flex: 1 }}
-            onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && text.trim()) void add(); }} />
+            onChange={(event) => setText(event.target.value)} onKeyDown={(event) => { if (isImeComposing(event)) return; if (event.key === 'Enter' && text.trim()) void add(); }} />
           <Button size="sm" disabled={!text.trim()} onClick={() => { void add(); }}>Add</Button>
         </div>
       )}
@@ -308,9 +287,7 @@ function SettingsBody({ snapshot, name }: { snapshot: CompanionSnapshot; name: s
   const [keepingNotes, setKeepingNotes] = useState(false);
   // Which options and editors are open in place under their rows.
   const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set());
-  const [customDays, setCustomDays] = useState(false);
   const nameId = useId();
-  const daysId = useId();
   const isOpen = (key: string) => open.has(key);
   const toggle = (key: string) => setOpen((current) => {
     const next = new Set(current);
@@ -343,17 +320,6 @@ function SettingsBody({ snapshot, name }: { snapshot: CompanionSnapshot; name: s
   const optionsToggle = (key: string, label: string) => (
     <button type="button" className="settings-row__link" aria-expanded={isOpen(key)} aria-label={`${label} options`} onClick={() => toggle(key)}>Options</button>
   );
-  const days = settings.brief.days;
-  const briefDays: BriefDays = customDays ? 'custom' : briefDaysOf(days);
-  const chooseDays = (choice: BriefDays) => {
-    setCustomDays(choice === 'custom');
-    if (choice === 'weekdays' && !sameDays(days, WEEKDAYS)) void patch({ brief: { days: WEEKDAYS } });
-    if (choice === 'every' && !sameDays(days, EVERY_DAY)) void patch({ brief: { days: EVERY_DAY } });
-  };
-  const toggleDay = (day: number) => {
-    const next = days.includes(day) ? days.filter((entry) => entry !== day) : [...days, day];
-    if (next.length > 0) void patch({ brief: { days: next.sort((a, b) => a - b) } });
-  };
   const saveNotes = async (notes: string): Promise<string | null> => {
     try {
       const saved = await saveCompanionNotes(notes);
@@ -387,6 +353,9 @@ function SettingsBody({ snapshot, name }: { snapshot: CompanionSnapshot; name: s
           tip="Off stops check-ins, Pages upkeep and the automatic checks of your sources. You can still talk to it. Memory follows Settings › Memory."
           description={on ? undefined : 'Off · settings apply when on'}
           control={<Switch on={on} aria-label={name} onChange={(next) => { void patch({ paused: !next }); }} />} />
+        <SettingsRow label="Auto-continue your chats"
+          control={<Switch on={settings.autoContinueChats} aria-label="Auto-continue your chats"
+            onChange={(next) => { void patch({ autoContinueChats: next }); }} />} />
         {error && <p className="settings-section__status" role="alert">{error}</p>}
       </SettingsSection>
 
@@ -394,31 +363,6 @@ function SettingsBody({ snapshot, name }: { snapshot: CompanionSnapshot; name: s
 
       <SettingsSection title="Watching">
         <SettingsRow label="Michi conversations" description={sourceProblem('michi')} control={sourceSwitch('michi')} />
-      </SettingsSection>
-
-      <SettingsSection title="Updates">
-        <SettingsRow label="Morning brief"
-          control={(
-            <>
-              <select id={daysId} className="ui-select settings-row__select" aria-label="Morning brief days" value={briefDays}
-                onChange={(event) => chooseDays(event.target.value as BriefDays)}>
-                <option value="weekdays">Weekdays</option>
-                <option value="every">Every day</option>
-                <option value="custom">Custom…</option>
-              </select>
-              <TimeField value={settings.brief.time} label="Morning brief time" onCommit={(time) => { void patch({ brief: { time } }); }} />
-              <Switch on={settings.brief.enabled} aria-label="Morning brief" onChange={(next) => { void patch({ brief: { enabled: next } }); }} />
-            </>
-          )}>
-          {briefDays === 'custom' && (
-            <div className="companion-workdays" role="group" aria-label="Morning brief days of the week">
-              {DAYS.map(({ day, label }) => (
-                <button key={day} type="button" className="companion-workday" aria-pressed={days.includes(day)}
-                  disabled={days.length === 1 && days.includes(day)} onClick={() => toggleDay(day)}>{label}</button>
-              ))}
-            </div>
-          )}
-        </SettingsRow>
         {snapshot.demotedSubtypes.length > 0 && (
           <SettingsRow label="Quieter after your feedback">
             <ul className="companion-settings-list">
@@ -544,7 +488,8 @@ function PipelineWatch({ watch, includeFavorites, onSave }: {
 /**
  * Settings › <name> (DESIGN-v2 §1.5; the reorganised page of 2026-11-12), in
  * order: <name> (Name, and the switch that turns it on and off); Model
- * (conversations, Background work); Watching; Updates; Instructions (rules,
+ * (conversations, Background work); Watching (its sources, and the kinds
+ * your feedback quieted); Instructions (rules,
  * working notes, goals, Memory); Pages (Pages upkeep). Activity is in the
  * panel's ⋯ menu (Q31). Without the agent's snapshot only Model's Background
  * work and Pages, which do not need it, show.

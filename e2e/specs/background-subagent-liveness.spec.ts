@@ -122,7 +122,7 @@ test('a background agent reads stopped once the feed stops listing it, and stays
     // The first connection's snapshot listed the agent and the client is
     // reconnecting: its last word still says the agent runs.
     await expect.poll(connections).toBe(2);
-    await expect(badge).toHaveText('◆1');
+    await expect(badge).toHaveText('1');
     await expect(badge).toHaveAttribute('aria-label', '1 subagent running. Show background work');
     await expect(line).toContainText('Explore');
     await expect(line).toHaveText(inBackground);

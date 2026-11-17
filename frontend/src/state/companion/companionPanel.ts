@@ -142,6 +142,8 @@ let focusSeq = 0;
 let requests: CompanionPanelRequest[] = [];
 /** Where focus was when the panel opened (not inside it): closing hands it back (§1.2). */
 let returnFocusTo: HTMLElement | null = null;
+/** That element, kept while the page it is on is inert under the phone panel (takeCompanionReturnFocus). */
+let pendingReturnFocus: HTMLElement | null = null;
 /** What the shell shows now (an area, Pages' view), as noteCompanionScreen was told. */
 let screen: string | null = null;
 /** What the shell showed when the target was set: the target is about that screen only (F1a-review #9). */
@@ -230,7 +232,9 @@ export function openCompanionPanel(req: OpenCompanionPanelRequest = {}): void {
 /**
  * Close the panel. Focus goes back to where it was when the panel opened
  * when it is still there, else to the Topbar button; a focus the user
- * already moved out of the panel stays where it is (§1.2).
+ * already moved out of the panel stays where it is (§1.2). On a page the
+ * phone panel makes inert, focus can't land until the shell lets the page go,
+ * so the shell hands it back then (takeCompanionReturnFocus).
  */
 export function closeCompanionPanel(): void {
   if (!state.open) return;
@@ -239,7 +243,8 @@ export function closeCompanionPanel(): void {
     const active = document.activeElement;
     if (!active || active === document.body || isInCompanionPanel(active)) {
       const back = returnFocusTo?.isConnected ? returnFocusTo : document.querySelector<HTMLElement>('[data-companion-button]');
-      back?.focus({ preventScroll: true });
+      if (back?.closest('[inert]')) pendingReturnFocus = back;
+      else back?.focus({ preventScroll: true });
     }
   }
   returnFocusTo = null;
@@ -262,6 +267,13 @@ export function toggleCompanionPanel(tab: CompanionTab): void {
   }
   if (inPanel && state.tab === 'today') closeCompanionPanel();
   else openCompanionPanel({ tab: 'today' });
+}
+
+/** The element a close left focus for while its page was inert, once; null when there is none or it is gone. */
+export function takeCompanionReturnFocus(): HTMLElement | null {
+  const back = pendingReturnFocus;
+  pendingReturnFocus = null;
+  return back?.isConnected ? back : null;
 }
 
 export function setCompanionPanelTab(tab: CompanionTab): void {
@@ -391,6 +403,7 @@ export function resetCompanionPanelForTests(patch: Partial<CompanionPanelState> 
   focusSeq = 0;
   requests = [];
   returnFocusTo = null;
+  pendingReturnFocus = null;
   openSources = [];
   screen = null;
   targetScreen = null;

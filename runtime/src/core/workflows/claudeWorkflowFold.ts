@@ -1,4 +1,5 @@
 import {
+  clampWorkflowResult,
   clampWorkflowText,
   isWorkflowRunTerminal,
   settledWorkflowNodeStatus,
@@ -289,11 +290,7 @@ export function applyClaudeWorkflowOutput(run: WorkflowRunDtoV1, output: unknown
   const raw = rec(output);
   if (!raw) return run;
   const resultValue = raw['result'];
-  const result = typeof resultValue === 'string'
-    ? clampWorkflowText(resultValue, WORKFLOW_LIMITS.result)
-    : resultValue !== undefined && resultValue !== null
-      ? clampWorkflowText(JSON.stringify(resultValue, null, 2), WORKFLOW_LIMITS.result)
-      : undefined;
+  const result = resultValue === null ? undefined : clampWorkflowResult(resultValue, WORKFLOW_LIMITS.runResult, { pretty: true });
   let log = run.log;
   if (Array.isArray(raw['logs'])) {
     for (const line of raw['logs'] as unknown[]) {

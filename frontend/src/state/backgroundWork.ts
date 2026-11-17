@@ -100,6 +100,37 @@ export interface ConversationSubagent {
   messageId: string;
 }
 
+/** A subagent as the conversation's turns record it (conversationSubagents). */
+export interface ConversationSubagentEntry extends ConversationSubagent {
+  /**
+   * Newest assistant message whose copy brings news of the agent: not one
+   * that only repeats an end an earlier turn recorded (isCarriedOver).
+   */
+  reportMessageId: string;
+  /** Some copy ran it in the background: it outlived the turn that launched it. */
+  backgrounded: boolean;
+}
+
+/** End fields a copy can bring as news: the agent ended again, in this turn. */
+const END_REPORT = ['outcome', 'result', 'error'] as const;
+
+/**
+ * Whether `copy` only repeats an agent that had ended before this turn:
+ * the earlier copies (folded) say it ended, and this copy is still ended
+ * without anything of this turn's own. Kiro V2 republishes its session's
+ * whole roster as later turns run (a finished crew's stages reappear, bare
+ * `terminated`), and a Codex child closed after it completed reports a bare
+ * terminated state then. Steps are the turn's own (each message records
+ * only its own turn's steps), as is a launch by one of this message's tool
+ * calls or an outcome, result or error the earlier copies did not have.
+ */
+function isCarriedOver(copy: SubagentInfo, earlier: SubagentInfo | undefined, toolIds: ReadonlySet<string>): boolean {
+  if (!earlier || isSubagentActive(earlier) || isSubagentActive(copy)) return false;
+  if (copy.activity?.length) return false;
+  if (copy.parentToolCallId && toolIds.has(copy.parentToolCallId)) return false;
+  return !END_REPORT.some((key) => !!copy[key] && copy[key] !== earlier[key]);
+}
+
 /** Fields that describe the agent's state now: the newer copy's value stands, even when absent. */
 const NEWER_COPY_WINS = [
   'status', 'outcome', 'result', 'error', 'usage', 'endedAt', 'currentTool', 'statusMessage', 'background',
@@ -184,8 +215,8 @@ export function foldSubagentCopies(older: SubagentInfo, newer: SubagentInfo): Su
 }
 
 interface ConversationSubagentIndex {
-  entries: ConversationSubagent[];
-  bySession: Map<string, ConversationSubagent>;
+  entries: ConversationSubagentEntry[];
+  bySession: Map<string, ConversationSubagentEntry>;
 }
 
 const conversationSubagentCache = new WeakMap<ChatNodeState, ConversationSubagentIndex>();
@@ -194,16 +225,20 @@ function conversationSubagentIndex(node: ChatNodeState): ConversationSubagentInd
   const cached = conversationSubagentCache.get(node);
   if (cached) return cached;
   const tailAssistantId = latestAssistantMessageId(node.messages);
-  const bySession = new Map<string, ConversationSubagent>();
+  const bySession = new Map<string, ConversationSubagentEntry>();
   for (const message of node.messages) {
     const roster = messageSubagentRoster(node, message, tailAssistantId);
-    if (!roster) continue;
+    if (!roster?.length) continue;
+    const toolIds = new Set(message.toolCalls.map((tool) => tool.id));
     for (const subagent of roster) {
       const previous = bySession.get(subagent.sessionId);
+      const repeat = previous !== undefined && isCarriedOver(subagent, previous.subagent, toolIds);
       // Map keeps the first insertion position; set() replaces the value.
       bySession.set(subagent.sessionId, {
         subagent: previous ? foldSubagentCopies(previous.subagent, subagent) : subagent,
         messageId: message.id,
+        reportMessageId: repeat ? previous.reportMessageId : message.id,
+        backgrounded: previous?.backgrounded === true || subagent.background === true,
       });
     }
   }
@@ -218,7 +253,7 @@ function conversationSubagentIndex(node: ChatNodeState): ConversationSubagentInd
  * background agent's completion arrives with a later reply); order is
  * first-seen.
  */
-export function conversationSubagents(node: ChatNodeState): ConversationSubagent[] {
+export function conversationSubagents(node: ChatNodeState): ConversationSubagentEntry[] {
   return conversationSubagentIndex(node).entries;
 }
 

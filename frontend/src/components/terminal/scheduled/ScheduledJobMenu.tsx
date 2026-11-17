@@ -1,4 +1,4 @@
-import { Copy, History, Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import { CopyIcon, EditIcon, HistoryIcon, PauseIcon, PlayIcon, TrashIcon } from '../icons';
 import { ActionMenu } from '../../ui/ActionMenu';
 
 export interface ScheduledJobMenuActions {
@@ -19,10 +19,10 @@ export function ScheduledJobMenu({ anchor, row, paused, onClose, actions }: {
   actions: ScheduledJobMenuActions;
 }) {
   return <ActionMenu anchor={anchor} liftTarget={row} onClose={onClose} label="Scheduled job actions" items={[
-    { id: 'edit', label: 'Edit', icon: <Pencil size={14} aria-hidden="true" />, onSelect: actions.onEdit },
-    { id: 'runs', label: 'View runs', icon: <History size={14} aria-hidden="true" />, onSelect: actions.onRuns },
-    { id: 'toggle', label: paused ? 'Resume' : 'Pause', icon: paused ? <Play size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />, onSelect: actions.onToggle },
-    { id: 'duplicate', label: 'Duplicate', icon: <Copy size={14} aria-hidden="true" />, onSelect: actions.onDuplicate },
-    { id: 'delete', label: 'Delete…', icon: <Trash2 size={14} aria-hidden="true" />, danger: true, dividerBefore: true, onSelect: actions.onDelete },
+    { id: 'edit', label: 'Edit', icon: <EditIcon aria-hidden="true" />, onSelect: actions.onEdit },
+    { id: 'runs', label: 'View runs', icon: <HistoryIcon aria-hidden="true" />, onSelect: actions.onRuns },
+    { id: 'toggle', label: paused ? 'Resume' : 'Pause', icon: paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />, onSelect: actions.onToggle },
+    { id: 'duplicate', label: 'Duplicate', icon: <CopyIcon aria-hidden="true" />, onSelect: actions.onDuplicate },
+    { id: 'delete', label: 'Delete…', icon: <TrashIcon aria-hidden="true" />, danger: true, dividerBefore: true, onSelect: actions.onDelete },
   ]} />;
 }

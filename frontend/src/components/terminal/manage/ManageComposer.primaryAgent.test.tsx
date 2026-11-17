@@ -22,15 +22,15 @@ const {
   },
 }));
 
-vi.mock('../../../state/chatStore', () => ({
+vi.mock('../../../state/chatStore', async () => ({
+  // The @ menu reads the node store only when it opens; these tests open none.
+  ChatNodeStoreContext: (await import('react')).createContext(null),
   useChatStore: () => ({
     activeProject: { id: 'ws-remote', name: 'Remote', backendConnectionId: 'remote-a', artifacts: [] },
     projects: [{ id: 'ws-remote', name: 'Remote', backendConnectionId: 'remote-a', artifacts: [] }],
     selectProject: vi.fn(), createThread, createChildChat, sendMessage,
     agentStatus: status, refreshAgentStatus: vi.fn(), availableModes: [{ id: 'build', name: 'Build' }], defaultModeId: 'build',
   }),
-  useStructuralSelector: () => [],
-  shallowArrayEqual: Object.is,
   chatLabel: () => 'New thread',
 }));
 

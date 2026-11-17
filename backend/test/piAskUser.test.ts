@@ -230,6 +230,22 @@ test('Pi ask_user rejects malformed questions as a tool error without asking', a
   assert.equal(asked, 0);
 });
 
+test('Pi ask_user asks a field question and returns its typed value', async () => {
+  const { Type } = await loadPiTypebox();
+  const asked: unknown[] = [];
+  const tool = buildPiAskUserTool(Type, async (questions) => {
+    asked.push(questions);
+    return [{ question: 'Budget?', answer: '1500 USD', value: 1500 }];
+  });
+  assert.deepEqual(tool.parameters.properties.questions.items.properties.field.required, ['key', 'label', 'type']);
+  const field = { key: 'budget', label: 'Budget', type: 'slider', min: 0, max: 5000, step: 100, unit: 'USD' };
+  const result = await tool.execute('call', { questions: [{ question: 'Budget?', field }] });
+  assert.deepEqual(asked, [[{ question: 'Budget?', options: [], multiSelect: false, field }]]);
+  assert.deepEqual(JSON.parse(result.content[0].text), { answers: { 'Budget?': 1500 } });
+  const invalid = await tool.execute('call', { questions: [{ question: 'Budget?', field: { ...field, default: 9000 } }] });
+  assert.equal(invalid.content[0].text, 'questions[0].field.default breaks the rule "default fits the field: its type, options and range".');
+});
+
 test('only catalogs given the session channel offer ask_user', async () => {
   const { Type } = await loadPiTypebox();
   configureRuntimeDeps({

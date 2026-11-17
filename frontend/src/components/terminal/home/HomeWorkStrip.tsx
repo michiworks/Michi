@@ -1,6 +1,6 @@
 import type { HomeWorkCounts } from '../../../state/home/homeWork';
 import { CompanionGlyph } from '../companion/CompanionGlyph';
-import { ChevronRightIcon } from '../icons';
+import { ChevronRightIcon, ICON_PX } from '../icons';
 import './homeCards.css';
 
 /**
@@ -11,7 +11,7 @@ import './homeCards.css';
 export function HomeWorkStrip({ name, counts, onOpenToday }: { name: string; counts: HomeWorkCounts; onOpenToday: () => void }) {
   return (
     <div className="home-work" role="group" aria-label={`${name}’s work`}>
-      <span className="home-work__who"><CompanionGlyph size={13} /><span className="home-work__name">{name}</span></span>
+      <span className="home-work__who"><CompanionGlyph size={ICON_PX.md} /><span className="home-work__name">{name}</span></span>
       <span className="home-work__count" data-kind="working">
         <i aria-hidden="true" /><span className="home-work__long">Working on</span><span className="home-work__short">Working</span> <b>{counts.working}</b>
       </span>
@@ -22,7 +22,7 @@ export function HomeWorkStrip({ name, counts, onOpenToday }: { name: string; cou
         <i aria-hidden="true" /><span className="home-work__long">Done today</span><span className="home-work__short">Done</span> <b>{counts.doneToday}</b>
       </span>
       <button type="button" className="home-work__open" onClick={onOpenToday}>
-        <span className="home-work__long">Open Today</span><span className="home-work__short">Today</span><ChevronRightIcon size={12} />
+        <span className="home-work__long">Open Today</span><span className="home-work__short">Today</span><ChevronRightIcon size="sm" />
       </button>
     </div>
   );

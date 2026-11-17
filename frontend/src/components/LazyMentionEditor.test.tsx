@@ -12,7 +12,7 @@ vi.mock('./MentionEditor', () => ({
 }));
 
 const props = (testId: string): MentionEditorProps => ({
-  value: testId, mentions: [], onChange: () => {}, artifacts: [], sameTreeNodes: [], currentNodeId: 'n', 'data-testid': testId,
+  value: testId, mentions: [], onChange: () => {}, artifacts: [], currentNodeId: 'n', 'data-testid': testId,
 });
 
 describe('LazyMentionEditor', () => {

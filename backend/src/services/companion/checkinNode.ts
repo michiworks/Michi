@@ -144,7 +144,7 @@ export function startCheckinMemory(runId: string): string | null {
 /**
  * Whether what check-in run `runId`'s pack showed when it started still
  * holds, asked before each of its results goes out (its post into V, its
- * brief, a follow-up it sends itself). False once it changed, and from then
+ * a follow-up it sends itself). False once it changed, and from then
  * on (the signature S kept goes); false too when S kept none or memory
  * cannot be read (fail closed).
  */

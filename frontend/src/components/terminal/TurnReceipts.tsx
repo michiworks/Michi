@@ -2,6 +2,7 @@ import { useEffect, useMemo } from 'react';
 import type { ToolCallState } from '../../state/chatTypes';
 import { invalidateTurnPageReceipt, parseTurnPageReceipt, receiptShows, taskBoardPageId, type TurnPageReceipt } from '../../lib/turnPageReceipt';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
+import { RevealOnShow, type RevealRow } from './agentBlockMotion';
 import { PageReceiptRow } from './PageReceipt';
 import { ReceiptLedger } from './ReceiptLedger';
 import { ScheduledJobRow, parseCreatedScheduledJob, type CreatedScheduledJob } from './ScheduledJobReceipt';
@@ -16,11 +17,14 @@ const NO_WRITES: readonly { id: string; receipt: TurnPageReceipt }[] = [];
  * Under a reply: what its tool calls changed, as one list in the order they
  * ran. Writes to the same page or database share a row at its first write.
  * Page rows need the conversation's workspace; without one only jobs show.
+ * With `enter` (the reply was made on screen) the list and its later rows
+ * grow in as they arrive; otherwise they come settled (TR-36).
  */
-export function TurnReceipts({ tools, workspaceId, backendConnectionId }: {
+export function TurnReceipts({ tools, workspaceId, backendConnectionId, enter = false }: {
   tools: readonly ToolCallState[];
   workspaceId?: string;
   backendConnectionId?: string;
+  enter?: boolean;
 }) {
   const scope = useMemo(() => (workspaceId && backendConnectionId ? { workspaceId, backendConnectionId } : null), [backendConnectionId, workspaceId]);
   const writes = useMemo(() => (scope ? tools.flatMap((tool) => {
@@ -57,14 +61,17 @@ export function TurnReceipts({ tools, workspaceId, backendConnectionId }: {
     return out;
   }, [cards, tools, writes]);
   const boards = useMemo(() => writes.map(({ receipt }) => receipt), [writes]);
+  const rows = useMemo(() => items.flatMap((item): RevealRow[] => {
+    if (item.kind === 'job') return [{ key: item.id, node: <ScheduledJobRow job={item.job} backendConnectionId={backendConnectionId} /> }];
+    if (!scope) return [];
+    return [{ key: item.id, node: <PageReceiptRow writes={item.writes} {...scope} boardPageId={taskBoardPageId(boards, item.writes[0]!.workspaceId)} /> }];
+  }), [backendConnectionId, boards, items, scope]);
 
-  const ledger = items.length > 0 && (
-    <ReceiptLedger>
-      {items.map((item) => (item.kind === 'job'
-        ? <ScheduledJobRow key={item.id} job={item.job} backendConnectionId={backendConnectionId} />
-        : scope && <PageReceiptRow key={item.id} writes={item.writes} {...scope} boardPageId={taskBoardPageId(boards, item.writes[0]!.workspaceId)} />))}
-    </ReceiptLedger>
+  const ledger = (
+    <RevealOnShow show={rows.length > 0} enter={enter}>
+      <ReceiptLedger rows={rows} enter={enter} />
+    </RevealOnShow>
   );
-  if (!cards || !scope) return ledger || null;
+  if (!cards || !scope) return ledger;
   return <>{cards(tools)}{ledger}</>;
 }

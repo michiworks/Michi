@@ -111,7 +111,36 @@ export interface CodeHighlighterPlugin {
   ): HighlightResult | null;
 }
 
-const resultCache = new Map<string, HighlightResult>();
+/** Results kept, by count and by the source they hold; the least recently used go first. */
+const RESULT_CACHE_MAX_ENTRIES = 256;
+const RESULT_CACHE_MAX_SOURCE_CHARS = 512 * 1024;
+const resultCache = new Map<string, { result: HighlightResult; chars: number }>();
+let resultCacheChars = 0;
+
+function cachedResult(key: string): HighlightResult | undefined {
+  const entry = resultCache.get(key);
+  if (!entry) return undefined;
+  // Map order is use order: the most recent last.
+  resultCache.delete(key);
+  resultCache.set(key, entry);
+  return entry.result;
+}
+
+/** Keeps a result, then lets the least recently used go until both limits hold (the newest stays). */
+function cacheResult(key: string, result: HighlightResult, chars: number): void {
+  const previous = resultCache.get(key);
+  if (previous) {
+    resultCache.delete(key);
+    resultCacheChars -= previous.chars;
+  }
+  resultCache.set(key, { result, chars });
+  resultCacheChars += chars;
+  for (const [oldest, entry] of resultCache) {
+    if (oldest === key || (resultCache.size <= RESULT_CACHE_MAX_ENTRIES && resultCacheChars <= RESULT_CACHE_MAX_SOURCE_CHARS)) break;
+    resultCache.delete(oldest);
+    resultCacheChars -= entry.chars;
+  }
+}
 const pendingCallbacks = new Map<string, Set<(r: HighlightResult) => void>>();
 const queuedKeys = new Set<string>();
 const highlightQueue: Array<() => Promise<void>> = [];
@@ -152,10 +181,9 @@ function enqueueHighlight(task: () => Promise<void>): void {
   scheduleHighlightQueue();
 }
 
+// The whole source: two blocks that share a length, a start and an end can differ in between.
 function cacheKey(code: string, lang: string, themes: ThemePair): string {
-  const head = code.slice(0, 100);
-  const tail = code.length > 100 ? code.slice(-100) : '';
-  return `${lang}:${themes[0]}:${themes[1]}:${code.length}:${head}:${tail}`;
+  return `${lang}:${themes[0]}:${themes[1]}:${code}`;
 }
 
 export function createCodePlugin(options: { themes?: ThemePair } = {}): CodeHighlighterPlugin {
@@ -166,7 +194,7 @@ export function createCodePlugin(options: { themes?: ThemePair } = {}): CodeHigh
       const lang = supported.has(normalize(opts.language)) ? normalize(opts.language) : 'text';
       const themes = opts.themes ?? defaultThemes;
       const key = cacheKey(opts.code, lang, themes);
-      const cached = resultCache.get(key);
+      const cached = cachedResult(key);
       if (cached) return cached;
       if (callback) {
         let cbs = pendingCallbacks.get(key);
@@ -187,7 +215,7 @@ export function createCodePlugin(options: { themes?: ThemePair } = {}): CodeHigh
             lang: effectiveLang,
             themes: { light: themes[0], dark: themes[1] },
           });
-          resultCache.set(key, tokens);
+          cacheResult(key, tokens, opts.code.length);
           const cbs = pendingCallbacks.get(key);
           if (cbs) {
             for (const cb of cbs) cb(tokens);

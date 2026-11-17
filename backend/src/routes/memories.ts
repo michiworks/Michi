@@ -4,6 +4,7 @@ import { isAssistantNode } from '../assistant/identity';
 import { beginSse } from '../services/httpSse';
 import { log } from '../services/logger';
 import { wakeMemoryExtraction } from '../services/memory/extractionService';
+import { confirmGuess, listGuesses, rejectGuess } from '../services/memory/guesses';
 import { subscribeMemoryChanges } from '../services/memory/memoryChangeFeed';
 import { requestAgentOwnerOrNull } from '../services/agentOwner';
 import {
@@ -23,7 +24,7 @@ import {
   type MemoryCaller,
   type MemoryServiceErrorResponse,
 } from '../services/memory/memoryService';
-import { forgetRecalledTurn, recalledTurnScope, replySourcesView } from '../services/memory/replySources';
+import { replySourcesView } from '../services/memory/replySources';
 import { memoryProfileView, profileLineMemoryIds, requestProfileRebuild } from '../services/memory/userProfile';
 import { requireRequestAccess } from './middleware/sessionAccess';
 
@@ -134,7 +135,7 @@ function messageIdsParam(req: Request): string[] {
 
 export function setupMemoryRoutes(): express.Router {
   const router = express.Router();
-  router.use(['/memories', '/memory-settings', '/memory-profile', '/nodes/:nodeId/memory-mode', '/nodes/:nodeId/memory-sources', '/memory-recall'],
+  router.use(['/memories', '/memory-settings', '/memory-profile', '/memory-guesses', '/nodes/:nodeId/memory-mode', '/nodes/:nodeId/memory-sources'],
     requireRequestAccess);
 
   /**
@@ -185,12 +186,14 @@ export function setupMemoryRoutes(): express.Router {
   }));
 
   router.patch('/memories/:id', route((req, res, who) => {
-    const body = jsonBody(req, ['body', 'scope', 'kind', 'topic', 'expectedVersion']);
+    const body = jsonBody(req, ['body', 'scope', 'kind', 'topic', 'validUntil', 'expectedVersion']);
     if (typeof body.expectedVersion !== 'number') throw new RequestError('expectedVersion is required');
     const memory = updateMemory(who, memoryIdParam(req), {
       ...(body.body !== undefined ? { body: body.body as string } : {}),
       ...(body.scope !== undefined ? { scope: body.scope as never } : {}),
       ...(body.kind !== undefined ? { kind: body.kind as never } : {}),
+      // null clears it; the service checks a number.
+      ...(body.validUntil !== undefined ? { validUntil: body.validUntil as number | null } : {}),
       ...(body.topic !== undefined ? { topic: body.topic as string | null } : {}),
     // The user edited it: the memory is theirs for consolidation, which never changes it.
     }, body.expectedVersion, { byUser: true });
@@ -273,6 +276,25 @@ export function setupMemoryRoutes(): express.Router {
     res.json(memoryProfileView(who.ownerUserId));
   }));
 
+  // ── guesses: patterns consolidation noticed, for the user to confirm (services/memory/guesses.ts) ──
+
+  router.get('/memory-guesses', route((_req, res, who) => {
+    res.json({ guesses: listGuesses(who) });
+  }));
+
+  // That's right: the guess becomes a memory the user saved.
+  router.post('/memory-guesses/:id/confirm', route((req, res, who) => {
+    jsonBody(req, []);
+    res.json({ memory: confirmGuess(who, String(req.params.id ?? '')) });
+  }));
+
+  // Not true: the guess goes, and nothing on the same notes is guessed again.
+  router.post('/memory-guesses/:id/reject', route((req, res, who) => {
+    jsonBody(req, []);
+    rejectGuess(who, String(req.params.id ?? ''));
+    res.status(204).end();
+  }));
+
   // ── a conversation's memory setting ──
 
   router.get('/nodes/:nodeId/memory-mode', route((req, res, who) => {
@@ -304,20 +326,9 @@ export function setupMemoryRoutes(): express.Router {
 
   // ── what a reply was based on (services/memory/replySources.ts) ──
 
-  // The memories and past-conversation turns these assistant messages repeated (V's too); another owner's conversation answers 404.
+  // The memories these assistant messages repeated (V's too); another owner's conversation answers 404.
   router.get('/nodes/:nodeId/memory-sources', refuseCheckinNode, route((req, res, who) => {
     res.json(replySourcesView(who, nodeIdParam(req), messageIdsParam(req)));
-  }));
-
-  // Don't recall: the turn is hidden from recall and barred from extraction; its conversation is unchanged.
-  router.post('/memory-recall/hide', route((req, res, who) => {
-    const body = jsonBody(req, ['docId']);
-    if (typeof body.docId !== 'number' || !Number.isSafeInteger(body.docId) || body.docId <= 0) {
-      throw new RequestError('docId must be the id of a past conversation turn');
-    }
-    const result = forgetRecalledTurn(recalledTurnScope(who.ownerUserId, body.docId));
-    if (!result) throw new MemoryError('not_found', 'Conversation turn not found');
-    res.json(result);
   }));
 
   return router;

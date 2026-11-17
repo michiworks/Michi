@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import {
-  AppWindow, ArrowDownUp, CalendarDays, Check, ChevronRight, CircleChevronDown, Clock, EyeOff, Folder, Gauge, Hash, Image, Link,
-  ListFilter, MessagesSquare, Plus, SquareCheck, Tags, Trash2, Type, type LucideIcon,
-} from 'lucide-react';
+  AppWindowIcon, CalendarIcon, ChatIcon, CheckIcon, ChevronRightIcon, CircleChevronDownIcon, ClockIcon, EyeOffIcon, FilterIcon, FolderIcon,
+  GaugeIcon, HashIcon, ImageIcon, LinkIcon, PlusIcon, SortIcon, SquareCheckIcon, TagsIcon, TrashIcon, TypeIcon, type IconComponent,
+} from '../../icons';
 import { isTaskCoreColumn, type MichiDatabase, type MichiDbColumn, type MichiDbColumnType, type MichiDbView } from 'michi-shared';
 import { DbMenuItem, DbPopover } from './DbPopover';
 import { titleColumn } from './dbModel';
@@ -19,28 +20,28 @@ import {
 import type { DbEdit } from './views/viewTypes';
 import { isImeComposing } from '../../../../lib/ime';
 
-export const TYPE_ICON: Record<MichiDbColumnType, LucideIcon> = {
-  text: Type,
-  number: Hash,
-  date: CalendarDays,
-  select: CircleChevronDown,
-  multi: Tags,
-  checkbox: SquareCheck,
-  url: Link,
-  progress: Gauge,
-  app: AppWindow,
-  image: Image,
-  threads: MessagesSquare,
+export const TYPE_ICON: Record<MichiDbColumnType, IconComponent> = {
+  text: TypeIcon,
+  number: HashIcon,
+  date: CalendarIcon,
+  select: CircleChevronDownIcon,
+  multi: TagsIcon,
+  checkbox: SquareCheckIcon,
+  url: LinkIcon,
+  progress: GaugeIcon,
+  app: AppWindowIcon,
+  image: ImageIcon,
+  threads: ChatIcon,
 };
 
 /** All threads' built-ins read by what they are, not their storage type. */
-export function columnIcon(db: Pick<MichiDatabase, 'id' | 'kind'>, column: MichiDbColumn): LucideIcon {
-  if (column.builtin && column.id === 'project') return Folder;
-  if (column.builtin && column.id === 'lastActivity') return Clock;
+export function columnIcon(db: Pick<MichiDatabase, 'id' | 'kind'>, column: MichiDbColumn): IconComponent {
+  if (column.builtin && column.id === 'project') return FolderIcon;
+  if (column.builtin && column.id === 'lastActivity') return ClockIcon;
   return TYPE_ICON[column.type];
 }
 
-const icon = (Icon: LucideIcon) => <Icon size={14} strokeWidth={1.7} />;
+const icon = (Icon: IconComponent) => <Icon />;
 
 /**
  * A column's menu (header click): rename at the top, then Type ▸, sort both
@@ -114,28 +115,30 @@ export function ColumnMenu({
         <DbMenuItem
           icon={icon(TYPE_ICON[column.type])}
           label="Type"
-          hint={<>{COLUMN_TYPE_LABEL[column.type]}<ChevronRight size={12} strokeWidth={1.8} /></>}
+          hint={<>{COLUMN_TYPE_LABEL[column.type]}<ChevronRightIcon size="sm" /></>}
           onSelect={(item) => setTypeMenu((open) => (open ? null : item))}
         />
       )}
-      <DbMenuItem icon={icon(ArrowDownUp)} label={`Sort ${sortLabel(db, column, 'asc')}`} onSelect={() => run(() => { void edit([sortByColumnOp(view, column, 'asc')], 'Sorted the view'); })} />
-      <DbMenuItem icon={icon(ArrowDownUp)} label={`Sort ${sortLabel(db, column, 'desc')}`} onSelect={() => run(() => { void edit([sortByColumnOp(view, column, 'desc')], 'Sorted the view'); })} />
+      <DbMenuItem icon={icon(SortIcon)} label={`Sort ${sortLabel(db, column, 'asc')}`} onSelect={() => run(() => { void edit([sortByColumnOp(view, column, 'asc')], 'Sorted the view'); })} />
+      <DbMenuItem icon={icon(SortIcon)} label={`Sort ${sortLabel(db, column, 'desc')}`} onSelect={() => run(() => { void edit([sortByColumnOp(view, column, 'desc')], 'Sorted the view'); })} />
       <DbMenuItem
-        icon={icon(ListFilter)}
+        icon={icon(FilterIcon)}
         label={`Filter by ${name}`}
         onSelect={() => run(() => { void edit([filterByColumnOp(view, column)], 'Added a filter'); onFilter?.(); })}
       />
       {!isTitle && (
-        <DbMenuItem icon={icon(EyeOff)} label="Hide in this view" onSelect={() => run(() => { void edit(hideColumnOp(db, view, column), `Hid ${name}`); })} />
+        <DbMenuItem icon={icon(EyeOffIcon)} label="Hide in this view" onSelect={() => run(() => { void edit(hideColumnOp(db, view, column), `Hid ${name}`); })} />
       )}
       {own && !core && (
         <>
           <div className="michi-db-pop__sep" role="separator" />
-          <DbMenuItem icon={icon(Trash2)} label="Delete column" danger onSelect={() => run(() => { void edit(deleteColumnOp(column), `Deleted column ${name}`); })} />
+          <DbMenuItem icon={icon(TrashIcon)} label="Delete column" danger onSelect={() => run(() => { void edit(deleteColumnOp(column), `Deleted column ${name}`); })} />
         </>
       )}
-      {typeMenu && (
+      {/* A type menu still open when the column menu closes leaves with it. */}
+      <AnimatePresence propagate>{typeMenu && (
         <TypeMenu
+          key="type"
           anchor={typeMenu}
           current={column.type}
           onClose={() => setTypeMenu(null)}
@@ -147,7 +150,7 @@ export function ColumnMenu({
             });
           }}
         />
-      )}
+      )}</AnimatePresence>
     </DbPopover>
   );
 }
@@ -162,7 +165,7 @@ function TypeMenu({ anchor, current, onPick, onClose }: { anchor: HTMLElement; c
           icon={icon(TYPE_ICON[t])}
           label={COLUMN_TYPE_LABEL[t]}
           checked={t === current}
-          hint={t === current ? <Check size={13} strokeWidth={2} /> : undefined}
+          hint={t === current ? <CheckIcon /> : undefined}
           onSelect={() => onPick(t)}
         />
       ))}
@@ -198,10 +201,10 @@ export function AddColumnButton({ db, view, edit }: { db: MichiDatabase; view: M
           setAnchor((open) => (open ? null : el));
         }}
       >
-        <Plus size={14} strokeWidth={1.8} aria-hidden="true" />
+        <PlusIcon aria-hidden="true" />
       </button>
-      {anchor && (
-        <DbPopover anchor={anchor} label="Add column" width={260} align="end" onClose={close}>
+      <AnimatePresence>{anchor && (
+        <DbPopover key="add-column" anchor={anchor} label="Add column" width={260} align="end" onClose={close}>
           <form className="michi-db-form" onSubmit={(event) => { event.preventDefault(); add(); }}>
             <input
               data-autofocus
@@ -217,7 +220,7 @@ export function AddColumnButton({ db, view, edit }: { db: MichiDatabase; view: M
                 const T = TYPE_ICON[t];
                 return (
                   <button key={t} type="button" className="michi-db-type" aria-pressed={type === t} onClick={() => setType(t)}>
-                    <T size={13} strokeWidth={1.7} aria-hidden="true" />
+                    <T aria-hidden="true" />
                     {COLUMN_TYPE_LABEL[t]}
                   </button>
                 );
@@ -228,7 +231,7 @@ export function AddColumnButton({ db, view, edit }: { db: MichiDatabase; view: M
             </div>
           </form>
         </DbPopover>
-      )}
+      )}</AnimatePresence>
     </>
   );
 }

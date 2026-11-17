@@ -10,8 +10,8 @@
   color: var(--term-fg);
   container-type: inline-size;
 }
-.terminal-trash *, .trash-preview *, .trash-menu * { box-sizing: border-box; letter-spacing: 0; }
-.terminal-trash svg, .trash-preview svg, .trash-menu svg { flex-shrink: 0; }
+.terminal-trash *, .trash-preview * { box-sizing: border-box; letter-spacing: 0; }
+.terminal-trash svg, .trash-preview svg { flex-shrink: 0; }
 .trash-content { max-width: 1000px; margin: 0 auto; }
 .trash-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 26px; }
 .trash-heading-title { display: flex; align-items: center; gap: 12px; }
@@ -53,8 +53,11 @@ button.trash-group-heading { cursor: pointer; }
 .trash-mobile-date { display: none; white-space: pre; }
 .trash-row-actions { display: flex; justify-content: flex-end; gap: 4px; }
 .trash-icon-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 34px; height: 34px; padding: 0; border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-muted); cursor: pointer; }
-.trash-icon-button:disabled { opacity: .4; cursor: wait; }
+.trash-icon-button:disabled { opacity: 0.5; cursor: not-allowed; }
 .trash-icon-button[aria-expanded='true'] { color: var(--term-fg); background: var(--trash-hover); }
+.trash-icon-button:not(:disabled, [aria-disabled='true']):active { background: var(--trash-hover, color-mix(in srgb, var(--term-fg) 4%, transparent)); }
+/* Blocked: its tip says why (TrashIconButton's blockedReason). */
+.trash-icon-button[aria-disabled='true'] { opacity: .5; cursor: not-allowed; }
 .trash-danger { color: var(--term-danger); }
 .trash-deleted-workspaces.has-threads { margin-top: 30px; padding-top: 17px; border-top: 1px solid var(--trash-line); }
 .trash-empty { min-height: 300px; padding: 32px 16px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
@@ -62,9 +65,6 @@ button.trash-group-heading { cursor: pointer; }
 .trash-empty h2 { margin: 0; font-size: var(--fs-2xl); font-weight: 500; }
 .trash-empty p { max-width: 290px; margin: 7px 0 0; font-size: var(--fs-md); color: var(--term-muted); overflow-wrap: anywhere; }
 .trash-empty > .ui-btn { margin-top: 13px; }
-.trash-menu .ui-menu-item { display: flex; align-items: center; width: 100%; border: 0; background: transparent; color: var(--term-fg); text-align: left; cursor: pointer; transition: none; }
-.trash-menu .ui-menu-item[data-danger='true'] { color: var(--term-danger-text); }
-.trash-menu .ui-menu-item:focus-visible { background: color-mix(in srgb, var(--term-fg) 5%, transparent); outline-offset: -2px; }
 .trash-loading, .trash-preview-loading { display: grid; gap: 14px; padding: 16px 8px; }
 /* Faint bars, so the softer skeleton pulse (index.css) rather than the message skeleton's .3 low. */
 .trash-loading span, .trash-preview-loading span { display: block; height: 48px; border-radius: var(--ui-radius); background: color-mix(in srgb, var(--term-fg) 6%, transparent); animation: t-skeleton-pulse-soft var(--t-loop) ease-in-out infinite; }
@@ -95,10 +95,9 @@ button.trash-group-heading { cursor: pointer; }
 .trash-preview footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 14px 24px; border-top: 1px solid var(--term-line); }
 .trash-preview footer > .ui-btn { display: inline-flex; align-items: center; gap: 7px; }
 @media (hover: hover) and (pointer: fine) {
-  .trash-group-heading:hover, .terminal-trash .trash-row:hover, .trash-icon-button:hover { background: var(--trash-hover, color-mix(in srgb, var(--term-fg) 4%, transparent)); }
-  .trash-row-actions .trash-icon-button:first-child:hover { background: var(--term-surface); color: var(--term-accent); }
+  .terminal-trash .trash-row:hover, .trash-icon-button:not(:disabled, [aria-disabled='true']):hover { background: var(--trash-hover, color-mix(in srgb, var(--term-fg) 4%, transparent)); }
+  .trash-row-actions .trash-icon-button:first-child:not(:disabled, [aria-disabled='true']):hover { background: var(--term-surface); color: var(--term-accent); }
   .trash-heading > .ui-btn:not(:disabled):hover { color: var(--term-danger-text); border-color: color-mix(in srgb, var(--term-danger) 30%, transparent); background: color-mix(in srgb, var(--term-danger) 4%, transparent); }
-  .trash-icon-button:active { transform: scale(.97); }
 }
 @container (max-width: 600px) {
   .trash-heading { align-items: flex-start; gap: 14px; margin-bottom: 19px; }
@@ -132,7 +131,7 @@ button.trash-group-heading { cursor: pointer; }
 @media (pointer: coarse) {
   .terminal-trash .trash-row { grid-template-columns: minmax(0, 1fr) 110px 92px; }
   .trash-icon-button { width: 44px; height: 44px; }
-  .trash-group-heading, .trash-search, .trash-sort select, .trash-heading > .ui-btn, .trash-menu .ui-menu-item { min-height: 44px; }
+  .trash-group-heading, .trash-search, .trash-sort select, .trash-heading > .ui-btn { min-height: 44px; }
   .trash-search button { width: 36px; height: 42px; }
   @container (max-width: 600px) { .terminal-trash .trash-row { grid-template-columns: minmax(0, 1fr) 92px; } }
 }

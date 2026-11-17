@@ -97,6 +97,7 @@ export const checkpointTurn = turns.checkpointTurn;
 export const finalizeTurn = turns.finalizeTurn;
 export const getSavedTurn = turns.getSavedTurn;
 export const getLatestTurn = turns.getLatestTurn;
+export const hasOtherTurn = turns.hasOtherTurn;
 export const recoverInterruptedTurns = turns.recoverInterruptedTurns;
 
 export type { ContextRow } from './repository/contexts';
@@ -120,6 +121,9 @@ export const loadWorkspaceMeta = loaders.loadWorkspaceMeta;
 export const loadAllWorkspacesMeta = loaders.loadAllWorkspacesMeta;
 export const loadTreeMessageSnapshot = loaders.loadTreeMessageSnapshot;
 export const loadTreeMessagePage = loaders.loadTreeMessagePage;
+export const MAX_PAGE_MESSAGES = loaders.MAX_PAGE_MESSAGES;
+export const loadMessageToolCalls = loaders.loadMessageToolCalls;
+export const MAX_TOOL_CALL_MESSAGES = loaders.MAX_TOOL_CALL_MESSAGES;
 
 export const setNodeExternalSessionId = runtimeBindings.setNodeExternalSessionId;
 /** @testonly */

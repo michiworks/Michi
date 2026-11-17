@@ -5,8 +5,8 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * reopened as it was, the two-poll resolution, snooze expiry, user actions
  * and a thumbs-down's effects), the event log cursor, runs and today's
  * budgeted turns, goals, cards (TTL, one decision, Apply / Dismiss through
- * cards.ts), briefs, the notice outbox (expiry, item validity, the backlog
- * fold) and its bus, delegations, the brief's focus, meta helpers, the
+ * cards.ts), the notice outbox (expiry, item validity, the backlog
+ * fold) and its bus, delegations, meta helpers, the
  * revision and the snapshot DTO. Polls and baselines: companionPolls.test.ts;
  * notes, rules, reminders, demotions, views and retention:
  * companionUserState.test.ts. Temp MICHI_DATA_DIR per test; times are
@@ -36,7 +36,6 @@ import {
   addGoal,
   editGoal,
   applyItemAction,
-  briefForDate,
   bumpRevision,
   checkinRunSends,
   closeDelegation,
@@ -53,8 +52,6 @@ import {
   failAppliedCard,
   failInterruptedRuns,
   finishRun,
-  getBrief,
-  getBriefCurate,
   getCard,
   getCompanionMeta,
   getCompanionMetaNumber,
@@ -64,7 +61,6 @@ import {
   getItem,
   getItemByKey,
   getRun,
-  insertBrief,
   insertCard,
   isSubtypeDemoted,
   latestEventSeq,
@@ -102,8 +98,6 @@ import {
   removeGoal,
   resolveItems,
   resolveMissing,
-  setBriefCardFeedback,
-  setBriefCurate,
   setCompanionMeta,
   setCompanionMetaNumber,
   setDelegationAutoSend,
@@ -204,7 +198,7 @@ describe('Companion repository', () => {
   test('the migration creates every Companion table, owned by the local agent owner', () => {
     const tables = (getDb().prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'companion_%' ORDER BY name").all() as Array<{ name: string }>)
       .map((row) => row.name);
-    assert.deepEqual(tables, ['companion_briefs', 'companion_cards', 'companion_checkin_jobs', 'companion_checkin_shadow', 'companion_delegations',
+    assert.deepEqual(tables, ['companion_cards', 'companion_checkin_jobs', 'companion_checkin_shadow', 'companion_delegations',
       'companion_events', 'companion_goals', 'companion_items', 'companion_notices', 'companion_reminders', 'companion_run_changes', 'companion_runs', 'companion_snapshots']);
     assert.ok(getDb().prepare("SELECT 1 FROM schema_migrations WHERE version = '0081_companion'").get());
     assert.ok(getDb().prepare("SELECT 1 FROM schema_migrations WHERE version = '0082_companion_v2'").get(), 'v2 is purely additive (DESIGN-v2 §7)');
@@ -590,15 +584,15 @@ describe('Companion repository', () => {
     recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 + 4000, outcome: 'skipped', finishedAt: T0 + 4000, detail: 'no new material' });
     recordRun({ kind: 'welcome', trigger: 'first-open', startedAt: T0 + 4500, outcome: 'spoke', finishedAt: T0 + 4600, turnId: 'cmp-w', messageId: 'm-welcome' });
     recordRun({ kind: 'worker_report', trigger: 'delegation', startedAt: T0 + 4700, outcome: 'preempted', finishedAt: T0 + 4800 });
-    const failed = startRun({ kind: 'brief', trigger: 'schedule', startedAt: T0 + 5000 });
+    const failed = startRun({ kind: 'wake', trigger: 'now-items', startedAt: T0 + 5000 });
     const reattached = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 + 5100, turnId: 'cmp-live' });
 
-    assert.equal(countTurnsSince(dayStart), 3, 'today: the wake, the running brief and heartbeat; polls, skipped runs, welcome and worker reports do not count');
+    assert.equal(countTurnsSince(dayStart), 3, 'today: the two wakes and the running heartbeat; polls, skipped runs, welcome and worker reports do not count');
     assert.equal(countTurnsSince(dayStart - 2 * HOUR), 4);
     assert.equal(countTurnsSince(dayStart, ['welcome', 'worker_report']), 2, 'the exempt kinds, counted on request');
     assert.equal(countTurnsSince(dayStart, []), 0);
-    assert.deepEqual(listRuns().map((run) => run.kind), ['heartbeat', 'brief', 'worker_report', 'welcome', 'heartbeat', 'wake', 'poll', 'heartbeat']);
-    assert.deepEqual(listRuns(2).map((run) => run.kind), ['heartbeat', 'brief']);
+    assert.deepEqual(listRuns().map((run) => run.kind), ['heartbeat', 'wake', 'worker_report', 'welcome', 'heartbeat', 'wake', 'poll', 'heartbeat']);
+    assert.deepEqual(listRuns(2).map((run) => run.kind), ['heartbeat', 'wake']);
     assert.equal(latestFinishedRun('poll')?.finishedAt, T0 + 1000);
     assert.equal(latestFinishedRun('poll', 'email'), null);
     assert.equal(latestFinishedRun('worker_report')?.outcome, 'preempted');
@@ -700,7 +694,7 @@ describe('Companion repository', () => {
         [{ kind: 'goal.add', payload: {} }, 400, 'invalid_request'],
         [{ kind: 'goal.add', payload: 'x' }, 400, 'invalid_request'],
         [{ kind: 'goal.update', payload: { goalId: 'cmg-missing', text: 'x' } }, 404, 'not_found'],
-        // Gone in P3: there is no heartbeat, and no quiet hours.
+        // Gone in P3: there is no heartbeat, and no quiet hours. The brief went in 2026-11-17.
         [{ kind: 'checkins.update', payload: { brief: { enabled: false } } }, 400, 'invalid_request'],
         [{ kind: 'quiet_hours.update', payload: { enabled: false } }, 400, 'invalid_request'],
         [{ kind: 'source.update', payload: { source: 'system', enabled: true } }, 400, 'invalid_request'],
@@ -762,40 +756,6 @@ describe('Companion repository', () => {
       const lateDismiss = proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Gone' } }, T0);
       assert.equal(dismissCompanionCard(lateDismiss.id, T0 + COMPANION_CARD_TTL_MS + 1).outcome, 'expired');
     });
-  });
-
-  test('briefs: one per date and origin, the Companion\'s preferred, card feedback, validation', () => {
-    const cards = [
-      { title: '2 CRs need you', body: 'CR-1 has changes requested.', itemIds: ['cmi-1', 'cmi-1'], action: { label: 'Ask', prompt: 'Tell me about CR-1' } },
-      { title: 'Pipeline blocked', body: 'MyService is blocked in Gamma.', itemIds: [], action: null },
-    ];
-    const fallback = insertBrief({ date: '2026-11-05', headline: '2 things need you today', cards, closing: "That's all for today.", origin: 'fallback', now: T0 })!;
-    assert.match(fallback.id, /^cmb-/);
-    assert.deepEqual(fallback.cards[0].itemIds, ['cmi-1'], 'item ids de-duplicated');
-    assert.equal(briefForDate('2026-11-05')?.id, fallback.id);
-    assert.equal(insertBrief({ date: '2026-11-05', headline: 'again', cards: [], closing: 'x', origin: 'fallback', now: T0 }), null, 'one per date and origin');
-    const llm = insertBrief({ date: '2026-11-05', headline: 'Your day', cards: cards.slice(1), closing: "That's all for today.", origin: 'llm', now: T0 + 1 })!;
-    assert.equal(briefForDate('2026-11-05')?.id, llm.id, 'the Companion\'s own brief wins');
-    assert.equal(insertBrief({ date: '2026-11-05', headline: 'second', cards: [], closing: 'x', origin: 'llm', now: T0 }), null, 'one llm brief a day');
-    assert.equal(briefForDate('2026-11-06'), null);
-
-    assert.deepEqual(setBriefCardFeedback(fallback.id, 1, 'down').cardFeedback, { 1: 'down' });
-    assert.deepEqual(setBriefCardFeedback(fallback.id, 0, 'up').cardFeedback, { 0: 'up', 1: 'down' });
-    assert.deepEqual(setBriefCardFeedback(fallback.id, 1, null).cardFeedback, { 0: 'up' });
-    assert.deepEqual(getBrief(fallback.id)?.cardFeedback, { 0: 'up' });
-    assert.throws(() => setBriefCardFeedback(fallback.id, 2, 'up'), companionError(400, 'invalid_request'));
-    assert.throws(() => setBriefCardFeedback(fallback.id, -1, 'up'), companionError(400, 'invalid_request'));
-    assert.throws(() => setBriefCardFeedback('cmb-missing', 0, 'up'), companionError(404, 'not_found'));
-
-    for (const bad of [
-      { date: '11/05/2026' }, { origin: 'human' }, { headline: '' }, { closing: 'x'.repeat(201) },
-      { cards: Array.from({ length: 8 }, () => cards[1]) }, { cards: [{ ...cards[1], title: '' }] },
-      { cards: [{ ...cards[1], itemIds: Array.from({ length: 11 }, (_, i) => `cmi-${i}`) }] },
-      { cards: [{ ...cards[1], action: { label: 'x'.repeat(41), prompt: 'p' } }] },
-    ]) {
-      assert.throws(() => insertBrief({ date: '2026-11-07', headline: 'h', cards, closing: 'c', origin: 'fallback', now: T0, ...bad } as never),
-        companionError(400, 'invalid_request'), JSON.stringify(bad).slice(0, 80));
-    }
   });
 
   describe('the bus', () => {
@@ -953,21 +913,15 @@ describe('Companion repository', () => {
     assert.equal(countTurnsSince(0), 0, 'outside the turn budget');
   });
 
-  test('the brief\'s focus and the meta helpers', () => {
-    assert.equal(setBriefCurate(' More on\nreviews '), 'More on reviews');
-    assert.equal(getBriefCurate(), 'More on reviews');
-    assert.throws(() => setBriefCurate('x'.repeat(501)), companionError(400, 'invalid_request'));
-    assert.equal(setBriefCurate(''), '');
-    assert.equal(getBriefCurate(), '');
-
+  test('the meta helpers', () => {
     assert.equal(getCompanionMetaNumber('companion:heartbeat_cursor'), null);
     setCompanionMetaNumber('companion:heartbeat_cursor', 42);
     assert.equal(getCompanionMetaNumber('companion:heartbeat_cursor'), 42);
-    setCompanionMeta('companion:catch_up', JSON.stringify({ line: 'x' }));
-    assert.equal(getCompanionMetaNumber('companion:catch_up'), null, 'not a number');
-    assert.deepEqual(JSON.parse(getCompanionMeta('companion:catch_up')!), { line: 'x' });
-    deleteCompanionMeta('companion:catch_up');
-    assert.equal(getCompanionMeta('companion:catch_up'), null);
+    setCompanionMeta('companion:headline', JSON.stringify({ line: 'x' }));
+    assert.equal(getCompanionMetaNumber('companion:headline'), null, 'not a number');
+    assert.deepEqual(JSON.parse(getCompanionMeta('companion:headline')!), { line: 'x' });
+    deleteCompanionMeta('companion:headline');
+    assert.equal(getCompanionMeta('companion:headline'), null);
     assert.throws(() => setCompanionMetaNumber('companion:last_wake_at', 1.5));
   });
 
@@ -987,12 +941,13 @@ describe('Companion repository', () => {
       }
     });
 
-    test('assembles the window: open items, counts, today\'s brief, pending cards, goals, notes, rules, reminders, activity, revision', () => {
+    test('assembles the window: open items, counts, pending cards, goals, notes, rules, reminders, activity, revision', () => {
       const conversation = { workspaceId: ASSISTANT.workspaceId, nodeId: ASSISTANT.nodeId, assistant: ASSISTANT };
       const empty = snapshotDto({ now: T0, conversation });
       assert.deepEqual(empty.settings, getCompanionSettings());
-      assert.deepEqual([empty.items, empty.cards, empty.goals, empty.activity, empty.brief, empty.catchUp, empty.notes, empty.revision],
-        [[], [], [], [], null, null, '', 0]);
+      assert.deepEqual([empty.items, empty.cards, empty.goals, empty.activity, empty.notes, empty.revision],
+        [[], [], [], [], '', 0]);
+      assert.deepEqual(['brief' in empty, 'catchUp' in empty], [false, false], 'the brief and its "Since you left" line went on 2026-11-17');
       assert.deepEqual([empty.notesRevision, empty.rules, empty.reminders, empty.demotedSubtypes], [0, '', [], []]);
       assert.equal('quietMessageIds' in empty, false, 'retired in v2: nothing in the conversation is hidden');
       assert.deepEqual(empty.counts, { needsYou: 0, newItems: 0, unreadMessages: 0 });
@@ -1006,8 +961,6 @@ describe('Companion repository', () => {
       proposeCompanionCard({ kind: 'goal.add', payload: { text: 'Old card' } }, T0 - COMPANION_CARD_TTL_MS);
       const goal = addGoal('Ship', T0);
       setNotesByUser('Watch CR-1');
-      insertBrief({ date: '2026-11-05', headline: 'Today', cards: [], closing: 'Done.', origin: 'fallback', now: T0 });
-      insertBrief({ date: '2026-11-04', headline: 'Yesterday', cards: [], closing: 'Done.', origin: 'llm', now: T0 - 24 * HOUR });
       for (let i = 0; i < 25; i++) recordRun({ kind: 'poll', trigger: 'michi', startedAt: T0 + i, outcome: 'ok', finishedAt: T0 + i });
       const spoke = recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 + 30, outcome: 'spoke', finishedAt: T0 + 31 });
       // What the unread badge counts: messages the check-ins posted (DESIGN-v2 §3.8), not runs that spoke.
@@ -1016,9 +969,8 @@ describe('Companion repository', () => {
         before: { status: 'new', snoozedUntil: null }, after: { status: 'snoozed', snoozedUntil: T0 + HOUR }, reason: 'CR-1 waits on its author', now: T0 + 31 });
       recordRun({ kind: 'wake', trigger: 'now-items', startedAt: T0 + 32, outcome: 'spoke', finishedAt: T0 + 33 });
       bumpRevision();
-      const catchUp = { awaySince: T0 - HOUR, returnedAt: T0, changedItemIds: [item.id], line: '1 needs you.' };
 
-      const full = snapshotDto({ now: T0 + MINUTE, conversation: null, catchUp });
+      const full = snapshotDto({ now: T0 + MINUTE, conversation: null });
       assert.deepEqual(full.items.map((i) => i.id), [item.id]);
       assert.deepEqual(full.counts, { needsYou: 1, newItems: 1, unreadMessages: 1 });
       assert.deepEqual(full.cards.map((c) => c.id), [card.id], 'only cards still waiting on the user');
@@ -1029,14 +981,12 @@ describe('Companion repository', () => {
       seedConversation({ nodeId: ASSISTANT.nodeId, workspaceId: ASSISTANT.workspaceId, title: 'Companion' });
       getDb().prepare("INSERT INTO messages(id,node_id,role,content,seq,created_at) VALUES ('m-quiet',?,'assistant','Let me check CR-1 first.',1,?)").run(ASSISTANT.nodeId, T0);
       assert.equal('quietMessageIds' in snapshotDto({ now: T0 + MINUTE, conversation }), false, 'nothing in the conversation is hidden any more');
-      assert.equal(full.brief?.headline, 'Today');
       assert.equal(full.activity.length, 20);
       assert.equal(full.activity[0].kind, 'wake', 'newest run first');
       assert.equal(full.activity.find((run) => run.id === spoke.id)?.postedMessageId, companionPostId(spoke.id), 'Activity links a run to its post');
       assert.equal('postedMessageId' in full.activity[0], false, 'a run that posted nothing has no link');
       assert.equal('turnId' in full.activity[0], false);
       assert.equal('messageId' in full.activity[0], false);
-      assert.deepEqual(full.catchUp, catchUp);
       assert.equal(full.conversation, null);
       assert.equal(full.revision, 1);
       assert.equal(full.status.lastCheckAt, T0 + 24);
@@ -1083,7 +1033,7 @@ describe('Companion repository', () => {
       assert.equal(stopDelegationAutoSend('cmd-missing'), null);
     });
 
-    test('the default status follows the settings, today\'s runs and the brief time', () => {
+    test('the default status follows the settings and today\'s runs', () => {
       const noon = new Date(2026, 10, 5, 12, 0, 0, 0).getTime();
       const settings = getCompanionSettings();
       const status = defaultCompanionStatus({ settings, now: noon, working: false });
@@ -1091,24 +1041,13 @@ describe('Companion repository', () => {
       assert.deepEqual(status.sources.map((s) => [s.kind, s.state]), COMPANION_CONFIGURABLE_SOURCES.map((kind) => [kind, 'pending']));
       assert.deepEqual(status.auth, { valid: null, expiresAt: null, checkedAt: null });
       assert.deepEqual([status.lastCheckAt, status.nextCheckAt, status.nextHeartbeatAt, status.turnsToday, status.working], [null, null, null, 0, false]);
-      // The engine's rule (briefSchedule.ts, B24): no brief before the first welcome, and a welcome after 09:00 is that day's look.
-      assert.equal(status.nextBriefAt, new Date(2026, 10, 6, 9, 0, 0, 0).getTime(), 'not met yet at noon: the first brief is Friday\'s');
+      assert.equal('nextBriefAt' in status, false, 'the morning brief and its time went on 2026-11-17');
       markCompanionWelcomeDone(new Date(2026, 10, 5, 10, 30).getTime());
-      assert.equal(defaultCompanionStatus({ settings, now: noon, working: false }).nextBriefAt, new Date(2026, 10, 6, 9, 0, 0, 0).getTime(), 'met at 10:30: none today');
-      markCompanionWelcomeDone(new Date(2026, 10, 4, 10, 30).getTime());
-      assert.equal(defaultCompanionStatus({ settings, now: noon, working: false }).nextBriefAt, new Date(2026, 10, 5, 9, 0, 0, 0).getTime(), 'met yesterday: today\'s is due, not written yet');
-      insertBrief({ date: '2026-11-05', headline: 'Today', cards: [], closing: 'Done.', origin: 'fallback', now: noon });
       setCompanionMetaNumber('companion:last_heartbeat_at', noon - 10 * MINUTE);
       recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: noon - 10 * MINUTE, outcome: 'spoke', finishedAt: noon - 9 * MINUTE });
       recordRun({ kind: 'welcome', trigger: 'first-open', startedAt: noon - 8 * MINUTE, outcome: 'spoke', finishedAt: noon - 7 * MINUTE });
       const later = defaultCompanionStatus({ settings, now: noon, working: true,
         sources: { cr: { state: 'ok', lastPolledAt: noon - MINUTE, nextPollAt: noon + 4 * MINUTE }, email: { nextPollAt: noon + MINUTE } } });
-      assert.equal(later.nextBriefAt, new Date(2026, 10, 6, 9, 0, 0, 0).getTime(), 'tomorrow once today has one');
-      const friday = new Date(2026, 10, 6, 12, 0, 0, 0).getTime();
-      insertBrief({ date: '2026-11-06', headline: 'Friday', cards: [], closing: 'Done.', origin: 'fallback', now: friday });
-      assert.equal(defaultCompanionStatus({ settings, now: friday, working: false }).nextBriefAt, new Date(2026, 10, 9, 9, 0, 0, 0).getTime(), 'Monday after Friday\'s');
-      assert.equal(defaultCompanionStatus({ settings, now: new Date(2026, 10, 7, 8, 0).getTime(), working: false }).nextBriefAt,
-        new Date(2026, 10, 9, 9, 0, 0, 0).getTime(), 'none on Saturday');
       assert.equal(later.nextHeartbeatAt, null, 'there is no heartbeat (D3)');
       assert.equal(later.turnsToday, 1, 'the welcome does not count against the budget');
       assert.equal(later.working, true);
@@ -1134,7 +1073,7 @@ describe('Companion repository', () => {
       const paused = defaultCompanionStatus({ settings: off, now: noon, working: false, sources: { cr: { nextPollAt: noon + 1 } } });
       assert.equal(paused.state, 'paused');
       assert.equal(paused.sources.find((s) => s.kind === 'email')?.state, 'disabled');
-      assert.deepEqual([paused.nextCheckAt, paused.nextHeartbeatAt, paused.nextBriefAt], [null, null, null], 'nothing is scheduled while paused');
+      assert.deepEqual([paused.nextCheckAt, paused.nextHeartbeatAt], [null, null], 'nothing is scheduled while paused');
       assert.equal(defaultCompanionStatus({ settings: { ...off, enabled: false }, now: noon, working: false }).state, 'paused',
         'the old off switch is Pause Michi: there is no "off" of its own');
 

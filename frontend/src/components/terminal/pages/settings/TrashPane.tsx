@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { Clock3, FileText, Folder, MessageSquare, Search, Trash2, Undo2, X } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { ChatIcon, ClockIcon, CloseIcon, DocIcon, FolderIcon, SearchIcon, TrashIcon, UndoIcon } from '../../icons';
 import { toast } from 'sonner';
 import { useChatStore, useChatNodesSnapshot } from '../../../../state/chatStore';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../../config/backendConnections';
@@ -16,6 +17,7 @@ import { workspaceAccent } from '../../workspaceAccent';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
 import { Button } from '../../../ui/controls';
 import { TrashIconButton, TrashMenu } from '../TrashControls';
+import { menuOpenKey } from '../../../ContextMenu';
 import {
   buildPageTrashEntries, buildTrashSections, entryDeletedAt, entryKey, entryRemainingDays, entryTitle, groupByBucket, groupsPastRetention,
   isExpiringSoon, relativeDeletion, type TrashEntry,
@@ -27,10 +29,11 @@ import {
   ConversationPreview, findRowButton, HistoryContents, HistoryDetail, HistoryEmpty, HistoryFilter, HistoryGroup, HistoryLoading, HistoryRow, HistorySearch,
   HistoryToolbar, SelectionBar,
 } from './HistoryList';
+import { useFocusAfterChange } from './useFocusAfterChange';
 
 type Filter = 'all' | TrashEntry['kind'] | 'expiring';
 const KIND_LABEL: Record<TrashEntry['kind'], string> = { thread: 'Thread', page: 'Page', workspace: 'Workspace' };
-const KIND_ICON = { thread: MessageSquare, page: FileText, workspace: Folder } as const;
+const KIND_ICON = { thread: ChatIcon, page: DocIcon, workspace: FolderIcon } as const;
 const RETENTION_DAYS = [7, 14, 30, 60, 90];
 
 const identityOf = (entry: Extract<TrashEntry, { kind: 'page' }>) =>
@@ -112,6 +115,10 @@ export function TrashPane({ onNav }: { onNav?: (page: PageId) => void }) {
   const menuEntry = menu ? lookup.get(menu.key) : undefined;
   const shownSelected = visible.filter(entry => selected.has(entryKey(entry)));
   const selecting = phone ? phoneSelecting : shownSelected.length > 0;
+  // Select gives way to the selection bar, and its Cancel or Escape to Select or the search.
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const selectRef = useRef<HTMLButtonElement>(null);
+  useFocusAfterChange(selecting, (now) => now ? cancelRef.current : phone ? selectRef.current : search.current);
 
   // An item restored or deleted elsewhere leaves the detail and the selection.
   useEffect(() => { if (detailKey && !lookup.has(detailKey)) setDetailKey(null); }, [detailKey, lookup]);
@@ -283,7 +290,7 @@ export function TrashPane({ onNav }: { onNav?: (page: PageId) => void }) {
       when={{ label: soon ? (days === 0 ? 'Due today' : `${plural(days, 'day')} left`) : relativeDeletion(deletedAt, now), soon,
         dateTime: deletedAt ? new Date(deletedAt).toISOString() : undefined, title: deletedAt ? `Deleted ${fullDate(deletedAt)}` : undefined }}
       selected={selected.has(key)} selecting={selecting} busy={busy} menuOpen={menu?.key === key}
-      primary={{ label: 'Restore', icon: Undo2 }}
+      primary={{ label: 'Restore', icon: UndoIcon }}
       onOpen={() => openDetail(entry)} onToggle={() => toggle(key)} onPrimary={() => restore([entry])}
       onMenu={anchor => setMenu(current => current?.key === key ? null : { key, anchor })} />;
   };
@@ -296,10 +303,10 @@ export function TrashPane({ onNav }: { onNav?: (page: PageId) => void }) {
 
   let list: React.ReactNode;
   if (!hydrated) list = <HistoryLoading label="Loading Trash" />;
-  else if (!total) list = <HistoryEmpty icon={Trash2} title="Trash is empty">
+  else if (!total) list = <HistoryEmpty icon={TrashIcon} title="Trash is empty">
     Deleted threads, pages and workspaces come here first. {ttl > 0 ? `Threads stay ${plural(ttl, 'day')}, then they’re deleted for good.` : 'Nothing is deleted until you empty Trash.'}
   </HistoryEmpty>;
-  else if (!visible.length) list = <HistoryEmpty icon={Search} title="No matching items"
+  else if (!visible.length) list = <HistoryEmpty icon={SearchIcon} title="No matching items"
     action={<Button size="sm" onClick={() => { setQuery(''); setFilter('all'); search.current?.focus(); }}>Show all items</Button>}>
     {needle ? `Nothing in Trash matches "${query.trim()}".` : 'Nothing of this kind is in Trash.'}
   </HistoryEmpty>;
@@ -320,10 +327,10 @@ export function TrashPane({ onNav }: { onNav?: (page: PageId) => void }) {
         control={<Button danger disabled={!hydrated || !total || busy} onClick={() => { void purge(); }}>{busy ? 'Working…' : 'Empty Trash…'}</Button>} />
     </SettingsSection>
     {hydrated && total > 0 && <HistoryToolbar selecting={selecting} onClearSelection={clearSelection}>
-      {selecting ? <SelectionBar count={shownSelected.length} total={visible.length} onCancel={clearSelection}
+      {selecting ? <SelectionBar count={shownSelected.length} total={visible.length} onCancel={clearSelection} cancelRef={cancelRef}
         onToggleAll={() => setSelected(shownSelected.length === visible.length ? new Set() : new Set(visible.map(entryKey)))}>
-        <Button disabled={busy || !shownSelected.length} onClick={() => restore(shownSelected)}><Undo2 size={13} aria-hidden="true" />Restore</Button>
-        <Button danger disabled={busy || !shownSelected.length} onClick={() => { void purge(shownSelected); }}><Trash2 size={13} aria-hidden="true" />{phone ? 'Delete…' : 'Delete permanently…'}</Button>
+        <Button disabled={busy || !shownSelected.length} onClick={() => restore(shownSelected)}><UndoIcon aria-hidden="true" />Restore</Button>
+        <Button danger disabled={busy || !shownSelected.length} onClick={() => { void purge(shownSelected); }}><TrashIcon aria-hidden="true" />{phone ? 'Delete…' : 'Delete permanently…'}</Button>
       </SelectionBar> : <>
         <HistorySearch inputRef={search} value={query} onChange={value => { setQuery(value); setMenu(null); }} label="Search Trash" placeholder="Search Trash" />
         <HistoryFilter label="Show" value={filter === 'expiring' ? 'all' : filter} onChange={value => setFilter(value)}
@@ -332,21 +339,21 @@ export function TrashPane({ onNav }: { onNav?: (page: PageId) => void }) {
           <option value="newest">Newest first</option>
           <option value="oldest">Oldest first</option>
         </select>}
-        {phone && <Button onClick={() => setPhoneSelecting(true)}>Select</Button>}
+        {phone && <Button ref={selectRef} onClick={() => setPhoneSelecting(true)}>Select</Button>}
       </>}
     </HistoryToolbar>}
     {hydrated && total > 0 && (filter === 'expiring'
-      ? <div className="settings-history__notice" role="status"><Clock3 size={15} aria-hidden="true" /><span>Showing threads deleted automatically within 3 days.</span><Button size="sm" onClick={() => setFilter('all')}>Show all</Button></div>
-      : expiring.length > 0 && <div className="settings-history__notice"><Clock3 size={15} aria-hidden="true" /><span>{plural(expiring.length, 'thread')} will be deleted automatically within 3 days.</span><Button size="sm" onClick={() => setFilter('expiring')}>Show them</Button></div>)}
+      ? <div className="settings-history__notice" role="status"><ClockIcon aria-hidden="true" /><span>Showing threads deleted automatically within 3 days.</span><Button size="sm" onClick={() => setFilter('all')}>Show all</Button></div>
+      : expiring.length > 0 && <div className="settings-history__notice"><ClockIcon aria-hidden="true" /><span>{plural(expiring.length, 'thread')} will be deleted automatically within 3 days.</span><Button size="sm" onClick={() => setFilter('expiring')}>Show them</Button></div>)}
     {error && <ErrorBar text={error} onDismiss={() => setError(null)} />}
     <div data-history-selecting={selecting || undefined}>{list}</div>
-    {menu && menuEntry && !busy && <TrashMenu anchor={menu.anchor} onClose={() => setMenu(null)} onPreview={() => openDetail(menuEntry)}
-      onRestore={() => restore([menuEntry])} onDelete={() => { void purge([menuEntry]); }} />}
+    <AnimatePresence>{menu && menuEntry && !busy && <TrashMenu key={menuOpenKey(menu)} anchor={menu.anchor} onClose={() => setMenu(null)}
+      onPreview={() => openDetail(menuEntry)} onRestore={() => restore([menuEntry])} onDelete={() => { void purge([menuEntry]); }} />}</AnimatePresence>
   </div>;
 }
 
 function ErrorBar({ text, onDismiss }: { text: string; onDismiss: () => void }) {
-  return <div className="settings-history__error" role="alert"><span>{text}</span><TrashIconButton icon={X} tooltip="Dismiss error" aria-label="Dismiss error" onClick={onDismiss} /></div>;
+  return <div className="settings-history__error" role="alert"><span>{text}</span><TrashIconButton icon={CloseIcon} tooltip="Dismiss error" aria-label="Dismiss error" onClick={onDismiss} /></div>;
 }
 
 function TrashItem({ entry, nodes, ttl, now, busy, onBack, onRestore, onDelete, onOpen }: {
@@ -383,25 +390,25 @@ function TrashItem({ entry, nodes, ttl, now, busy, onBack, onRestore, onDelete, 
   return <HistoryDetail backLabel="All items" onBack={onBack} icon={KIND_ICON[entry.kind]} kind={KIND_LABEL[entry.kind]} title={entryTitle(entry)} details={details}
     note={entry.kind === 'workspace' ? 'Restores to your workspaces' : `Restores to ${entry.project.name}`}
     actions={<>
-      <Button variant="primary" disabled={busy} onClick={onRestore}><Undo2 size={15} aria-hidden="true" />Restore {noun}</Button>
-      <Button danger disabled={busy} aria-label={`Delete ${entryTitle(entry)} permanently`} onClick={onDelete}><Trash2 size={15} aria-hidden="true" />Delete permanently…</Button>
+      <Button variant="primary" disabled={busy} onClick={onRestore}><UndoIcon aria-hidden="true" />Restore {noun}</Button>
+      <Button danger disabled={busy} aria-label={`Delete ${entryTitle(entry)} permanently`} onClick={onDelete}><TrashIcon aria-hidden="true" />Delete permanently…</Button>
     </>}>
     {entry.kind === 'thread' && <>
       <ConversationPreview key={entry.group.root.nodeId} node={entry.group.root}
         messageCount={nodeMessageCount(entry.group.root)} />
       {entry.group.members.length > 1 && <HistoryContents title="Nodes" items={entry.group.members.map(node => ({
-        id: node.nodeId, icon: MessageSquare, label: node.title || 'Untitled node', note: node.nodeId === entry.group.root.nodeId ? 'Root' : undefined,
+        id: node.nodeId, icon: ChatIcon, label: node.title || 'Untitled node', note: node.nodeId === entry.group.root.nodeId ? 'Root' : undefined,
       }))} />}
     </>}
     {entry.kind === 'page' && <>
-      <HistoryContents title="Pages" items={entry.page.pages.map(page => ({ id: page.id, icon: FileText, label: page.title, note: page.id === entry.page.root.id && entry.page.pages.length > 1 ? 'Root' : undefined }))} />
+      <HistoryContents title="Pages" items={entry.page.pages.map(page => ({ id: page.id, icon: DocIcon, label: page.title, note: page.id === entry.page.root.id && entry.page.pages.length > 1 ? 'Root' : undefined }))} />
       {entry.page.databases.length > 0 && <p className="settings-history__note">Includes {plural(entry.page.databases.length, 'database')} moved to Trash with this page.</p>}
     </>}
     {entry.kind === 'workspace' && (liveTrees.length + entry.groups.length > 0
       ? <HistoryContents title="Threads" items={[
-        ...liveTrees.map(tree => ({ id: tree.id, icon: MessageSquare, label: threadDisplayTitle(tree, nodes[tree.rootNodeId], 'Untitled thread'), note: tree.archivedAt ? 'Archived' : undefined })),
+        ...liveTrees.map(tree => ({ id: tree.id, icon: ChatIcon, label: threadDisplayTitle(tree, nodes[tree.rootNodeId], 'Untitled thread'), note: tree.archivedAt ? 'Archived' : undefined })),
         ...entry.groups.map(group => ({
-          id: group.id, icon: MessageSquare, note: 'In Trash',
+          id: group.id, icon: ChatIcon, note: 'In Trash',
           label: <button type="button" onClick={() => onOpen({ kind: 'thread', project: entry.project, group })}>{group.title}</button>,
         })),
       ]} />

@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkflowRunDtoV1 } from 'michi-shared';
 import type { ChatNodeState, SubagentInfo } from '../../state/chatTypes';
-import { AgentBlockStyleOverride, DEFAULT_PREFS } from '../../state/prefs';
+import { DEFAULT_PREFS } from '../../state/prefs';
 import { WorkflowDomainProvider, useOptionalWorkflowDomain, type WorkflowDomainApi } from '../../state/workflowDomain';
 import { PaneMessageList } from './PaneMessageList';
 import { OPEN_BACKGROUND_WORK_EVENT, type OpenBackgroundWorkDetail } from './backgroundWork/backgroundWorkEvents';
@@ -71,15 +71,6 @@ const run: WorkflowRunDtoV1 = {
   name: 'read-probe', status: 'running', nodes: [], log: [], actions: ['stop'], startedAt: 1, updatedAt: 1, revision: 1,
 };
 
-// jsdom has no PointerEvent, so fireEvent would drop pointerType.
-class TestPointerEvent extends MouseEvent {
-  pointerType: string;
-  constructor(type: string, init: PointerEventInit = {}) {
-    super(type, init);
-    this.pointerType = init.pointerType ?? '';
-  }
-}
-
 const noop = () => {};
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -104,21 +95,19 @@ function renderList(initial: ChatNodeState = node) {
     subscribe: vi.fn((_workspaceId, options) => { options.onRun(run); return () => {}; }),
   };
   const tree = (current: ChatNodeState) => (
-    <AgentBlockStyleOverride.Provider value="card">
-      <WorkflowDomainProvider api={api}>
-        <Subscribe workspaceId="obs-ws" />
-        <PaneMessageList
-          node={current}
-          prefs={DEFAULT_PREFS}
-          contentStyle={{}}
-          streaming={current.status === 'streaming'}
-          onRetryTurn={noop}
-          onEditUserMessage={noop}
-          onContinueFollowUp={noop}
-          onBranchFollowUp={noop}
-        />
-      </WorkflowDomainProvider>
-    </AgentBlockStyleOverride.Provider>
+    <WorkflowDomainProvider api={api}>
+      <Subscribe workspaceId="obs-ws" />
+      <PaneMessageList
+        node={current}
+        prefs={DEFAULT_PREFS}
+        contentStyle={{}}
+        streaming={current.status === 'streaming'}
+        onRetryTurn={noop}
+        onEditUserMessage={noop}
+        onContinueFollowUp={noop}
+        onBranchFollowUp={noop}
+      />
+    </WorkflowDomainProvider>
   );
   const view = render(tree(initial));
   return { ...view, rerenderWith: (next: ChatNodeState) => view.rerender(tree(next)) };
@@ -158,45 +147,18 @@ describe('PaneMessageList background work links', () => {
 
   // WebKit drops a tap whose hover makes something visible: a tap on the
   // card that faded in the message's actions only opened the run on the
-  // second tap. (The latest answer's actions are always shown, so this is
-  // about an earlier one.)
-  it('a tap on a workflow card opens the run without revealing the message actions', async () => {
+  // second tap. The card is a tap target, so index.css's touch rule leaves
+  // the actions alone. (The latest answer's actions are always shown, so this
+  // is about an earlier one.)
+  it('a tap on a workflow card opens the run, as a tap target that reveals no message actions', async () => {
     const requests = recordRequests();
-    vi.stubGlobal('PointerEvent', TestPointerEvent);
-    cleanups.push(() => {
-      fireEvent.pointerOver(document.body, { pointerType: 'mouse' });
-      vi.unstubAllGlobals();
-    });
     renderList(withLaterTurn);
     await act(async () => {});
     const block = document.querySelector('[data-msg-id="answer"]')!.firstElementChild as HTMLElement;
-    const actions = (block.querySelector('button[aria-label="copy message"]') as HTMLElement).parentElement!;
-    const tap = (target: Element) => {
-      fireEvent.pointerOver(target, { pointerType: 'touch' });
-      fireEvent.pointerDown(target, { pointerType: 'touch' });
-      fireEvent.mouseOver(target);
-      fireEvent.click(target);
-    };
-    tap(within(block).getByText('read-probe'));
+    const card = within(block).getByTestId('workflow-run-card');
+    expect(card.closest('[data-tap-target]')).not.toBeNull();
+    fireEvent.click(within(block).getByText('read-probe'));
     expect(requests).toHaveLength(1);
-    expect(actions.style.opacity).toBe('0');
-    // A tap on the reply's text still shows them.
-    tap(within(block).getByText('Delegated the audit.'));
-    expect(actions.style.opacity).toBe('1');
-  });
-
-  it('a mouse over the workflow card still shows the message actions', async () => {
-    vi.stubGlobal('PointerEvent', TestPointerEvent);
-    cleanups.push(() => { vi.unstubAllGlobals(); });
-    renderList(withLaterTurn);
-    await act(async () => {});
-    const block = document.querySelector('[data-msg-id="answer"]')!.firstElementChild as HTMLElement;
-    const actions = (block.querySelector('button[aria-label="copy message"]') as HTMLElement).parentElement!;
-    expect(actions.style.opacity).toBe('0');
-    const title = within(block).getByText('read-probe');
-    fireEvent.pointerOver(title, { pointerType: 'mouse' });
-    fireEvent.mouseOver(title);
-    expect(actions.style.opacity).toBe('1');
   });
 
   it('a later reply streaming does not re-render the message with the workflow card', async () => {

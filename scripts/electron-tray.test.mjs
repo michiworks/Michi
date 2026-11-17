@@ -48,7 +48,6 @@ function dto(overrides = {}) {
     badge: 0,
     needsYou: [],
     needsYouTotal: 0,
-    briefReady: false,
     revision: 7,
     ...overrides,
   };
@@ -164,7 +163,7 @@ test('the DTO is rebuilt from its known fields; the welcome is read from welcome
   assert.deepEqual(parsed, {
     displayName: 'Robin', enabled: true, paused: false, welcomeWanted: false, conversationWaiting: false,
     statusLine: { text: 'Watching · checked 2m ago', tone: 'ok' }, badge: 1, needsYou: needs(2), needsYouTotal: 2,
-    briefReady: false, revision: 7,
+    revision: 7,
   });
   assert.equal('welcomeDone' in parsed, false);
   // Even when the deprecated field disagrees (it never should), welcomeWanted decides.
@@ -265,7 +264,7 @@ test('the DTO: a malformed core is refused; the rest falls back so the menu stil
     assert.equal(tray.parseCompanionTrayDto(bad), null, JSON.stringify(bad)?.slice(0, 80));
   }
   const loose = tray.parseCompanionTrayDto(dto({
-    displayName: '  ', conversationWaiting: 'yes', briefReady: 1, needsYouTotal: 'many',
+    displayName: '  ', conversationWaiting: 'yes', needsYouTotal: 'many',
     needsYou: [
       ...needs(3),
       null, { id: '', title: 'x' }, { id: 'cmi-x', title: 7 }, { id: 'cmi-y', title: '   ' },
@@ -276,7 +275,7 @@ test('the DTO: a malformed core is refused; the rest falls back so the menu stil
   }));
   assert.equal(loose.displayName, 'Michi', 'the default name (DESIGN-v2 Q4)');
   assert.equal(loose.conversationWaiting, false);
-  assert.equal(loose.briefReady, false);
+  assert.equal('briefReady' in loose, false, 'the morning brief went on 2026-11-17');
   assert.equal(loose.needsYou.length, tray.TRAY_MAX_NEEDS_YOU);
   assert.equal(tray.TRAY_MAX_NEEDS_YOU, 5);
   assert.deepEqual(loose.needsYou[3], { id: 'cmi-z', title: 'Odd', isNew: false, target: { kind: 'companion', tab: 'today', itemId: 'cmi-z' } });
@@ -299,14 +298,13 @@ test('the DTO: titles, the name and the status are one clipped line each', () =>
 // ── The menu ─────────────────────────────────────────────────────────────────
 
 test('menu: the full menu, top to bottom, named by the display name, with no shortcut marks', () => {
-  const menu = tray.trayMenuModel(ready({ needsYou: needs(2), needsYouTotal: 9, badge: 2, briefReady: true }), { platform: 'darwin' });
+  const menu = tray.trayMenuModel(ready({ needsYou: needs(2), needsYouTotal: 9, badge: 2 }), { platform: 'darwin' });
   assert.deepEqual(labels(menu), [
     'Robin · Watching · checked 2m ago',
     'Needs you',
     '● CR-1 has 2 unresolved comments',
     '○ CR-2 has 2 unresolved comments',
     'View all in Today',
-    "Today's brief",
     '—',
     'Chat with Robin',
     'Check now',
@@ -324,7 +322,6 @@ test('menu: the full menu, top to bottom, named by the display name, with no sho
   }
   assert.deepEqual(entry(menu, '● CR-1 has 2 unresolved comments').action, { kind: 'open', target: needs(1)[0].target });
   assert.deepEqual(entry(menu, 'View all in Today').action, { kind: 'open', target: TODAY });
-  assert.deepEqual(entry(menu, "Today's brief").action, { kind: 'open', target: TODAY });
   assert.deepEqual(entry(menu, 'Chat with Robin').action, { kind: 'open', target: CHAT });
   assert.deepEqual(entry(menu, 'Check now').action, { kind: 'check-now' });
   assert.deepEqual(entry(menu, 'Turn Robin off').action, { kind: 'set-paused', paused: true });
@@ -347,8 +344,8 @@ test('menu: before the welcome the status row says hello; while the conversation
   assert.deepEqual(off[0], { type: 'item', label: 'Robin · Off', enabled: false, action: null });
 });
 
-test('menu: off (Q29) offers only Turn <name> on: no Needs you, brief, Chat with or Check now', () => {
-  const off = tray.trayMenuModel(ready({ paused: true, statusLine: { text: 'Off', tone: 'off' }, needsYou: needs(2), needsYouTotal: 2, briefReady: true, welcomeWanted: true }), { platform: 'darwin' });
+test('menu: off (Q29) offers only Turn <name> on: no Needs you, Chat with or Check now', () => {
+  const off = tray.trayMenuModel(ready({ paused: true, statusLine: { text: 'Off', tone: 'off' }, needsYou: needs(2), needsYouTotal: 2, welcomeWanted: true }), { platform: 'darwin' });
   assert.deepEqual(labels(off), ['Robin · Off', '—', 'Turn Robin on', '—', 'Open Michi', 'Settings…', '—', 'Quit Michi']);
   assert.deepEqual(entry(off, 'Turn Robin on').action, { kind: 'set-paused', paused: false });
 

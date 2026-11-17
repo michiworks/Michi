@@ -16,7 +16,10 @@ import { WorkflowApprovals } from './WorkflowApprovals';
 import type { WorkflowPendingKind } from '../../../state/workflowDomain';
 import { FadeOnChange, RevealOnShow } from '../agentBlockMotion';
 import { useNow } from '../../../hooks/useNow';
+import { buttonAt, useFocusAfterAction } from '../../../hooks/useFocusAfterAction';
 import { cardClickOpens } from '../../../lib/cardClick';
+import { WorkflowIcon } from '../icons';
+import { SEGMENT_COLOR } from '../backgroundWork/workCardParts';
 import './runChip.css';
 import './WorkflowRunCard.css';
 
@@ -29,32 +32,31 @@ import './WorkflowRunCard.css';
  * a click anywhere on it opens the run, and its › is the keyboard target.
  */
 
-const textButton: React.CSSProperties = {
-  border: 0,
-  padding: 0,
-  background: 'transparent',
-  font: 'inherit',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-};
-
-export function WorkflowActions({ run, pending, onAction }: {
+export function WorkflowActions({ run, pending, onAction, focusFallback }: {
   run: WorkflowRunDtoV1;
   pending?: WorkflowPendingKind;
   onAction?: (action: WorkflowAction) => void;
+  /** Where focus goes when the action pressed leaves no control in its place (Stop). */
+  focusFallback?: () => HTMLElement | null;
 }) {
+  const focusAfter = useFocusAfterAction(!!pending);
   if (!onAction || run.actions.length === 0) return null;
   return (
     <>
-      {run.actions.map((action) => (
+      {run.actions.map((action, index) => (
         <button
           key={action}
           type="button"
           disabled={!!pending}
-          onClick={() => onAction(action)}
+          onClick={(event) => {
+            const row = event.currentTarget.parentElement;
+            focusAfter(() => buttonAt(row, index) ?? focusFallback?.());
+            onAction(action);
+          }}
           aria-label={`${ACTION_LABEL[action]} workflow ${run.name}`}
-          className="t-hover-fg"
-          style={{ ...textButton, color: action === 'stop' ? 'var(--term-mid)' : 'var(--term-muted)', opacity: pending && pending !== action ? 0.5 : 1 }}
+          aria-busy={pending === action || undefined}
+          className="workflow-action"
+          data-action={action}
         >
           {pending === action ? `${ACTION_LABEL[action]}…` : ACTION_LABEL[action]}
         </button>
@@ -77,8 +79,8 @@ function ProgressRow({ run }: { run: WorkflowRunDtoV1 }) {
             title={`${node.title} · ${node.status}`}
             className={node.status === 'running' ? 'workflow-run-card__segment term-dot-i--run' : 'workflow-run-card__segment'}
             style={{
-              background: node.status === 'queued' || node.status === 'skipped' ? 'var(--term-line)' : NODE_STATUS_COLOR[node.status],
-              opacity: node.status === 'completed' ? 0.55 : 1,
+              background: node.status === 'completed' ? SEGMENT_COLOR.completed
+                : node.status === 'queued' || node.status === 'skipped' ? 'var(--term-line)' : NODE_STATUS_COLOR[node.status],
             }}
           />
         ))}
@@ -109,13 +111,13 @@ export function WorkflowRunCard({ run, pending, error, onOpen, onAnswer }: {
       data-testid="workflow-run-card"
       aria-label={`Workflow ${run.name}, ${needsYou ? 'needs approval' : WORKFLOW_STATUS_LABEL[run.status]}`}
       className={onOpen ? 'workflow-run-card workflow-run-card--opens' : 'workflow-run-card'}
-      // A tap here opens the run; it does not reveal the message's actions (MessageBlock's TAP_CONTROL).
+      // A tap here opens the run; it does not reveal the message's actions (index.css's touch rule for them).
       data-tap-target={onOpen ? 'true' : undefined}
       onClick={onOpen ? (event) => { if (cardClickOpens(event)) onOpen(); } : undefined}
     >
       <div className="workflow-run-card__top">
         <span className="workflow-run-card__eyebrow">
-          <span aria-hidden className="workflow-run-card__icon">⧉</span>
+          <WorkflowIcon size="sm" className="workflow-run-card__icon" />
           Workflow
         </span>
         {/* A new status fades in in its colour; sections that appear later grow in. */}
@@ -138,7 +140,7 @@ export function WorkflowRunCard({ run, pending, error, onOpen, onAnswer }: {
         <div data-testid="workflow-now" className="workflow-run-card__now">
           <span aria-hidden className="workflow-run-card__caret">❯</span>
           {doing?.step && <span data-testid="workflow-now-step" className="workflow-run-card__step">{doing.step}</span>}
-          <span className="workflow-run-card__doing" style={run.status === 'paused' ? { color: 'var(--term-select)' } : undefined}>{doing?.detail}</span>
+          <span className="workflow-run-card__doing" style={run.status === 'paused' ? { color: 'var(--term-waiting-text)' } : undefined}>{doing?.detail}</span>
         </div>
       </RevealOnShow>
       <RevealOnShow show={needsYou}>

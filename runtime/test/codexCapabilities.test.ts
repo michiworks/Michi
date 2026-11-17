@@ -26,6 +26,7 @@ interface FakeOptions {
   accountRead?: unknown;
   modeList?: unknown | Error;
   resumeMode?: string | null;
+  models?: unknown[];
 }
 
 function fakeAppServer(options: FakeOptions = {}) {
@@ -62,7 +63,7 @@ function fakeAppServer(options: FakeOptions = {}) {
           return { turn: { id } };
         }
         case 'model/list':
-          return { data: [] };
+          return { data: options.models ?? [] };
         case 'config/read':
           return { config: { mcp_servers: {} }, origins: {} };
         case 'mcpServerStatus/list':
@@ -271,6 +272,41 @@ describe('Codex collaboration modes', () => {
       sessionId: 'chat-child', cwd: os.tmpdir(), model: 'test-model', parentChatId: 'chat-parent', sourceNativeSessionId: parent.threadId,
     });
     assert.deepEqual(prefix.mock.calls.map((call) => call.arguments[0].nativeForkParentNodeId), [undefined, undefined, 'chat-parent']);
+  });
+});
+
+describe('Codex speed tiers', () => {
+  // The model/list shape codex 0.169 answers on Amazon Bedrock (serviceTiers per model).
+  const ultrafast = { id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' };
+  const models = [
+    { id: 'fast-model', displayName: 'Fast', description: '', hidden: false, isDefault: true, supportedReasoningEfforts: [], defaultReasoningEffort: 'medium', serviceTiers: [ultrafast] },
+    { id: 'plain-model', displayName: 'Plain', description: '', hidden: false, isDefault: false, supportedReasoningEfforts: [], defaultReasoningEffort: 'medium', serviceTiers: [] },
+  ];
+
+  it('lists the tiers a model offers, and none for a model without', async (t) => {
+    const { runtime } = codexRuntime(t, { models });
+    const listed = await runtime.listModels();
+    assert.deepEqual(listed.find((model) => model.id === 'fast-model')?.serviceTiers, [ultrafast]);
+    assert.equal('serviceTiers' in listed.find((model) => model.id === 'plain-model')!, false);
+  });
+
+  it('sends the chat\'s tier while its model lists it, standard otherwise, and leaves a model without tiers alone', async (t) => {
+    let chosen: string | null | undefined = 'ultrafast';
+    const host = createDefaultHost({ logLevel: 'silent', serviceTier: () => chosen });
+    const { server, runtime } = codexRuntime(t, { models, host });
+    await runtime.listModels();
+    const fast = await runtime.newSession({ sessionId: 'chat-a', cwd: os.tmpdir(), model: 'fast-model' }) as CodexSession;
+    assert.equal((await runTurn(server, fast)).turnStart.params.serviceTier, 'ultrafast');
+    chosen = null;
+    assert.equal((await runTurn(server, fast)).turnStart.params.serviceTier, 'default', 'a tier in the Codex config cannot apply unseen');
+    chosen = 'priority';
+    assert.equal((await runTurn(server, fast)).turnStart.params.serviceTier, 'default', 'a tier the model does not list');
+    chosen = undefined;
+    assert.equal('serviceTier' in (await runTurn(server, fast)).turnStart.params, false, 'no chat: the Codex config decides');
+
+    chosen = 'ultrafast';
+    const plain = await runtime.newSession({ sessionId: 'chat-b', cwd: os.tmpdir(), model: 'plain-model' }) as CodexSession;
+    assert.equal('serviceTier' in (await runTurn(server, plain)).turnStart.params, false);
   });
 });
 

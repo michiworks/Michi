@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import BrowserLauncher from './BrowserLauncher';
 
 const state = vi.hoisted(() => ({
@@ -13,7 +13,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.panes.openPanes = ['chat'];
   state.panes.paneItems = {};
+  vi.stubGlobal('electron', { browserCreate: vi.fn() });
 });
+
+afterEach(() => vi.unstubAllGlobals());
 
 function setup(width: number) {
   const result = render(<div className="terminal-shell"><BrowserLauncher /><div className="terminal-dashboard"><div data-node-id="chat" /></div></div>);
@@ -39,5 +42,11 @@ describe('BrowserLauncher', () => {
     expect(state.focusPane).toHaveBeenCalledWith('web');
     expect(state.openBrowserPane).not.toHaveBeenCalled();
     expect(state.setPaneWidth).not.toHaveBeenCalled();
+  });
+
+  it('is absent outside the desktop app, where no native browser surface exists', () => {
+    vi.stubGlobal('electron', undefined);
+    setup(340);
+    expect(screen.queryByRole('button', { name: 'Browser' })).toBeNull();
   });
 });

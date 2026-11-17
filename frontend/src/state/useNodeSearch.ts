@@ -86,13 +86,13 @@ function mergeNodeSearchAnswers(
  * snippets with `<mark>` tags for highlight rendering. Hits show as each
  * backend answers. A remote that fails or times out adds nothing and is
  * never reported; only a failed local search with nothing found elsewhere
- * is an error.
+ * is an error. A new `attempt` (a Retry) searches again.
  */
-export function useNodeSearch(debouncedQuery: string, connectionIds: readonly string[] = []): NodeSearchState {
+export function useNodeSearch(debouncedQuery: string, connectionIds: readonly string[] = [], attempt = 0): NodeSearchState {
   const q = debouncedQuery.trim();
   const backends = [LOCAL_BACKEND_CONNECTION_ID,
     ...[...new Set(connectionIds)].filter((id) => id !== LOCAL_BACKEND_CONNECTION_ID).sort()].join('\n');
-  const key = JSON.stringify([backends, q]);
+  const key = JSON.stringify([backends, q, attempt]);
   const [snapshot, setSnapshot] = useState<{ key: string; value: NodeSearchState }>({ key, value: EMPTY });
 
   useEffect(() => {

@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveBashShell } from "../src/agents/tools/bash";
+import { executeBash, resolveBashShell } from "../src/agents/tools/bash";
 
 describe("resolveBashShell", () => {
   test("Windows prefers a PATH bash when present", () => {
@@ -23,4 +23,12 @@ describe("resolveBashShell", () => {
       else process.env.ComSpec = previous;
     }
   });
+});
+
+test("bash output keeps a character that two reads split", { skip: process.platform === "win32" }, async () => {
+  // The first two bytes of 中, a pause so they arrive as a read of their own, then the last byte.
+  const result = await executeBash({ command: "printf '\\344\\270'; sleep 0.3; printf '\\255\\n'" }, "/tmp");
+  const output = result.content[0];
+  assert.equal(output.type, "text");
+  assert.match(output.type === "text" ? output.text : "", /\n\n中/);
 });

@@ -258,7 +258,7 @@ describe('TPane drag-and-drop', () => {
 
   it('removes its web file picker when it unmounts', async () => {
     const view = render(<TPane nodeId="n1" />);
-    await act(async () => { fireEvent.click(screen.getByTitle('Attach file')); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Attach file' })); });
     expect(document.querySelector('input[type="file"]')).not.toBeNull();
     view.unmount();
     expect(document.querySelector('input[type="file"]')).toBeNull();

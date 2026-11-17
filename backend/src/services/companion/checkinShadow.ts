@@ -6,7 +6,7 @@
  * It keeps its own planner state and its own cursors, read from the database
  * once and moved only by its own check-ins, so what the coordinator covers
  * between two ticks does not hide an opportunity from it, and it writes
- * nothing the coordinator reads: no cursor, no delegation, no brief. A check-in
+ * nothing the coordinator reads: no cursor and no delegation. A check-in
  * it would start holds its lane until the coordinator's twin (the same kind,
  * started within a tick or so) ends, and then covers what the twin's outcome
  * would have: the lane runs the same model on the same material. With no twin
@@ -15,7 +15,7 @@
  *
  * reconcileCheckinShadow compares those rows with the check-ins the
  * coordinator started (companion_runs with a turn), for the local report
- * (scripts/checkin-shadow-report.ts): after seven days with five briefs the
+ * (scripts/checkin-shadow-report.ts): over a week of heartbeats and wakes the
  * two should agree, each start within a tick or so of the other's.
  */
 
@@ -40,7 +40,7 @@ export const CHECKIN_SHADOW_TOLERANCE_MS = 60_000;
 const SHADOW_TURN_CAP_MS = 5 * 60_000;
 
 export type CheckinShadowKind = CheckinPlan['kind'];
-const KINDS: readonly CheckinShadowKind[] = ['worker_report', 'wake', 'brief', 'heartbeat'];
+const KINDS: readonly CheckinShadowKind[] = ['worker_report', 'wake', 'heartbeat'];
 type SettleOutcome = Parameters<typeof settleCheckin>[0]['outcome'];
 const SETTLE_OUTCOMES: ReadonlySet<string> = new Set<SettleOutcome>(['spoke', 'quiet', 'error', 'skipped', 'preempted', 'superseded']);
 
@@ -49,7 +49,7 @@ export function recordCheckinShadowStart(kind: CheckinShadowKind, at: number, da
   database.prepare('DELETE FROM companion_checkin_shadow WHERE owner_user_id = ? AND planned_at < ?').run(LOCAL_AGENT_OWNER_ID, Math.floor(at - SHADOW_KEPT_MS));
 }
 
-const PRIMED: readonly CompanionMetaKey[] = ['companion:wake_cursor', 'companion:brief_cursor', 'companion:last_wake_at', 'companion:last_heartbeat_at'];
+const PRIMED: readonly CompanionMetaKey[] = ['companion:wake_cursor', 'companion:last_wake_at', 'companion:last_heartbeat_at'];
 
 /**
  * The shadow's cursors: the database's when first seen, its own check-ins'
@@ -58,12 +58,10 @@ const PRIMED: readonly CompanionMetaKey[] = ['companion:wake_cursor', 'companion
  */
 class ShadowCursors implements CheckinCursors {
   private readonly values = new Map<CompanionMetaKey, number | null>();
-  private readonly briefs = new Map<string, boolean>();
   private readonly reported = new Map<string, string | null>();
 
-  prime(now: number): void {
+  prime(): void {
     for (const key of PRIMED) this.meta(key);
-    this.briefToday(localDateKey(now));
     const open = listOpenDelegations();
     for (const delegation of open) this.lastReported(delegation);
     const ids = new Set(open.map((delegation) => delegation.nodeId));
@@ -77,20 +75,6 @@ class ShadowCursors implements CheckinCursors {
 
   set(key: CompanionMetaKey, value: number): void {
     this.values.set(key, value);
-  }
-
-  briefToday(date: string): boolean {
-    if (!this.briefs.has(date)) {
-      // Only today's matters: a day it has moved past is forgotten.
-      this.briefs.clear();
-      this.briefs.set(date, dbCheckinCursors.briefToday(date));
-    }
-    return this.briefs.get(date)!;
-  }
-
-  briefDone(date: string): void {
-    this.briefs.clear();
-    this.briefs.set(date, true);
   }
 
   lastReported(delegation: CompanionDelegationRecord): string | null {
@@ -129,13 +113,13 @@ export class CheckinShadow {
    * before the lane's first look does not move a cursor the shadow has yet
    * to read. Reads only.
    */
-  prime(now: number): void {
-    this.cursors.prime(now);
+  prime(): void {
+    this.cursors.prime();
   }
 
   /** One tick: the kind the lane would start now, recorded; null while its check-in runs or when nothing would start. */
   look(now: number): CheckinShadowKind | null {
-    this.cursors.prime(now);
+    this.cursors.prime();
     if (this.pending && !this.settle(now)) return null;
     const look = lookForCheckin({
       now, settings: getCompanionSettings(now), gates: this.deps.gates(now), state: this.state, michi: this.deps.michi, act: false, cursors: this.cursors,
@@ -160,13 +144,11 @@ export class CheckinShadow {
     const endedAt = twin?.finishedAt != null && twin.finishedAt <= now ? twin.finishedAt : now;
     settleCheckin({
       plan, outcome, now: endedAt, state: this.state,
-      briefPublished: () => true,
       effects: {
         advance: (key, cursor) => this.cursors.set(key, Math.max(this.cursors.meta(key) ?? 0, cursor)),
         setMeta: (key, value) => this.cursors.set(key, value),
         markReported: (nodeId, messageId) => this.cursors.markReported(nodeId, messageId),
         reportByNotice: (reports) => { for (const report of reports) this.cursors.markReported(report.delegation.nodeId, report.messageId); },
-        briefSettled: (brief) => this.cursors.briefDone(brief.date),
       },
     });
     this.pending = null;
@@ -179,8 +161,8 @@ export interface CheckinShadowStart { kind: CheckinShadowKind; at: number }
 export interface CheckinShadowDay {
   date: string;
   counts: Record<CheckinShadowKind, { shadow: number; coordinator: number }>;
-  /** The day's first brief start of each side; null when it had none. */
-  brief: { shadow: number | null; coordinator: number | null };
+  /** The day's first heartbeat start of each side; null when it had none. */
+  firstHeartbeat: { shadow: number | null; coordinator: number | null };
 }
 
 export interface CheckinShadowReport {
@@ -237,9 +219,9 @@ export function reconcileCheckinShadow(database: DatabaseSync, from: number, to:
     const date = localDateKey(at);
     let entry = days.get(date);
     if (!entry) {
-      entry = { date, counts: { worker_report: { shadow: 0, coordinator: 0 }, wake: { shadow: 0, coordinator: 0 }, brief: { shadow: 0, coordinator: 0 },
+      entry = { date, counts: { worker_report: { shadow: 0, coordinator: 0 }, wake: { shadow: 0, coordinator: 0 },
         heartbeat: { shadow: 0, coordinator: 0 } },
-        brief: { shadow: null, coordinator: null } };
+        firstHeartbeat: { shadow: null, coordinator: null } };
       days.set(date, entry);
     }
     return entry;
@@ -247,12 +229,12 @@ export function reconcileCheckinShadow(database: DatabaseSync, from: number, to:
   for (const start of shadow) {
     const entry = day(start.at);
     entry.counts[start.kind].shadow += 1;
-    if (start.kind === 'brief') entry.brief.shadow ??= start.at;
+    if (start.kind === 'heartbeat') entry.firstHeartbeat.shadow ??= start.at;
   }
   for (const start of coordinator) {
     const entry = day(start.at);
     entry.counts[start.kind].coordinator += 1;
-    if (start.kind === 'brief') entry.brief.coordinator ??= start.at;
+    if (start.kind === 'heartbeat') entry.firstHeartbeat.coordinator ??= start.at;
   }
   return { from, to, toleranceMs, days: [...days.values()].sort((a, b) => a.date.localeCompare(b.date)), matched, shadowOnly, coordinatorOnly };
 }

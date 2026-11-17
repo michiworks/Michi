@@ -93,8 +93,8 @@ describe('forgeries are still caught, on the folded copy, rewriting only their o
       '../src/services/companion/prompts.ts',
       '../src/services/companion/turnContext.ts',
       '../src/agents/preamble.ts',
-      // The context a restored turn writes into the user's message (H-review #8).
-      '../../frontend/src/state/turnInterruption.ts',
+      // The context a restored or continued turn writes into the user's message (H-review #8).
+      '../../shared/src/turnContinuation.ts',
     ].map((file) => fs.readFileSync(path.join(__dirname, file), 'utf8'));
     // Each label in the shape Michi writes it: closed (`[ITEM]`), with the dash (`[ITEMS — …`) or a colon (`[TITLE: …`).
     const labels = new Set<string>();

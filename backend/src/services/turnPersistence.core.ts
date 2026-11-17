@@ -125,24 +125,29 @@ function withStoredSubagentEnds(db: DbPrimitives, snapshot: DurableTurnSnapshot)
   return subagents === roster ? message : { ...message, subagents };
 }
 
+/** Writes the assistant row; returns the bytes of its content and JSON columns. */
 function writeAssistantSnapshot(
   db: DbPrimitives,
   snapshot: DurableTurnSnapshot,
   content = snapshot.assistantMessage.content,
-): void {
+): number {
   const message = withStoredSubagentEnds(db, snapshot);
+  const blocks = message.blocks.length > 0 ? JSON.stringify(message.blocks) : null;
+  const toolCalls = message.toolCalls.length > 0 ? JSON.stringify(message.toolCalls) : null;
+  const metadata = durableMessageMetadata(message);
   const result = db.run(
     MESSAGE_SQL.updateAssistant,
     content,
-    message.blocks.length > 0 ? JSON.stringify(message.blocks) : null,
-    message.toolCalls.length > 0 ? JSON.stringify(message.toolCalls) : null,
-    durableMessageMetadata(message),
+    blocks,
+    toolCalls,
+    metadata,
     message.id,
     snapshot.nodeId,
   );
   if (result.changes !== 1) {
     throw new Error(`assistant message ${message.id} is missing for turn ${snapshot.turnId}`);
   }
+  return [content, blocks, toolCalls, metadata].reduce((bytes, column) => bytes + (column ? Buffer.byteLength(column) : 0), 0);
 }
 
 /** Group accepted steering inputs immediately before their existing reply. */
@@ -286,11 +291,22 @@ function beginTurnRows(
   return getTurnRow(db, snapshot.turnId)!;
 }
 
+/** What coreCheckpointTurn did. */
+export interface CoreCheckpointResult {
+  turn: CoreTurnRow;
+  /**
+   * Bytes of the assistant row it rewrote (content, blocks, tool calls,
+   * metadata), which pace the turn's next checkpoint; null when it wrote
+   * nothing.
+   */
+  payloadBytes: number | null;
+}
+
 /**
  * Persist a bounded partial snapshot without marking the turn terminal.
  * No-op if the snapshot's seq is not ahead of the stored watermark.
  */
-export function coreCheckpointTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot): CoreTurnRow {
+export function coreCheckpointTurn(db: DbPrimitives, snapshot: DurableTurnSnapshot): CoreCheckpointResult {
   return db.runInTransaction(() => {
     const row = getTurnRow(db, snapshot.turnId);
     if (!row) throw new Error(`turn ${snapshot.turnId} has not begun`);
@@ -298,15 +314,15 @@ export function coreCheckpointTurn(db: DbPrimitives, snapshot: DurableTurnSnapsh
       row as { node_id: unknown; assistant_message_id: unknown; user_message_id: unknown },
       snapshot,
     );
-    if (row.status !== 'active' || snapshot.lastAppliedSeq < (row.last_seq as number)) return row;
+    if (row.status !== 'active' || snapshot.lastAppliedSeq < (row.last_seq as number)) return { turn: row, payloadBytes: null };
 
     writeSteeredMessages(db, snapshot);
-    writeAssistantSnapshot(db, snapshot, checkpointTurnContent(snapshot));
+    const payloadBytes = writeAssistantSnapshot(db, snapshot, checkpointTurnContent(snapshot));
     writeTurnNodeProjection(db, snapshot, false);
 
     const now = Date.now();
     db.run(TURN_SQL.updateCheckpoint, snapshot.lastAppliedSeq, now, now, snapshot.turnId);
-    return getTurnRow(db, snapshot.turnId)!;
+    return { turn: getTurnRow(db, snapshot.turnId)!, payloadBytes };
   });
 }
 

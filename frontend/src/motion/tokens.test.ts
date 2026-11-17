@@ -18,6 +18,7 @@ describe('motion tokens', () => {
   it('keep exits shorter than entrances, like pane motion', () => {
     expect(PANE_EXIT_MS).toBeLessThan(PANE_ENTER_MS);
     expect(DUR.exit).toBeLessThan(DUR.enter);
+    expect(DUR.dismiss).toBeLessThan(DUR.brief);
     expect(DUR.collapse).toBeLessThan(DUR.expand);
     // A scrim clears inside the collapse of the panel it dims.
     expect(DUR.scrimExit).toBeLessThan(DUR.collapse);

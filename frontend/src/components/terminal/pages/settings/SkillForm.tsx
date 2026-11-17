@@ -1,5 +1,5 @@
 import React, { useId, useRef, useState } from 'react';
-import { ChevronLeft } from 'lucide-react';
+import { ChevronLeftIcon } from '../../icons';
 import {
   formatSkillFile, readSkillFileInfo, SKILL_NAME_MAX, validateLibrarySkill, withSkillFileFields, type SkillSummary,
 } from 'michi-shared';
@@ -99,7 +99,7 @@ export function SkillForm({ editing, taken, backendConnectionId, root, machine, 
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); }
     }}>
     {!phone && <button type="button" className="settings-history__back" onClick={onCancel}>
-      <ChevronLeft size={15} aria-hidden="true" />{editing ? editing.skill.name : 'Skills'}</button>}
+      <ChevronLeftIcon aria-hidden="true" />{editing ? editing.skill.name : 'Skills'}</button>}
     <h1 className="terminal-settings-heading">{title}</h1>
     <p className="settings-history__detail-kind">{editing
       ? 'Other frontmatter keys in SKILL.md are kept as they are.'
@@ -117,7 +117,7 @@ export function SkillForm({ editing, taken, backendConnectionId, root, machine, 
     </div></div>
     {refused.length > 0 && <div className="settings-history__error" role="alert"><ul>{[...new Set(refused)].map((text) => <li key={text}>{text}</li>)}</ul></div>}
     <div className="settings-history__detail-actions">
-      <Button type="submit" variant="primary">{saving ? (editing ? 'Saving…' : 'Creating…') : editing ? 'Save' : 'Create skill'}</Button>
+      <Button type="submit" variant="primary" busy={saving} busyLabel={editing ? 'Saving…' : 'Creating…'}>{editing ? 'Save' : 'Create skill'}</Button>
       <Button variant="ghost" onClick={onCancel}>Cancel</Button>
     </div>
   </form>;

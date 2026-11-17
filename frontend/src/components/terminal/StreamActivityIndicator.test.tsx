@@ -111,7 +111,7 @@ describe('deriveStreamActivity — Kiro plan steps', () => {
 });
 
 describe('deriveStreamActivity — live thought header', () => {
-  const card = { showThoughts: true, agentBlockStyle: 'card' as const };
+  const shown = { showThoughts: true };
   const betweenSteps = () => node({
     messages: [assistant({
       blocks: [
@@ -122,8 +122,8 @@ describe('deriveStreamActivity — live thought header', () => {
     })],
   });
 
-  it('defers to the card header in a between-steps gap', () => {
-    expect(deriveStreamActivity(betweenSteps(), card)).toBeNull();
+  it('defers to the thought line in a between-steps gap', () => {
+    expect(deriveStreamActivity(betweenSteps(), shown)).toBeNull();
   });
 
   it('keeps Working once answer prose ends the agent cluster', () => {
@@ -135,14 +135,27 @@ describe('deriveStreamActivity — live thought header', () => {
         ],
       })],
     });
-    expect(deriveStreamActivity(n, card)?.label).toBe('Working');
+    expect(deriveStreamActivity(n, shown)?.label).toBe('Working');
   });
 });
+
+/** The row as PaneMessageList renders it: the derived label and the turn's clock. */
+function indicator(n: ChatNodeState) {
+  const activity = deriveStreamActivity(n);
+  return (
+    <StreamActivityIndicator
+      label={activity?.label}
+      detail={activity?.detail}
+      streamingStartedAt={n.streamingStartedAt}
+      live={n.status === 'streaming' && !n.visibleResponseComplete}
+    />
+  );
+}
 
 describe('StreamActivityIndicator (render)', () => {
   it('shows post-cancel cleanup on an idle node without a streaming elapsed timer', () => {
     const n = { ...node({ status: 'idle' }), runtimeActivity: 'Waiting for cancellation to finish', streamingStartedAt: Date.now() - 30_000 };
-    const { getByRole, queryByText } = render(<StreamActivityIndicator node={n} />);
+    const { getByRole, queryByText } = render(indicator(n));
     expect(getByRole('status').getAttribute('aria-label')).toBe('Waiting for cancellation to finish');
     expect(queryByText('30s')).toBeNull();
   });
@@ -158,15 +171,33 @@ describe('StreamActivityIndicator (render)', () => {
         blocks: [{ id: 'b0', kind: 'thinking', rawText: 'reasoning', streaming: true }],
       })],
     });
-    const { getByRole, queryByText } = render(<StreamActivityIndicator node={n} />);
+    const { getByRole, queryByText } = render(indicator(n));
 
     // Label shows immediately; elapsed counter is suppressed under the grace window.
     expect(getByRole('status').textContent).toContain('Thinking');
     expect(queryByText(/^\d+s$/)).toBeNull();
 
-    // Past the 3s grace window the seconds counter appears.
+    // Past the 3s grace window the seconds counter appears, outside what the
+    // live region announces: it never reads out a ticking count.
     act(() => { vi.advanceTimersByTime(4000); });
-    expect(queryByText(/^\d+s$/)).not.toBeNull();
+    const counter = queryByText(/^\d+s$/);
+    expect(counter).not.toBeNull();
+    expect(counter!.getAttribute('aria-hidden')).toBe('true');
+    expect(getByRole('status').getAttribute('aria-label')).toBe('Thinking');
+  });
+
+  it('fades in when its turn has just started, and comes settled when it shows again later in the turn', () => {
+    const thinking = (startedAt: number) => ({
+      ...node({ messages: [assistant({ blocks: [{ id: 'b0', kind: 'thinking', rawText: 'reasoning', streaming: true }] })] }),
+      streamingStartedAt: startedAt,
+    });
+    const { getByRole, rerender } = render(indicator(thinking(Date.now())));
+    expect(getByRole('status').hasAttribute('data-fresh')).toBe(true);
+    // Hidden, then shown again seconds into the turn: a new row, settled.
+    const later = thinking(Date.now() - 5_000);
+    rerender(indicator({ ...later, status: 'idle' }));
+    rerender(indicator(later));
+    expect(getByRole('status').hasAttribute('data-fresh')).toBe(false);
   });
 
   it('renders the "Step N/M" detail chip alongside the plan step label', () => {
@@ -179,7 +210,7 @@ describe('StreamActivityIndicator (render)', () => {
         ],
       })],
     });
-    const { getByText, getByRole } = render(<StreamActivityIndicator node={n} />);
+    const { getByText, getByRole } = render(indicator(n));
     expect(getByText('Step 2/2')).toBeTruthy();
     expect(getByText('parse tokens')).toBeTruthy();
     expect(getByRole('status').getAttribute('aria-label')).toContain('Step 2/2');

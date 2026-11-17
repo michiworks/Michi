@@ -4,6 +4,7 @@ import { MotionGlobalConfig } from 'motion/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DrawerShell } from '../ui/DrawerShell';
 import { Lightbox } from './Lightbox';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 
 describe('Lightbox focus', () => {
   it('focuses a reachable close button, traps Tab, and restores the image trigger', () => {
@@ -36,6 +37,13 @@ describe('Lightbox focus', () => {
     fireEvent.keyDown(close, { key: 'Escape' });
     expect(closeImage).toHaveBeenCalledOnce();
     expect(closeDrawer).not.toHaveBeenCalled();
+  });
+
+  it('closes when a notification opens its target', () => {
+    const onClose = vi.fn();
+    render(<Lightbox src="image.png" onClose={onClose} />);
+    act(() => leaveOverlaysEvent.dispatch({}));
+    expect(onClose).toHaveBeenCalledOnce();
   });
 });
 

@@ -13,7 +13,7 @@ declare global {
 async function bootAttentionWorkspace(page: Page, fileContent?: string) {
   const prefs = {
     onboardingCompletedAt: 1, sidebarCollapsed: false, showThoughts: true,
-    agentBlockStyle: 'card', defaultPaneWidth: 560, paneWidthMode: 'fixed',
+    defaultPaneWidth: 560, paneWidthMode: 'fixed',
     sidebarExpanded: { workspaces: { 'attention-ws': true }, threads: { 'attention-tree': true }, branches: {} },
   };
   const workspace = {

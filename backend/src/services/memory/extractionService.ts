@@ -21,6 +21,7 @@ import { listOwnersWithStoredMode, markMovedFromExplicit } from './memoryReposit
 import {
   getMemorySettings, memoryEvents, MemoryError, onMemoryRemoved, setMemorySettings, type MemorySettingsChangedEvent,
 } from './memoryService';
+import { installMemoryGuessHooks } from './guesses';
 import { installUserProfileHooks } from './userProfile';
 
 /**
@@ -160,15 +161,16 @@ function onSettingsChanged(event: MemorySettingsChangedEvent): void {
 }
 
 /**
- * Registers the tombstone hook, the profile's (a removed memory takes the
- * profile lines citing it: userProfile.ts) and the mode listener once;
- * returns an uninstall for tests.
+ * Registers the tombstone hook, the profile's and the guesses' (a removed
+ * memory takes the profile lines and pending guesses citing it: userProfile.ts,
+ * guesses.ts) and the mode listener once; returns an uninstall for tests.
  */
 export function installMemoryExtractionHooks(): () => void {
   const removeHook = onMemoryRemoved(writeTombstone);
   const removeProfileHook = installUserProfileHooks();
+  const removeGuessHook = installMemoryGuessHooks();
   memoryEvents.on('settingsChanged', onSettingsChanged);
-  return () => { removeHook(); removeProfileHook(); memoryEvents.off('settingsChanged', onSettingsChanged); };
+  return () => { removeHook(); removeProfileHook(); removeGuessHook(); memoryEvents.off('settingsChanged', onSettingsChanged); };
 }
 
 /**

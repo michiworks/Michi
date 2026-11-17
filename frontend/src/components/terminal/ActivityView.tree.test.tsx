@@ -106,9 +106,11 @@ function StoreProbe() {
 function renderActivity(
   patch: Record<string, Partial<ChatNodeState>> = {},
   props: React.ComponentProps<typeof ActivityView> = {},
+  edit?: (seed: ReturnType<typeof fixture>) => void,
 ) {
   const { nodes, projects } = fixture();
   for (const [id, extra] of Object.entries(patch)) nodes[id] = { ...nodes[id], ...extra };
+  edit?.({ nodes, projects });
   localStorage.setItem(
     'michi:v1:state',
     JSON.stringify({ version: 2, projects, nodes, activeProjectId: 'p1' }),
@@ -199,6 +201,18 @@ describe('ActivityView tree controller', () => {
     await screen.findByText('Child of A');
     fireEvent.click(screen.getByText('Thread A'));
     await waitFor(() => expect(row('childA')).toBeNull());
+  });
+
+  it('draws the phone drawer\'s branches at one level and marks only the current row, as Structure does', async () => {
+    renderActivity({}, { phoneDrawer: true }, ({ nodes, projects }) => {
+      nodes.grandA = chat('grandA', 'p1', 'Grandchild of A', 'childA');
+      projects[0].chatIds.push('grandA');
+      projects[0].edges.push({ source: 'childA', target: 'grandA', kind: 'branch' });
+    });
+    fireEvent.click(await screen.findByText('Grandchild of A'));
+    await waitFor(() => expect(row('grandA')?.getAttribute('aria-current')).toBe('true'));
+    expect(row('rootA')?.hasAttribute('aria-current')).toBe(false);
+    expect(row('grandA')?.style.paddingLeft).toBe(row('childA')?.style.paddingLeft);
   });
 
   // Owner decision 14 (F26): ⌘/⇧ select threads as in Structure, across the

@@ -124,12 +124,12 @@ function bMode(style: SidebarRowStyle, inset: number, radius: number): RowGeom {
   };
 }
 
-/**
- * @param style  the active pref
- * @param insetPref  `prefs.sidebarInset`, honoured only by `classic` (the B
- *   modes pin their own inset so flipping between them is a controlled A/B)
- */
-export function rowGeom(style: SidebarRowStyle, insetPref: number): RowGeom {
+/** The classic rows' gutter beside the sidebar edges, in px (the B modes pin their own). */
+const CLASSIC_INSET = 2;
+
+/** @param style  the active pref */
+export function rowGeom(style: SidebarRowStyle): RowGeom {
+  const insetPref = CLASSIC_INSET;
   switch (style) {
     case 'rounded-inset':
       return bMode('rounded-inset', 8, 8);
@@ -209,18 +209,11 @@ export function caretKebabClearance(g: RowGeom): number {
   return Math.max(0, KEBAB_FOOTPRINT + CARET_KEBAB_GAP - paddingRight);
 }
 
-/** Right margin for a pin star that ends a card-mode row with no caret after it.
- *  The star then takes the caret's footprint: its width (larger in the phone
- *  drawer, mobile.css), its clearance from the kebab and the row's flex `gap`
- *  before it. So pinned rows' stars form one column whether or not a row has
- *  branches, and the hover-revealed ⋯ (no background in card modes) never lands
- *  on the star. `rowGap` is the row's flex gap between the star and the caret.
- *  `paddingClearsKebab`: the row's right padding already holds that clearance
- *  (the current Activity row, see ThreadRow), so the star leaves it out and
- *  stays in its column when the row is chosen. */
-export function pinMarkEndMargin(g: RowGeom, rowGap: number, paddingClearsKebab = false): string {
-  const clearance = paddingClearsKebab ? 0 : caretKebabClearance(g);
-  return `calc(var(--sb-caret-w, 9px) + ${clearance + rowGap}px)`;
+/** Extra indent for Activity's rows in card modes: one branch step, so the pin
+ *  star hung in a thread's gutter (PIN_MARK_LEAD, ThreadRow) clears the sidebar
+ *  edge. Structure view's threads already sit a folder slot in. */
+export function activityIndent(g: RowGeom): number {
+  return g.isCard ? g.indentStep : 0;
 }
 
 /** Vertical gap between a thread row and its first branch row.

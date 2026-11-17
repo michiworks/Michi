@@ -15,9 +15,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_COMPANION_SETTINGS, type CompanionSettings } from 'michi-shared';
+import { DEFAULT_COMPANION_SETTINGS, type ChatStreamEvent, type CompanionSettings } from 'michi-shared';
 import { closeDb, getDb, initDb } from '../src/services/db';
-import type { HomeLiveWaitReader } from '../src/services/pages/homeSections';
+import { FAILED_WAIT_MS, type HomeLiveWaitReader } from '../src/services/pages/homeSections';
 import {
   applySourcePoll,
   closeDelegation,
@@ -25,8 +25,11 @@ import {
   getSnapshots,
   markDelegationReported,
   recordDelegation,
+  snapshotDto,
 } from '../src/services/companion/repository';
-import { createMichiSource, MICHI_ABANDONED_AFTER_MS } from '../src/services/companion/sources/michi';
+import { createMichiSource, MICHI_ABANDONED_AFTER_MS, resolveMichiWaitingItem } from '../src/services/companion/sources/michi';
+import { CompanionEventBus } from '../src/services/companion/delivery';
+import { watchConversationWaiting } from '../src/services/companion/conversationWaiting';
 import type { ItemDraft, SourcePollResult } from '../src/services/companion/types';
 import { seedConversation, type SeedTurn } from './helpers/homeConversations';
 
@@ -128,6 +131,33 @@ describe('Companion Michi source', () => {
     assert.ok(list, 'every poll carries its list object, so a feed that empties is not a suspect drop');
     assert.equal(list.state.waiting, 3);
     assert.equal(drafts.some((draft) => draft.itemKey === 'michi:list'), false);
+  });
+
+  test('a failed or interrupted last turn leaves the feed once the user had it on screen since, or after a week, as on the Spaces Home; a question stays', async () => {
+    const unseen = chat({ status: 'error', error: 'boom', startedAt: NOW - 2 * HOUR });
+    const seenBefore = chat({ status: 'error', error: 'boom', startedAt: NOW - 2 * HOUR });
+    viewed(seenBefore, NOW - 3 * HOUR);
+    const seen = chat({ status: 'error', error: 'boom', startedAt: NOW - 2 * HOUR });
+    viewed(seen, NOW - HOUR);
+    const interrupted = chat({ status: 'error', error: 'backend_restarted', startedAt: NOW - 2 * HOUR });
+    viewed(interrupted, NOW - HOUR);
+    const lastDay = chat({ status: 'error', error: 'boom', startedAt: NOW - FAILED_WAIT_MS - 10, completedAt: NOW - FAILED_WAIT_MS });
+    const weekOld = chat({ status: 'error', error: 'boom', startedAt: NOW - FAILED_WAIT_MS - 20, completedAt: NOW - FAILED_WAIT_MS - 1 });
+    const question = chat({ status: 'completed', reply: 'Ship it?', startedAt: NOW - 10 * DAY });
+    viewed(question, NOW - DAY);
+
+    const { result, drafts } = await poll();
+    const items = byNode(drafts);
+    assert.deepEqual([...items.keys()].sort(), [unseen, seenBefore, lastDay, question].sort());
+    for (const id of [seen, interrupted, weekOld]) assert.equal(items.has(id), false, id);
+    assert.deepEqual([items.get(unseen)!.subtype, items.get(seenBefore)!.subtype], ['michi_waiting', 'michi_waiting'], 'a look before it failed is not a look at the failure');
+    assert.equal(items.get(lastDay)!.subtype, 'michi_stalled', 'a week to the millisecond still waits');
+    assert.equal(items.get(question)!.subtype, 'michi_stalled', 'a question waits for its answer, seen or not');
+    const list = result.observations.find((observation) => observation.objectKey === 'michi:list');
+    assert.deepEqual([list?.state.waiting, list?.state.stalled], [2, 2], 'the counts leave them out too');
+
+    viewed(unseen, NOW);
+    assert.equal(byNode((await poll(NOW + MINUTE)).drafts).has(unseen), false, 'having it on screen settles it by the next poll');
   });
 
   test('versions hold while the state holds; entering stalled is a new version; the age is a display field', async () => {
@@ -232,6 +262,87 @@ describe('Companion Michi source', () => {
     assert.equal(getItemByKey(`michi:node:${failed}`)?.status, 'seen', 'one absence only counts');
     assert.equal((await store(NOW + 4 * MINUTE)).resolved.length, 2);
     assert.equal(getItemByKey(`michi:node:${fresh}`)?.status, 'resolved');
+  });
+
+  test('once the user had a failure on screen, its stored item resolves after two polls and focus no longer says it waits', async () => {
+    const failed = chat({ status: 'error', error: 'boom', startedAt: NOW - HOUR });
+    const unseen = chat({ status: 'error', error: 'boom', startedAt: NOW - 2 * HOUR });
+    const source = createMichiSource({ live: () => null });
+    const store = async (now: number) => {
+      const previous = getSnapshots('michi');
+      const result = await source.poll({ settings, now, previous });
+      return applySourcePoll({ source: 'michi', result, drafts: source.draft({ observations: result.observations, previous, settings, now }), now });
+    };
+    await store(NOW);
+    assert.deepEqual(source.focusSnapshot(NOW).map((entry) => [entry.nodeId, entry.state]), [[failed, 'waiting'], [unseen, 'waiting']]);
+
+    viewed(failed, NOW + MINUTE);
+    assert.equal((await store(NOW + 2 * MINUTE)).outcome, 'applied');
+    assert.equal(getItemByKey(`michi:node:${failed}`)?.status, 'seen', 'one absence only counts');
+    assert.equal((await store(NOW + 3 * MINUTE)).resolved.length, 1);
+    assert.equal(getItemByKey(`michi:node:${failed}`)?.status, 'resolved');
+    assert.equal(getItemByKey(`michi:node:${unseen}`)?.status, 'seen', 'the one not looked at still waits');
+    assert.deepEqual(source.focusSnapshot(NOW + 3 * MINUTE).map((entry) => [entry.nodeId, entry.state]), [[failed, 'idle'], [unseen, 'waiting']]);
+  });
+
+  test('answering an ordinary conversation removes its Today wait and broadcasts the updated snapshot immediately', async () => {
+    const nodeId = chat({ status: 'active' });
+    let waiting = true;
+    const live: HomeLiveWaitReader = () => waiting ? { kind: 'question', text: 'Switch to Bedrock?' } : null;
+    const { result, drafts } = await poll(NOW, live);
+    applySourcePoll({ source: 'michi', result, drafts, now: NOW });
+    assert.equal(snapshotDto({ now: NOW, conversation: null }).items.length, 1);
+    let send!: (chatId: string, event: ChatStreamEvent) => void;
+    const bus = new CompanionEventBus();
+    const snapshots: Array<{ reason: string; needsYou: number; items: number }> = [];
+    const unsubscribe = bus.subscribe({ changed: (event) => {
+      const snapshot = snapshotDto({ now: NOW + 1, conversation: null });
+      snapshots.push({ reason: event.reason, needsYou: snapshot.counts.needsYou, items: snapshot.items.length });
+    } });
+    const stop = watchConversationWaiting({
+      hub: { subscribeBackground: (subscriber) => { send = subscriber.send; return () => {}; } },
+      bus,
+      conversationNodeId: () => 'michi-chat',
+      resolveWaitingItem: (id) => resolveMichiWaitingItem(id, live, NOW + 1),
+    });
+    try {
+      waiting = false;
+      const answer = { event: 'user_input_resolved', data: { nodeId, turnId: `${nodeId}-t0`, requestId: 1, answers: [] } } as ChatStreamEvent;
+      send(nodeId, answer);
+      assert.equal(getItemByKey(`michi:node:${nodeId}`)?.status, 'resolved');
+      assert.deepEqual(snapshots, [{ reason: 'items', needsYou: 0, items: 0 }]);
+      send(nodeId, answer);
+      assert.equal(snapshots.length, 1, 'duplicate answers do not emit another change');
+
+      const after = await poll(NOW + 2, live);
+      applySourcePoll({ source: 'michi', ...after, now: NOW + 2 });
+      assert.equal(snapshotDto({ now: NOW + 2, conversation: null }).items.length, 0, 'the next poll does not restore the answered wait');
+    } finally {
+      stop();
+      unsubscribe();
+    }
+  });
+
+  test('a late answer keeps a newer wait, while approved and stalled conversations clear as soon as they resume', async () => {
+    const question = chat({ status: 'active' });
+    const approval = chat({ status: 'active' });
+    const stalled = chat({ status: 'active', startedAt: NOW - 4 * DAY });
+    const waits = new Map<string, NonNullable<ReturnType<HomeLiveWaitReader>>>([
+      [question, { kind: 'question' as const, text: 'A newer question' }],
+      [approval, { kind: 'approval' as const, text: 'Run tests' }],
+      [stalled, { kind: 'question' as const, text: 'Continue?' }],
+    ]);
+    const live: HomeLiveWaitReader = (id) => waits.get(id) ?? null;
+    const { result, drafts } = await poll(NOW, live);
+    applySourcePoll({ source: 'michi', result, drafts, now: NOW });
+    assert.equal(getItemByKey(`michi:node:${stalled}`)?.subtype, 'michi_stalled');
+    assert.equal(resolveMichiWaitingItem(question, live, NOW + 1), false, 'the current question is still unanswered');
+    assert.equal(getItemByKey(`michi:node:${question}`)?.status, 'seen');
+    waits.delete(approval);
+    waits.delete(stalled);
+    assert.equal(resolveMichiWaitingItem(approval, live, NOW + 1), true);
+    assert.equal(resolveMichiWaitingItem(stalled, live, NOW + 1), true);
+    assert.deepEqual(snapshotDto({ now: NOW + 1, conversation: null }).items.map((item) => item.itemKey), [`michi:node:${question}`]);
   });
 
   test('focus: what the user wrote in during the last three hours, newest first, with its state', () => {

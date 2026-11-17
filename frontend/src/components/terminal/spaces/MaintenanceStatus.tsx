@@ -149,7 +149,7 @@ export function MaintenanceStatus({ backendConnectionId, workspaceId, pendingPro
             if (plan && sourceTurnIds.length) void maintenance.reconsider(plan.id, sourceTurnIds).catch(() => undefined);
           }}>Reconsider attention sources</button>}
         </div>}
-        {!excluded && config && (value?.catchUpSuggestions ?? []).some((suggestion) => suggestion.spaceId === spaceId && suggestion.availablePositions > 0) && <div style={{ marginTop: 9, padding: 9, border: '1px solid var(--term-line)', borderRadius: 5 }}>
+        {!excluded && config && (value?.catchUpSuggestions ?? []).some((suggestion) => suggestion.spaceId === spaceId && suggestion.availablePositions > 0) && <div style={{ marginTop: 9, padding: 9, border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius)' }}>
           <strong style={{ fontSize: 'var(--fs-sm)' }}>Catch up conversations missed while this page was excluded</strong>
           <p style={{ margin: '4px 0 7px', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
             Re-enabling this page does not revisit earlier turns. Queue a bounded catch-up for a recorded exclusion period; each request is limited to this page and its current child pages.

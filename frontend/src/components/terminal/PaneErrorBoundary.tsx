@@ -1,4 +1,5 @@
 import React from 'react';
+import { Button } from '../ui/controls';
 
 interface Props {
   paneId: string;
@@ -64,20 +65,9 @@ export default class PaneErrorBoundary extends React.Component<Props, State> {
         >
           {error.message}
         </pre>
-        <button
-          onClick={() => this.setState({ error: null })}
-          style={{
-            background: 'transparent',
-            border: '1px solid var(--term-line)',
-            color: 'var(--term-fg)',
-            padding: '4px 10px',
-            fontFamily: 'var(--ui-font)',
-            fontSize: 'var(--fs-sm)',
-            cursor: 'pointer',
-          }}
-        >
+        <Button size="sm" onClick={() => this.setState({ error: null })}>
           retry
-        </button>
+        </Button>
       </div>
     );
   }

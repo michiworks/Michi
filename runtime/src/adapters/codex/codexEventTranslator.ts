@@ -1,5 +1,5 @@
 import type { NormalizedEvent } from '../../contract/events';
-import { omitInlineImages, truncateToolPayload } from '../../contract/toolPayload';
+import { omitInlineImages, truncateToolOutput, truncateToolPayload } from '../../contract/toolPayload';
 import { contextFillPercentage } from '../../contract/usage';
 import {
   CODEX_COLLAB_ITEM,
@@ -489,7 +489,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
             status: failed ? 'failed' : 'completed',
             kindType: codexCollabKind(item),
             inputJson: truncateToolPayload(codexCollabInput(item)),
-            ...(failed && errors ? { output: truncateToolPayload(errors) } : {}),
+            ...(failed && errors ? { output: truncateToolOutput(errors) } : {}),
             ...toolIdentity(item),
           });
           if (roster.length > 0) emit({ kind: 'subagent_list_update', subagents: roster });
@@ -519,7 +519,7 @@ export function createCodexTranslator(emit: (ev: NormalizedEvent) => void): Code
           kindType: presentation.kindType,
           detail,
           // Display copy of a completed item: Codex already gave the model its result.
-          output: truncateToolPayload(omitInlineImages(rawOutput)),
+          output: truncateToolOutput(omitInlineImages(rawOutput)),
           ...toolIdentity(item),
         });
         break;

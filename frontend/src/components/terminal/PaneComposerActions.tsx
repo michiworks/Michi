@@ -4,8 +4,8 @@ import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { kbd } from '../../lib/platform';
 import { DUR, EASE, SPRING } from '../../motion/tokens';
 import { ContextRing, type ContextRingProps } from './ContextRing';
-import { BranchIcon } from './icons';
-import { COMPOSER_ICON_STROKE, composerIconSize } from './PaneComposerToolbarLeft';
+import { BranchIcon, RetryIcon, iconPx, strokeFor } from './icons';
+import { composerIconSize } from './PaneComposerToolbarLeft';
 
 export type PaneComposerSendMode = 'send' | 'stop' | 'retry';
 
@@ -18,30 +18,27 @@ export function composerGlyph(sendMode: PaneComposerSendMode, streaming: boolean
   return streaming ? 'send-next' : 'send';
 }
 
-const STROKED = {
-  fill: 'none',
-  stroke: 'currentColor',
-  strokeWidth: 1.8,
-  strokeLinecap: 'round',
-  strokeLinejoin: 'round',
-} as const;
-
-function glyphPaint(glyph: PaneComposerGlyph) {
-  return glyph === 'stop' || glyph === 'resume' ? { fill: 'currentColor' } : STROKED;
-}
-
-function glyphShape(glyph: PaneComposerGlyph): React.ReactNode {
+/**
+ * The plate's glyphs. Stop and Resume are solid, the send arrow drawn here so
+ * Send next can dash the same shaft; Retry is RetryIcon.
+ */
+function PlateGlyph({ glyph, px }: { glyph: PaneComposerGlyph; px: number }) {
+  if (glyph === 'retry') return <RetryIcon size={px} />;
+  const svg = { width: px, height: px, viewBox: '0 0 16 16', 'aria-hidden': true } as const;
   switch (glyph) {
     case 'stop':
-      return <rect x="3" y="3" width="10" height="10" rx="1.5" />;
+      return <svg {...svg} fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="1.5" /></svg>;
     case 'resume':
-      return <path d="M4.5 3.2v9.6a.6.6 0 0 0 .92.5l7-4.8a.6.6 0 0 0 0-1l-7-4.8a.6.6 0 0 0-.92.5z" />;
-    case 'retry':
-      return <><path d="M3 8a5 5 0 1 0 1.5-3.5" /><polyline points="3 2 3 5.5 6.5 5.5" /></>;
+      return <svg {...svg} fill="currentColor"><path d="M4.5 3.2v9.6a.6.6 0 0 0 .92.5l7-4.8a.6.6 0 0 0 0-1l-7-4.8a.6.6 0 0 0-.92.5z" /></svg>;
     case 'send':
     case 'send-next':
       // Send next dashes the shaft: it goes out after the current response.
-      return <><path d="M8 13V3" strokeDasharray={glyph === 'send-next' ? '1.6 2' : undefined} /><path d="M3.5 7.5L8 3l4.5 4.5" /></>;
+      return (
+        <svg {...svg} fill="none" stroke="currentColor" strokeWidth={strokeFor(px)} strokeLinecap="round" strokeLinejoin="round">
+          <path d="M8 13V3" strokeDasharray={glyph === 'send-next' ? '1.6 2' : undefined} />
+          <path d="M3.5 7.5L8 3l4.5 4.5" />
+        </svg>
+      );
   }
 }
 
@@ -94,7 +91,7 @@ export function PaneComposerActions({
 }: PaneComposerActionsProps) {
   const phone = usePhoneLayout();
   // Send/Stop/Retry glyphs sit on the inset plate (index.css): 14px on its 26px, 16px on a phone's 32px.
-  const glyph = phone ? 16 : 14;
+  const glyph = iconPx(phone ? 'lg' : 'md');
   const glyphKind = composerGlyph(sendMode, streaming, resumeTurn);
   return (
     <>
@@ -106,7 +103,7 @@ export function PaneComposerActions({
           onClick={onBranch}
           aria-label={`Branch (${kbd('mod', 'enter')})`}
         >
-          <BranchIcon size={composerIconSize(phone)} strokePx={COMPOSER_ICON_STROKE} />
+          <BranchIcon size={composerIconSize(phone)} />
           <span className="t-action-kbd">
             Branch <span className="t-action-kbd-key">{kbd('mod', 'enter')}</span>
           </span>
@@ -151,9 +148,7 @@ export function PaneComposerActions({
             animate={GLYPH_ANIMATE}
             exit={GLYPH_EXIT}
           >
-            <svg width={glyph} height={glyph} viewBox="0 0 16 16" {...glyphPaint(glyphKind)} aria-hidden="true">
-              {glyphShape(glyphKind)}
-            </svg>
+            <PlateGlyph glyph={glyphKind} px={glyph} />
           </motion.span>
         </AnimatePresence>
         <span className="t-action-kbd">

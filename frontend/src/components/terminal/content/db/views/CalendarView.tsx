@@ -108,10 +108,10 @@ export function CalendarView({ db, groups, config, edit, handlers, threadOf, not
       <div className="michi-cal__head">
         <span className="michi-cal__month">{monthTitle(month.year, month.month)}</span>
         <button type="button" className="michi-cal__nav" aria-label="Previous month" onClick={() => shift(-1)}>
-          <ChevronLeftIcon size={13} />
+          <ChevronLeftIcon />
         </button>
         <button type="button" className="michi-cal__nav" aria-label="Next month" onClick={() => shift(1)}>
-          <ChevronRightIcon size={13} />
+          <ChevronRightIcon />
         </button>
         {!isThreadsDb(db) && <span className="michi-cal__by">{columnName(db, col)}</span>}
       </div>

@@ -37,6 +37,7 @@ import { approveForMeRuntimeIds, supportsChatYolo } from '../../../../lib/chatPe
 import { chatPermissionChoiceParts, type ChatPermissionChoice } from 'michi-shared';
 import { SettingsRow, SettingsSection } from './SettingsSection';
 import { ModelCombobox } from './ModelCombobox';
+import { useFocusAfterChange } from './useFocusAfterChange';
 import { isImeComposing } from '../../../../lib/ime';
 import { SEGMENTED_MAX, Segmented } from './controls';
 import { REASONING_LABELS } from '../../PaneComposerToolbarLeft';
@@ -174,7 +175,7 @@ function NativeSessionToggle({ status, preference, label, onChanged }: {
 
   return (
     <SettingsRow label={label} description={status.label}
-      control={<Switch on={enabled} disabled={saving} onChange={(value) => void save(value)} aria-label={`${label} for ${status.label}`} />}>
+      control={<Switch on={enabled} busy={saving} onChange={(value) => void save(value)} aria-label={`${label} for ${status.label}`} />}>
       {error && <p role="alert" className="settings-row__note">{error}</p>}
     </SettingsRow>
   );
@@ -208,7 +209,7 @@ function WorkflowsToggle({ status, runtimeId, onChanged }: { status: AgentStatus
   return (
     <SettingsRow label={`Workflows (${label})`}
       description="Lets the agent run multi-step workflows in the background. Progress shows under the message that launched it. Applies to new chats."
-      control={<Switch on={enabled} disabled={saving} onChange={(value) => void save(value)} aria-label={`Workflows for ${label}`} />}>
+      control={<Switch on={enabled} busy={saving} onChange={(value) => void save(value)} aria-label={`Workflows for ${label}`} />}>
       {error && <p role="alert" className="settings-row__note">{error}</p>}
     </SettingsRow>
   );
@@ -532,9 +533,9 @@ function WebSearchKeyControls({
         href={provider.keyUrl}
         target="_blank"
         rel="noopener noreferrer"
-        style={{ display: 'inline-block', fontSize: 'var(--fs-sm)', color: 'var(--term-accent)', marginTop: 7 }}
+        style={{ display: 'inline-block', fontSize: 'var(--fs-sm)', color: 'var(--term-accent-text)', marginTop: 7 }}
       >
-        Open {provider.label} key console
+        Open {provider.label} key console ↗
       </a>
       {error && <p role="alert" className="settings-row__note">{error}</p>}
     </div>
@@ -578,15 +579,15 @@ function ProviderKeyControls({
   const [replacing, setReplacing] = useState(false);
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
+  const replaceRef = useRef<HTMLButtonElement>(null);
 
   const hasKey = !!provider.hasKey;
   // A saved key is a status; the field appears only to add or replace one.
   const editing = !hasKey || replacing;
   const canVerifyKey = hasKey || !!editor.draft.trim();
 
-  useEffect(() => {
-    if (replacing) inputRef.current?.focus();
-  }, [replacing]);
+  // Replace… and Clear give way to the field, Cancel and a saved key to Replace….
+  useFocusAfterChange(editing, (now) => now ? inputRef.current : replaceRef.current);
 
   const saveKey = async () => {
     if (await editor.save()) setReplacing(false);
@@ -608,7 +609,7 @@ function ProviderKeyControls({
 
   const keyConsole = provider.keyUrl ? (
     <a className="settings-row__link" href={provider.keyUrl} target="_blank" rel="noopener noreferrer">
-      Open {provider.label} key console
+      Open {provider.label} key console ↗
     </a>
   ) : null;
   const verifyLabel = editor.verifying ? 'Verifying…' : 'Verify';
@@ -625,11 +626,12 @@ function ProviderKeyControls({
         </span>
         {hasKey && !replacing && <>
           <Button disabled={editor.verifying} onClick={verifyKey}>{verifyLabel}</Button>
-          <Button onClick={() => { editor.reset(); setReplacing(true); }}>Replace…</Button>
+          <Button ref={replaceRef} onClick={() => { editor.reset(); setReplacing(true); }}>Replace…</Button>
           <Button variant="ghost" onClick={() => void clearKey()}>Clear</Button>
         </>}
         {hasKey && replacing && (
-          <Button variant="ghost" disabled={editor.saving} onClick={() => { editor.reset(); setReplacing(false); }}>Cancel</Button>
+          <Button variant="ghost" aria-disabled={editor.saving || undefined}
+            onClick={() => { if (editor.saving) return; editor.reset(); setReplacing(false); }}>Cancel</Button>
         )}
       </>}>
       {editing && (
@@ -643,8 +645,8 @@ function ProviderKeyControls({
             onSave={() => void saveKey()}
           />
           <Button disabled={!editor.draft.trim() || editor.verifying} onClick={verifyKey}>{verifyLabel}</Button>
-          <Button variant="primary" disabled={!editor.draft.trim() || editor.saving} onClick={() => void saveKey()}>
-            {editor.saving ? 'Saving…' : 'Save key'}
+          <Button variant="primary" disabled={!editor.draft.trim()} busy={editor.saving} busyLabel="Saving…" onClick={() => void saveKey()}>
+            Save key
           </Button>
         </div>
       )}
@@ -705,7 +707,7 @@ function PermissionSettings({ apiBase, runtimeIds, approveRuntimeIds }: { apiBas
   return <SettingsSection title="Permissions">
     <SettingsRow label="Use global permissions"
       description={permissions.global ? 'One permission mode for all chats. Permission controls are hidden in the Composer.' : 'Set permissions separately in each chat’s Composer. New chats start in Ask.'}
-      control={<Switch on={permissions.global} disabled={saving || permissions.loading}
+      control={<Switch on={permissions.global} busy={saving || permissions.loading}
         onChange={(global) => { if (!saving && !permissions.loading) void save(global); }} aria-label="Use global permissions" />} />
     {permissions.global && <GlobalPermissionModeRow choice={permissions.choice} disabled={saving || permissions.loading}
       runtimeIds={runtimeIds} approveRuntimeIds={approveRuntimeIds}

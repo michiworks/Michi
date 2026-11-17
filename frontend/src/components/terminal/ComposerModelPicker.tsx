@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useIsPresent } from 'motion/react';
+import type { ModelServiceTier } from 'michi-shared';
 import type { AgentCapabilities, AgentModelInfo, AgentProviderInfo, AgentReasoning, AgentStatus } from '../../services/api';
 import type { ResolvedNodeBinding } from '../../state/nodeBindingResolution';
 import { measureSurface, PopoverSurface } from '../ui/Popover';
 import { useMenuConfirm } from '../ui/useMenuConfirm';
 import { pickMenuSide, useAnchoredPosition } from '../ui/useAnchoredPosition';
 import { useBackLayer } from '../../lib/backStack';
-import { ChevronLeftIcon, ChevronRightIcon, RetryIcon } from './icons';
+import { CheckIcon, ChevronLeftIcon, ChevronRightIcon, RetryIcon } from './icons';
 import { REASONING_LABELS, composerMenuBelowEdge, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import './ComposerModelPicker.css';
-import { resolveComposerReasoning } from './composerReasoning';
+import { resolveComposerModel, resolveComposerReasoning } from './composerReasoning';
 import { modelDisplayLabel } from '../../lib/modelLabel';
 import { filterAvailableRuntimes } from '../../lib/runtimeVisibility';
 import { isImeComposing } from '../../lib/ime';
@@ -32,6 +33,51 @@ function ultracodeNote(ultracode: ComposerUltracode): string {
   return 'A multi-agent workflow for each task. Uses many more tokens.';
 }
 
+/**
+ * A speed tier's switch (AgentModelInfo.serviceTiers). Like Ultracode's, it
+ * shows its pick until the chat's tier arrives with it; a failed last save
+ * returns it.
+ */
+function ServiceTierSwitch({ tier, on, disabled, onToggle }: {
+  tier: ModelServiceTier;
+  on: boolean;
+  disabled: boolean;
+  onToggle: (next: boolean) => Promise<boolean>;
+}) {
+  const [pending, setPending] = useState<boolean | null>(null);
+  const saves = useRef(0);
+  const onRef = useRef(on);
+  const mounted = useRef(true);
+  useLayoutEffect(() => { onRef.current = on; });
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  useLayoutEffect(() => {
+    if (saves.current === 0 && pending === on) setPending(null);
+  }, [on, pending]);
+  const toggle = () => {
+    const next = !(pending ?? on);
+    saves.current += 1;
+    setPending(next);
+    void onToggle(next).then((saved) => {
+      saves.current -= 1;
+      if (!mounted.current || saves.current > 0) return;
+      setPending((shown) => !saved || shown === onRef.current ? null : shown);
+    });
+  };
+  return (
+    <button type="button" role="switch" aria-checked={pending ?? on} disabled={disabled}
+      className="composer-picker-row composer-picker-switch" onClick={toggle}>
+      <span className="composer-picker-copy">
+        <span className="composer-picker-value">{tier.name}</span>
+        {tier.description && <span className="composer-picker-caption">{tier.description}</span>}
+      </span>
+      <span className="composer-picker-switch-track" aria-hidden="true"><span className="composer-picker-switch-thumb" /></span>
+    </button>
+  );
+}
+
 export interface ComposerModelPickerProps {
   anchor: PaneMenuAnchor;
   agentStatus: AgentStatus | null;
@@ -51,6 +97,9 @@ export interface ComposerModelPickerProps {
   /** The chat's Ultracode choice; offered when the runtime has it (capabilities.ultracode). */
   ultracode?: ComposerUltracode;
   onSaveUltracode?: SelectionHandler<boolean>;
+  /** The chat's speed tier (null: standard); offered for the tiers its model lists. */
+  serviceTier?: string | null;
+  onSaveServiceTier?: SelectionHandler<string | null>;
 }
 
 const focusableSelector = 'button:not(:disabled), input:not(:disabled)';
@@ -58,7 +107,7 @@ const focusableSelector = 'button:not(:disabled), input:not(:disabled)';
 export function ComposerModelPicker({
   anchor, agentStatus, resolvedBinding, catalogCapabilities, providerModels, providers = [],
   modelsLoading, modelsWaiting = false, modelsError, onSwitchRuntime, onSaveProvider,
-  onSaveModel, onSaveReasoning, onRetryModels, onClose, ultracode, onSaveUltracode,
+  onSaveModel, onSaveReasoning, onRetryModels, onClose, ultracode, onSaveUltracode, serviceTier, onSaveServiceTier,
 }: ComposerModelPickerProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -85,6 +134,8 @@ export function ComposerModelPicker({
   const hasModels = !!(caps?.models || caps?.providerModels || resolvedBinding.model);
   const searchable = page === 'model' && providerModels.length > 7;
   const effort = resolveComposerReasoning(resolvedBinding, agentStatus, catalogCapabilities, providerModels, providers);
+  const serviceTiers = serviceTier !== undefined && onSaveServiceTier
+    ? resolveComposerModel(resolvedBinding, agentStatus, providerModels, providers)?.serviceTiers ?? [] : [];
   const runtimeLabel = agentStatus?.availableRuntimes?.find((runtime) => runtime.id === resolvedBinding.runtime)?.label || resolvedBinding.runtime;
   const modelLabel = modelDisplayLabel(resolvedBinding.runtime, resolvedBinding.model, providerModels);
   const providerLabel = providers.find((provider) => provider.id === resolvedBinding.provider)?.label || resolvedBinding.provider || 'Default provider';
@@ -326,7 +377,7 @@ export function ComposerModelPicker({
       className={`composer-picker-row${blinkingId === `${page}-${id}` ? ' ui-menu-blink' : ''}`}
       onClick={() => confirm(`${page}-${id}`, () => { if (checked) navigate('overview'); else void select(action, 'overview'); })}>
       <span className="composer-picker-copy"><span className="composer-picker-value">{label}</span>{description && <span className="composer-picker-caption">{description}</span>}</span>
-      <span className="michi-menu-glyph" aria-hidden="true">{checked ? '✓' : ''}</span>
+      <span className="michi-menu-glyph" aria-hidden="true">{checked && <CheckIcon />}</span>
     </button>
   );
 
@@ -368,6 +419,10 @@ export function ComposerModelPicker({
                   <span className="composer-picker-switch-track" aria-hidden="true"><span className="composer-picker-switch-thumb" /></span>
                 </button>
               )}
+              {onSaveServiceTier && serviceTiers.map((tier) => (
+                <ServiceTierSwitch key={tier.id} tier={tier} on={serviceTier === tier.id} disabled={listSaving}
+                  onToggle={(next) => select(() => onSaveServiceTier(next ? tier.id : null), page, true)} />
+              ))}
               {!caps && catalogStatus}
             </>
           ) : page === 'model' ? (

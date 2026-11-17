@@ -74,7 +74,10 @@ test('system reduced motion also disables the narrow toolbar entrance', async ({
   await boot(page);
   await openThreadFromSidebar(page, 'A quieter way to work');
   await page.getByRole('button', { name: 'Workspace views', exact: true }).click();
-  await expect(page.getByRole('group', { name: 'Workspace view controls' })).toHaveCSS('animation-name', 'none');
+  const durations = await page.getByRole('group', { name: 'Workspace view controls' }).evaluate((el) => (
+    getComputedStyle(el).transitionDuration.split(',').map((value) => Number.parseFloat(value))
+  ));
+  expect(Math.max(...durations)).toBeLessThan(0.001);
 });
 
 test('placeholder is not draft content and clearing restores the empty state', async ({ page }) => {
@@ -147,7 +150,7 @@ test('a phone lists workspaces as rows, acts on them from a menu beside the row 
     await expect(manage).toBeVisible();
     expect(await manage.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
-    const tabs = (await page.getByRole('button', { name: /^Chats/ }).boundingBox())!;
+    const tabs = (await page.getByRole('tab', { name: /^Chats/ }).boundingBox())!;
     const settings = (await page.getByRole('complementary', { name: 'Workspace settings' }).boundingBox())!;
     expect(settings.y).toBeGreaterThan(tabs.y + tabs.height);
     expect(settings.x).toBeGreaterThanOrEqual(0);
@@ -237,7 +240,7 @@ test('a phone Home keeps one toolbar row and moves workspace and permissions to 
       const toolbar = page.locator('.home-compose .terminal-composer__toolbar');
       const attach = await box(toolbar.locator('.composer-attach'));
       // Typing @ still mentions; the phone has no @ chip.
-      await expect(toolbar.getByTitle('Mention context or node')).toBeHidden();
+      await expect(toolbar.getByRole('button', { name: 'Mention context or node', exact: true })).toBeHidden();
       const model = await box(toolbar.locator('.composer-model-trigger'));
       const send = await box(toolbar.getByRole('button', { name: 'Send (Enter)', exact: true }));
       // One toolbar row: +, model and send.

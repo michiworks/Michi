@@ -111,8 +111,8 @@ describe('WorkspaceManage', () => {
     seedWorkspace();
     prefsState.digestEnabled = false;
     render(<WorkspaceManage workspaceId="ws1" onNav={() => {}} />);
-    expect(screen.getByRole('button', { name: /Artifacts/i })).not.toBeNull();
-    expect(screen.queryByRole('button', { name: /Digests/i })).toBeNull();
+    expect(screen.getByRole('tab', { name: /Artifacts/i })).not.toBeNull();
+    expect(screen.queryByRole('tab', { name: /Digests/i })).toBeNull();
   });
 
   it('shows empty state when workspace not found', () => {
@@ -217,7 +217,7 @@ describe('WorkspaceManage', () => {
     window.addEventListener('michi:toggle-export-panel', exportSpy as EventListener);
     try {
       render(<WorkspaceManage workspaceId="ws1" onNav={onNav} />);
-      fireEvent.click(screen.getByRole('button', { name: /Digests/i }));
+      fireEvent.click(screen.getByRole('tab', { name: /Digests/i }));
 
       fireEvent.click(screen.getByRole('button', { name: /open/i }));
       // revealNode opens a digest in its source's thread (navigateToNode.test).
@@ -254,7 +254,7 @@ it('classifies uploaded remote images and unknown formats without treating them 
 
 describe('WorkspaceManage artifact open', () => {
   function openArtifactRow(name: string) {
-    fireEvent.click(screen.getByRole('button', { name: /Artifacts/i }));
+    fireEvent.click(screen.getByRole('tab', { name: /Artifacts/i }));
     fireEvent.mouseEnter(screen.getByText(name));
     fireEvent.click(screen.getByRole('button', { name: `preview ${name}` }));
   }

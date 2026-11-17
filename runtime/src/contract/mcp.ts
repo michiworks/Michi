@@ -1,4 +1,4 @@
-import type { ResultBundleV1 } from 'michi-shared';
+import type { FormField, FormFieldValue, ResultBundleV1 } from 'michi-shared';
 import type { McpHttpEndpoint } from '../mcp-host/types';
 import type { RuntimeSessionOwner } from './types';
 import type { AgentRunToolInvoker, AgentRunToolName, BridgeContextResult } from './tools';
@@ -125,13 +125,18 @@ export interface McpSlot {
    * prompt-injection defenses. The owning runtime strips it before
    * exposing assistant text. Host tool extension (turn-metadata protocol). */
   metadataDoneSentinel?: string;
-  /** Host tool extension: ask_user is offered only when it is present. */
+  /**
+   * Host tool extension: ask_user is offered only when it is present.
+   * Resolves with the answers keyed by question: a field question's typed
+   * value (askUserAnswers), any other question's answer text.
+   */
   onAskUser?: (questions: Array<{
     question: string;
     header?: string;
     options: Array<{ label: string; description?: string }>;
     multiSelect: boolean;
-  }>) => Promise<Record<string, string> | null>;
+    field?: FormField;
+  }>) => Promise<Record<string, FormFieldValue> | null>;
   /** Optional generic Agent Run tools, bound to the session's active turn;
    * absent, the slot offers none. Host tool extension. */
   agentRuns?: AgentRunToolInvoker;

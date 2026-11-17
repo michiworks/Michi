@@ -172,6 +172,8 @@ describe('buildFirstTurnPrefix', () => {
         const s = buildFirstTurnPrefix({ cwd: '/tmp/x', nativeForkParentNodeId: 'n-parent', nativeForkParentTitle: 'Design "v1"\nreview' });
         assert.match(s, /a branch of the thread "Design v1 review" \(node n-parent\) in the same conversation tree/);
         assert.match(s, /the parent thread has continued on its own since/);
+        assert.match(s, /Background work started in that history .* belongs to the parent thread: it keeps running there/);
+        assert.match(s, /do not relaunch or resume it here; to see its progress, inspect the parent thread \(node n-parent\)/);
         assert.match(buildFirstTurnPrefix({ cwd: '/tmp/x', nativeForkParentNodeId: 'n-parent' }), /thread "Untitled thread" \(node n-parent\)/);
         assert.doesNotMatch(buildFirstTurnPrefix({ cwd: '/tmp/x', workspaceInstructions: 'be brief' }), /a branch of the thread/);
     });

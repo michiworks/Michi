@@ -3,17 +3,16 @@
  * execution. Always-allow grants belong to one chat and are revocable.
  *
  * On top of the mode, Michi asks by consequence (design D19, Q26; lane D,
- * 2026-11-12), the same on every runtime that brings the call here:
- * - in a turn Michi drove (a work conversation) or that holds outside
- *   content (services/turnGuard.ts), whatever leaves the machine, or that
- *   Michi cannot read, asks, whatever the mode, grants or session trust say
- *   (forcedChatDecision); a Michi-driven conversation that started from
- *   content someone else wrote asks for network and credential reads too;
- * - in a Michi-driven turn everything else runs without asking: the work
- *   conversation's local, undoable work, in its own worktree;
- * - in a turn that only holds outside content, everything else follows the
- *   chat's mode, as in any other turn.
- * Reading outside content no longer sends the whole turn to Ask.
+ * 2026-11-12; narrowed 2026-11-13), the same on every runtime that brings
+ * the call here:
+ * - in a turn Michi drove (a work conversation, services/turnGuard.ts), a
+ *   dangerous egress (callConsequence `danger`: a push or a change to a
+ *   default branch, a deploy, a code review or its comments, a message or
+ *   email) asks, whatever the mode, grants or session trust say
+ *   (forcedChatDecision); everything else runs without asking;
+ * - in a check-in's own turn, whatever is not a read or a local change is
+ *   refused (backgroundRefusal);
+ * - a turn the user sent follows the chat's mode, whatever it read.
  */
 
 import { getRuntimeDeps } from "./runtimeDeps";
@@ -37,8 +36,7 @@ export function permissionNodeId(owner: RuntimeSessionOwner | undefined): string
 /**
  * The chat's permission mode for the turn now starting: the stored one. A
  * turn that holds outside content keeps it (D19: by consequence, not by
- * what it read); what must ask in such a turn asks through
- * forcedChatDecision, whatever the mode.
+ * what it read).
  */
 export function chatPermissionMode(owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null): ChatPermissionMode {
     const nodeId = permissionNodeId(owner);
@@ -93,8 +91,8 @@ function permissionDeps(): RuntimeDeps | undefined {
 /** Allowed in Ask when Michi checks a tool before it runs (Pi). A runtime's
  * own request for one of these asks. */
 const READ_TOOLS = new Set(['read', 'ls', 'grep', 'find', 'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
-    // Showing a workspace image to the user, and Pi's web reads (behind the user's web search setting).
-    'show_image', 'web_search', 'fetch_content',
+    // Showing a workspace image or rich blocks to the user, and Pi's web reads (behind the user's web search setting).
+    'show_image', 'show_blocks', 'web_search', 'fetch_content',
     'spawn_branches', 'save_artifact', 'update_artifact',
     // Pi's session-local todo list: no file, command, network or workspace effect.
     'todo']);
@@ -115,9 +113,10 @@ function michiToolNames(names: readonly string[]): Set<string> {
 // it starts (threadMessageWakes.ts), whose own rules then hold (D19).
 const THREAD_MESSAGE_TOOLS = michiToolNames(['send_to_thread']);
 
-// Michi's question card, which the user answers or skips: no permission card
-// in front of it, as on Pi.
-const QUESTION_TOOLS = michiToolNames(['ask_user']);
+// Michi's question card, which the user answers or skips, and blocks shown in
+// the reply, whose answer is only ever sent by the user's own click: no
+// permission card in front of them, as on Pi.
+const QUESTION_TOOLS = michiToolNames(['ask_user', 'show_blocks']);
 
 // Michi Memory reads, writes and deletes (agents/memoryTools.ts) under every
 // runtime's name for them: Pi's, Claude's and Codex's MCP name, Kiro's; in
@@ -206,7 +205,7 @@ const HOST_METADATA_TOOLS = new Set(['set_branch_overview', 'set_follow_ups', 's
 // no runtime prompt is added on top, as for scoped thread messaging above.
 const COMPANION_SELF_GATED_TOOLS = new Set(['companion_items', 'companion_item', 'companion_check_now',
     'companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal', 'companion_propose',
-    'companion_publish_brief', 'companion_set_name', 'companion_set_notifications', 'companion_read', 'companion_pipeline_detail',
+    'companion_set_name', 'companion_set_notifications', 'companion_read', 'companion_pipeline_detail',
     'companion_session_send', 'companion_headline', 'nothing_to_do']
     .flatMap((name) => [name, `mcp____michi_internal____${name}`, `@michi/${name}`]));
 
@@ -231,15 +230,13 @@ function selfGated(owner: RuntimeSessionOwner, toolName: string, nativeRequest: 
 export interface ForcedAsk { decision: 'ask'; reason: string; verdict: CallVerdict }
 
 const WHY_DRIVEN = 'Michi is doing this work for you';
-const WHY_OUTSIDE = 'this conversation read content from outside';
 const WHY_SOURCED = 'this work started from content someone else wrote';
 
 /**
  * A decision no mode, always-allow grant or session trust overrides (D19,
- * Q26): in a guarded turn (services/turnGuard.ts), a call that leaves the
- * machine, or that Michi cannot read, asks; in a Michi-driven conversation
- * that started from content someone else wrote, network and credential
- * reads ask too. Null otherwise: the mode decides. Michi's self-gated tools
+ * Q26; narrowed 2026-11-13): in a turn Michi drove (services/turnGuard.ts),
+ * a dangerous egress (callConsequence `danger`) asks. Null otherwise: the
+ * work conversation runs it, or the mode decides. Michi's self-gated tools
  * are never forced (their own rules hold).
  */
 export function forcedChatDecision(owner: RuntimeSessionOwner, toolName: string, detail: ChatCallDetail = {}, nativeRequest = false,
@@ -249,15 +246,9 @@ export function forcedChatDecision(owner: RuntimeSessionOwner, toolName: string,
     // A check-in's own turn has nobody to ask: backgroundRefusal refuses instead.
     if (!guard || guard.background) return null;
     const verdict = callConsequence({ toolName, input: detail.input, hostTool, kind: detail.kind, annotations: detail.annotations });
-    const because = guard.outsideSourced ? WHY_SOURCED : guard.michiDriven ? WHY_DRIVEN : WHY_OUTSIDE;
-    const what = verdict.why ?? toolName;
-    if (verdict.consequence === 'egress') return { decision: 'ask', reason: `Leaves this machine (${what}), and ${because}.`, verdict };
-    if (verdict.consequence === 'unclear') return { decision: 'ask', reason: `Michi cannot tell whether this leaves the machine (${what}), and ${because}.`, verdict };
-    if (guard.outsideSourced && (verdict.consequence === 'network_read' || verdict.consequence === 'credential_read')) {
-        const reads = verdict.consequence === 'network_read' ? 'Reaches the network' : 'Reads credentials';
-        return { decision: 'ask', reason: `${reads} (${what}), and ${because}.`, verdict };
-    }
-    return null;
+    if (verdict.consequence !== 'egress' || !verdict.danger) return null;
+    const because = guard.outsideSourced ? WHY_SOURCED : WHY_DRIVEN;
+    return { decision: 'ask', reason: `Leaves this machine (${verdict.why ?? toolName}), and ${because}.`, verdict };
 }
 
 /**
@@ -281,10 +272,9 @@ export function backgroundRefusal(owner: RuntimeSessionOwner, toolName: string, 
  * Michi's own self-scoped tools, its Artifact reads, tools that ask the user
  * themselves, the agent's own tools, multi-model plans and Michi's reply
  * metadata, native requests ask in Ask mode; Pi also gates unknown/MCP tools
- * before execution. In a guarded turn (D19, Q26), forcedChatDecision asks
- * first; what it lets through runs without asking in a Michi-driven turn (a
- * work conversation), and by the chat's mode in a turn that only holds
- * outside content. `hostTool`: PermissionDecisionRequest.hostTool. */
+ * before execution. In a Michi-driven turn (D19, Q26), forcedChatDecision
+ * asks first, and what it lets through runs without asking (a work
+ * conversation). `hostTool`: PermissionDecisionRequest.hostTool. */
 export function resolveChatPolicy(owner: RuntimeSessionOwner, ownerUserId: string | null, toolName: string, nativeRequest = false,
     mode = chatPermissionMode(owner, ownerUserId), hostTool = false, detail: ChatCallDetail = {}): PermissionDecision {
     const nodeId = permissionNodeId(owner);

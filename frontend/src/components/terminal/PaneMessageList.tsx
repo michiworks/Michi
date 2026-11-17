@@ -1,8 +1,8 @@
 import React from 'react';
-import { ChevronDown, LoaderCircle } from 'lucide-react';
 import { animate } from 'motion/react';
-import type { ChatNodeState, SubagentInfo } from '../../state/chatTypes';
+import type { ChatNodeState } from '../../state/chatTypes';
 import type { Prefs } from '../../state/prefs';
+import { messageDensity } from '../../state/density';
 import { visibleMessageText } from '../../state/assistantBlocks';
 import { FollowUpRow } from '../FollowUpRow';
 import { DARK_PALETTES } from './tokens';
@@ -14,32 +14,44 @@ import { StreamActivityIndicator, deriveStreamActivity } from './StreamActivityI
 import type { ChildAnchor } from '../../state/branchAnchors';
 import { countRender } from '../../services/renderCounters';
 import { shouldShowFollowUps } from '../../state/followUpsVisibility';
-import { usageIsUnverifiable } from 'michi-shared';
+import { usageIsUnverifiable, type RuntimeWarning } from 'michi-shared';
 import { useOptionalAgentDomain } from '../../state/agentDomain';
-import { useOptionalChatActions } from '../../state/chatStore';
+import { useOptionalChatActions, useOptionalStructuralSelector } from '../../state/chatStore';
 import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID, workspaceBackendApiBase } from '../../config/backendConnections';
 import { ReplySourcesContext, type ReplySourcesTarget } from '../../state/memory/replySources';
 import { AgentRunCardGroup } from './agentRuns/AgentRunCard';
 import { MessageSubagents } from './subagents/SubagentRoster';
 import { useWorkflowPlacementsForNode, workflowRunKey, type WorkflowPlacement } from '../../state/workflowDomain';
 import { latestAssistantMessageId, messageSubagentRoster, workflowMessageResolver } from '../../state/backgroundWork';
-import { turnOwnSubagents } from '../../state/turnSubagents';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
-import { unclaimedSubagents } from './subagents/subagentPresentation';
+import { inlineSubagentRoster } from './subagents/subagentPresentation';
 import { BackgroundWorkNodeContext, openWorkflowRunDrawer } from './backgroundWork/backgroundWorkEvents';
 import { MichiLinkConnectionContext } from './assistant/linkConnection';
-import { selectParentRunCards } from './agentRuns/agentRunSelectors';
+import { groupParentRunCards, type LocatedAgentRun } from './agentRuns/agentRunSelectors';
 import { agentResourceKey, type AgentResourceIdentity } from '../../state/agentIdentity';
 import { useSourceReference } from '../../state/sourceNav/sourceNav';
 import { SourceReferenceMark } from './source/SourceReferenceMark';
 import { isFresh } from '../../motion/useFresh';
+import { DUR } from '../../motion/tokens';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
 import type { MultiModelBranchControls } from './multiModelBranch';
 import { unloadedOlderMessageCount } from '../../state/nodeMessageCount';
+import { ChatIcon, ChevronDownIcon, CloseIcon, SpinnerIcon, WarningIcon } from './icons';
+import { DeferredToolCallsScope } from '../../state/deferredToolCalls';
+import { useDeferredToolPrefetch } from './deferredToolPrefetch';
+
+const NO_RUNS: readonly LocatedAgentRun[] = [];
+
+// The chrome under the messages, memoized: each takes only the fields it
+// shows, so streamed chunks skip it (MO-17).
+const MergeSourcesNotice = React.memo(MergeSourcesNoticeInner);
+const McpServerError = React.memo(McpServerErrorInner);
+const RuntimeWarningBanner = React.memo(RuntimeWarningBannerInner);
+const FollowUpsSection = React.memo(FollowUpsSectionInner);
 
 // The un-dim keeps the transition too, so leaving edit mode fades back in.
 const FRAME_STYLE: React.CSSProperties = { transition: 'opacity var(--t-enter)' };
-const DIMMED_FRAME_STYLE: React.CSSProperties = { ...FRAME_STYLE, opacity: 0.38, filter: 'saturate(0.5)' };
+const DIMMED_FRAME_STYLE: React.CSSProperties = { ...FRAME_STYLE, opacity: 0.38 };
 
 /**
  * Whether a message plays its entrance: it was created while this list was
@@ -71,33 +83,6 @@ function replyUsageInfo(node: ChatNodeState, i: number): TurnUsageInfo | undefin
   };
 }
 
-/**
- * The conversation's one inline subagent roster: the agents no delegation
- * chip claims, from every turn, under the newest message that lists any.
- * A later turn that reports on agents an earlier one listed (a background
- * agent's completion, the agents still running then) moves the roster
- * down rather than listing them again. First-seen order, each agent's
- * newest copy (its line shows the folded state).
- */
-function inlineSubagentRoster(
-  node: Pick<ChatNodeState, 'messages' | 'subagents'>,
-  tailAssistantId: string | undefined,
-  own: ReadonlyMap<string, readonly SubagentInfo[]>,
-): { messageId: string; subagents: SubagentInfo[] } | undefined {
-  let messageId: string | undefined;
-  const bySession = new Map<string, SubagentInfo>();
-  for (const message of node.messages) {
-    const roster = messageSubagentRoster(node, message, tailAssistantId);
-    if (!roster) continue;
-    const listed = unclaimedSubagents(own.get(message.id) ?? roster, message.toolCalls);
-    if (listed.length === 0) continue;
-    messageId = message.id;
-    // Map keeps the first insertion position; set() replaces the value.
-    for (const subagent of listed) bySession.set(subagent.sessionId, subagent);
-  }
-  return messageId ? { messageId, subagents: [...bySession.values()] } : undefined;
-}
-
 function useOptionalAgentRunUi() {
   const domain = useOptionalAgentDomain();
   const actions = useOptionalChatActions();
@@ -107,6 +92,11 @@ function useOptionalAgentRunUi() {
 
 interface PaneMessageListProps {
   node: ChatNodeState;
+  /**
+   * The first message to mount (TPane's progressiveMount): those above it
+   * come in later batches. 0, the default, mounts them all.
+   */
+  mountFrom?: number;
   loadingOlder?: boolean;
   onLoadOlder?: () => void;
   mergeSourceLabels?: readonly string[];
@@ -115,6 +105,8 @@ interface PaneMessageListProps {
   streaming: boolean;
   onRetryTurn: (userMessageIndex: number) => void;
   onRunAgain?: (userMessageIndex: number) => void;
+  /** Carry on the latest turn its answer marks stopped or ended early (chatStore resumeLastTurn). */
+  onContinueTurn?: () => void;
   onEditUserMessage: (text: string) => void;
   onContinueFollowUp: (question: string) => void;
   onBranchFollowUp: (question: string) => void;
@@ -161,6 +153,7 @@ interface PaneMessageListProps {
 
 function PaneMessageListInner({
   node,
+  mountFrom = 0,
   loadingOlder = false,
   onLoadOlder,
   mergeSourceLabels,
@@ -169,6 +162,7 @@ function PaneMessageListInner({
   streaming,
   onRetryTurn,
   onRunAgain,
+  onContinueTurn,
   onEditUserMessage,
   onContinueFollowUp,
   onBranchFollowUp,
@@ -201,6 +195,22 @@ function PaneMessageListInner({
   }, [nodeId]);
   const backendConnectionId = backendConnectionIdForWorkspace(node.projectId);
   const projectId = node.projectId;
+  // Run cards by the message that started them, grouped once per change to
+  // the runs, never per streamed chunk; the open handlers keep their identity
+  // too, so the memoized card groups skip the chunks.
+  const agentRuns = agentRunUi?.domain.state.runs;
+  const agentRunActions = agentRunUi?.actions;
+  const runsByMessage = React.useMemo(
+    () => groupParentRunCards(agentRuns ? Object.values(agentRuns) : [], backendConnectionId),
+    [agentRuns, backendConnectionId],
+  );
+  const openRun = React.useCallback((identity: AgentResourceIdentity) => {
+    const resource = agentRuns?.[agentResourceKey(identity)];
+    agentRunActions?.openAgentRunPane(identity, projectId, resource?.value.effectiveDefinition.name);
+  }, [agentRuns, agentRunActions, projectId]);
+  const openRuns = React.useCallback((identities: AgentResourceIdentity[]) => {
+    for (const identity of identities) openRun(identity);
+  }, [openRun]);
   // The reply whose turn still runs after its visible answer asks once the turn is done (the backend stores its sources then).
   const runningMessageId = node.backgroundTurnAssistantId ?? null;
   const replySourcesTarget = React.useMemo<ReplySourcesTarget | null>(() => (replySources ? {
@@ -210,16 +220,7 @@ function PaneMessageListInner({
   // Recomputes on every stream chunk (the reducer hands a fresh messages
   // array each chunk); the helper scans backward without copying.
   const tailAssistantId = React.useMemo(() => latestAssistantMessageId(node.messages), [node.messages]);
-  // Agents a turn lists inline: its own, not ones that ended in an earlier
-  // turn and reappear in this turn's roster.
-  const ownSubagents = React.useMemo(
-    () => turnOwnSubagents({ messages: node.messages, subagents: node.subagents }, tailAssistantId),
-    [node.messages, node.subagents, tailAssistantId],
-  );
-  const inlineSubagents = React.useMemo(
-    () => inlineSubagentRoster({ messages: node.messages, subagents: node.subagents }, tailAssistantId, ownSubagents),
-    [node.messages, node.subagents, tailAssistantId, ownSubagents],
-  );
+  const inlineSubagents = React.useMemo(() => inlineSubagentRoster(node), [node]);
   // Workflow runs this chat launched, attached to the message whose tool
   // call launched them. A run without a known launcher goes to the last
   // assistant message that existed when it started, so it stays in place
@@ -247,17 +248,28 @@ function PaneMessageListInner({
   // brings grows in, once. One that comes with the history (opened, lazily
   // loaded, remounted by a retry or edit) renders settled.
   const streamedHereRef = React.useRef(new Set<string>());
+  // The reply whose turn ended while this list watched it: its follow-ups pop
+  // in once (TR-29), whether they show in that commit or once its text has
+  // drained. Restored, remounted and re-expanded follow-ups render settled.
+  const followUpsArriveForRef = React.useRef<string | null>(null);
   const tailMessage = node.messages[node.messages.length - 1];
   const tailReplyKey = tailMessage?.role === 'assistant' ? tailMessage.clientKey ?? tailMessage.id : null;
   React.useLayoutEffect(() => {
     if (!tailReplyKey) return;
     if (node.status === 'streaming') streamedHereRef.current.add(tailReplyKey);
-    // The turn ended and its receipt, if any, has mounted.
-    else streamedHereRef.current.delete(tailReplyKey);
-  }, [node.status, tailReplyKey]);
-  // Kept across turns: the section unmounts while a turn runs.
+    // The turn ended and its text drained: its receipt, if any, has mounted.
+    else if (!tailAnswerSmoothing && streamedHereRef.current.delete(tailReplyKey)) followUpsArriveForRef.current = tailReplyKey;
+  }, [node.status, tailReplyKey, tailAnswerSmoothing]);
+  const followUpsArrive = !!tailReplyKey
+    && (streamedHereRef.current.has(tailReplyKey) || followUpsArriveForRef.current === tailReplyKey);
+  const followUpsArrived = React.useCallback(() => { followUpsArriveForRef.current = null; }, []);
+  // Kept across turns: the section unmounts while a turn runs. A toggle ends
+  // the pop, so re-expanding never replays it.
   const [followUpsCollapsed, setFollowUpsCollapsed] = React.useState(false);
-  const toggleFollowUps = React.useCallback(() => setFollowUpsCollapsed((value) => !value), []);
+  const toggleFollowUps = React.useCallback(() => {
+    followUpsArriveForRef.current = null;
+    setFollowUpsCollapsed((value) => !value);
+  }, []);
   // Suppress follow-ups while the turn is still running, and after it failed:
   // any left are an earlier reply's. node.status is persisted in the DB and
   // survives hydration, unlike message-level m.streaming which mapMessageRow()
@@ -325,7 +337,15 @@ function PaneMessageListInner({
   // last message takes its live activity row and reply space along.
   const decorations = useMetaChatDecorations();
   const hideMessage = decorations?.hideMessage;
+  // Finished turns whose calls came without their bodies: read when on screen.
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const deferredSignature = React.useMemo(() => node.messages
+    .filter((message) => message.role === 'assistant' && message.toolCalls.some((tool) => tool.deferred))
+    .map((message) => message.id).join('\n'), [node.messages]);
+  useDeferredToolPrefetch(listRef, node.nodeId, deferredSignature);
   const tailHidden = !!hideMessage && !!tailMessage && hideMessage(tailMessage, node.messages.length - 1, node.messages);
+  // The tail chrome below takes only the fields it shows, so chunk commits skip it.
+  const activity = deriveStreamActivity(node, { showThoughts: prefs.showThoughts });
 
   return (
     <NodeUserInputContext.Provider value={userInputCtx}>
@@ -333,22 +353,22 @@ function PaneMessageListInner({
     <ReplySourcesContext.Provider value={replySourcesTarget}>
     {/* An agent on the thread's backend wrote its michi:// links in that backend's ids. */}
     <MichiLinkConnectionContext.Provider value={backendConnectionId}>
-    <div style={contentStyle}>
-      {node.historyBefore && onLoadOlder && (
+    <div style={contentStyle} ref={listRef}>
+      {node.historyBefore && onLoadOlder && mountFrom === 0 && (
         <button type="button" disabled={loadingOlder} onClick={onLoadOlder}
-          className="mb-4 w-full rounded border border-line px-3 py-2 text-sm text-muted hover:bg-surface disabled:opacity-50">
+          className="mb-4 w-full rounded border border-line px-3 py-2 text-sm text-fg-subtle hover:bg-surface disabled:opacity-50">
           {loadingOlder ? 'Loading older messages…' : 'Load older messages'}
         </button>
       )}
-      <MergeSourcesNotice node={node} sourceLabels={mergeSourceLabels} />
-      {!node.historyBefore && !isPlaceholder && decorations?.leading}
+      <MergeSourcesNotice mergeSources={node.mergeSources} parentNodeId={node.parentNodeId} sourceLabels={mergeSourceLabels} />
+      {!node.historyBefore && !isPlaceholder && mountFrom === 0 && decorations?.leading}
 
       {isPlaceholder && (
         <MessagesLoadingPlaceholder key={node.nodeId} nodeId={node.nodeId} connectionId={backendConnectionId}
           reduceMotion={prefs.reduceMotion} />
       )}
       {node.messages.map((m, i) => {
-        if (hideMessage?.(m, i, node.messages)) return null;
+        if (i < mountFrom || hideMessage?.(m, i, node.messages)) return null;
         const isUser = m.role === 'user';
         let retryText: string | undefined;
         if (isUser) {
@@ -391,9 +411,7 @@ function PaneMessageListInner({
           ? node.messages.findIndex((msg) => msg.id === editingMessageId)
           : -1;
         const isDownstream = editingIdx >= 0 && i > editingIdx;
-        const parentRuns = agentRunUi && !isUser
-          ? selectParentRunCards(Object.values(agentRunUi.domain.state.runs), backendConnectionId, m.id)
-          : [];
+        const parentRuns = isUser ? NO_RUNS : runsByMessage.get(m.id) ?? NO_RUNS;
         // The durable roster lives on the message that spawned the agents.
         // Messages saved before rosters were persisted fall back to the live
         // node roster, which only ever belongs to the tail turn.
@@ -429,9 +447,11 @@ function PaneMessageListInner({
               data-source-referenced={sourceReference?.messageId === m.id ? 'true' : undefined}
               data-run-part={run.runContinues ? 'true' : undefined}
               data-run-end={endsRun ? 'true' : undefined}
+              data-deferred-tools={!isUser && m.toolCalls.some((tool) => tool.deferred) ? 'true' : undefined}
               className="terminal-message-frame"
               style={isDownstream ? DIMMED_FRAME_STYLE : FRAME_STYLE}
             >
+              <DeferredToolCallsScope nodeId={node.nodeId} messageId={m.id}>
               <MessageBlock
                 m={m}
                 fresh={fresh}
@@ -441,12 +461,13 @@ function PaneMessageListInner({
                 index={i}
                 isDark={isDark}
                 editing={m.id === editingMessageId}
-                hideActions={isStreamingTail}
+                // The meta line, like the follow-ups, waits for the typewriter to drain.
+                hideActions={isStreamingTail || (m.id === tailAssistantId && tailAnswerSmoothing)}
                 pinned={isLatestAnswer}
                 continuesRun={run.continuesRun}
                 runContinues={run.runContinues}
                 actionsAtRest={m.role !== 'user' && i === node.messages.length - 1}
-                hidePendingIndicator={isStreamingTail && deriveStreamActivity(node) !== null}
+                hidePendingIndicator={isStreamingTail && activity !== null}
                 onEditSave={m.id === editingMessageId ? (newText) => onEditSave?.(i, newText) : undefined}
                 onEditCancel={m.id === editingMessageId ? onEditCancel : undefined}
                 copyText={() => (runParts
@@ -483,16 +504,12 @@ function PaneMessageListInner({
                   const userIdx = node.messages.slice(0, i).findLastIndex((msg) => msg.role === 'user');
                   if (userIdx >= 0) onRunAgain(userIdx);
                 } : undefined}
+                onContinue={!readOnly && isLatestAnswer && m.turnEnd && !inFailedStep ? onContinueTurn : undefined}
                 onTestConnection={isErrorTail ? onTestConnection : undefined}
                 planStep={isErrorTail && inFailedStep ? planStep : undefined}
                 freshContext={isUser && m.threadMessage?.plan ? node.freshContext : undefined}
                 showThoughts={prefs.showThoughts}
-                density={prefs.terminalDensity}
-                fontFamily={{
-                  sans: 'var(--ui-font)',
-                  serif: 'Georgia, "Times New Roman", serif',
-                  mono: 'var(--ui-font)',
-                }[prefs.fontFamily]}
+                density={messageDensity(prefs.sidebarDensity)}
                 usageInfo={endsRun
                   ? mergeRunUsage(runParts!.map((_, k) => replyUsageInfo(node, run.start + k)))
                   : replyUsageInfo(node, i)}
@@ -510,8 +527,10 @@ function PaneMessageListInner({
                 }
                 readOnly={readOnly}
               />
+              </DeferredToolCallsScope>
               {!isUser &&
                 node.status !== 'streaming' &&
+                !tailAnswerSmoothing &&
                 i === node.messages.length - 1 && (
                   <DiffReceipt message={m} workspaceId={node.projectId} enter={streamedHereRef.current.has(rowKey)} />
                 )}
@@ -521,27 +540,7 @@ function PaneMessageListInner({
               {inlineSubagents?.messageId === m.id && <MessageSubagents subagents={inlineSubagents.subagents} />}
               {parentRuns.length > 0 && (
                 <div style={{ margin: '8px 0 2px' }}>
-                  <AgentRunCardGroup
-                    runs={parentRuns}
-                    onOpen={(identity) => {
-                      const resource = agentRunUi?.domain.state.runs[agentResourceKey(identity)];
-                      agentRunUi?.actions.openAgentRunPane(
-                        identity,
-                        node.projectId,
-                        resource?.value.effectiveDefinition.name,
-                      );
-                    }}
-                    onOpenAll={(identities) => {
-                      for (const identity of identities) {
-                        const resource = agentRunUi?.domain.state.runs[agentResourceKey(identity)];
-                        agentRunUi?.actions.openAgentRunPane(
-                          identity,
-                          node.projectId,
-                          resource?.value.effectiveDefinition.name,
-                        );
-                      }
-                    }}
-                  />
+                  <AgentRunCardGroup runs={parentRuns} onOpen={openRun} onOpenAll={openRuns} />
                 </div>
               )}
             </div>
@@ -563,14 +562,28 @@ function PaneMessageListInner({
         </div>
       )}
 
-      {!tailHidden && <StreamActivityIndicator node={node} showThoughts={prefs.showThoughts} />}
-      <McpServerError node={node} />
-      <RuntimeWarningBanner node={node} />
+      {!tailHidden && (
+        <StreamActivityIndicator
+          label={activity?.label}
+          detail={activity?.detail}
+          streamingStartedAt={node.streamingStartedAt}
+          live={node.status === 'streaming' && !node.visibleResponseComplete}
+        />
+      )}
+      <McpServerError error={node.mcpServerError} />
+      <RuntimeWarningBanner nodeId={nodeId} />
       {followUpsNode && !readOnly && (
         <FollowUpsSection
-          node={followUpsNode}
+          followUps={followUpsNode.followUps}
+          status={followUpsNode.status}
+          visibleResponseComplete={followUpsNode.visibleResponseComplete}
+          followUpsGenerating={followUpsNode.followUpsGenerating}
           leaving={!showSection}
           onLeft={followUpsLeft}
+          // Rows show only once the turn ended: set while it runs, the flag
+          // would only re-render the memoized section on a streamed chunk.
+          arriving={showSection && !turnStillRunning && followUpsArrive}
+          onArrived={followUpsArrived}
           collapsed={followUpsCollapsed}
           onToggleCollapsed={toggleFollowUps}
           onContinueFollowUp={onContinueFollowUp}
@@ -588,11 +601,13 @@ function PaneMessageListInner({
 
 export const PaneMessageList = React.memo(PaneMessageListInner, (prev, next) =>
   prev.node === next.node &&
+  (prev.mountFrom ?? 0) === (next.mountFrom ?? 0) &&
   prev.mergeSourceLabels === next.mergeSourceLabels &&
   prev.prefs === next.prefs &&
   prev.contentStyle === next.contentStyle &&
   prev.streaming === next.streaming &&
   prev.onRetryTurn === next.onRetryTurn &&
+  prev.onContinueTurn === next.onContinueTurn &&
   prev.onEditUserMessage === next.onEditUserMessage &&
   prev.onContinueFollowUp === next.onContinueFollowUp &&
   prev.onBranchFollowUp === next.onBranchFollowUp &&
@@ -614,17 +629,19 @@ export const PaneMessageList = React.memo(PaneMessageListInner, (prev, next) =>
 
 PaneMessageList.displayName = 'PaneMessageList';
 
-function MergeSourcesNotice({
-  node,
+function MergeSourcesNoticeInner({
+  mergeSources,
+  parentNodeId,
   sourceLabels,
 }: {
-  node: ChatNodeState;
+  mergeSources?: readonly string[];
+  parentNodeId?: string;
   sourceLabels?: readonly string[];
 }) {
-  if ((node.mergeSources?.length ?? 0) === 0) return null;
+  if ((mergeSources?.length ?? 0) === 0) return null;
   const sourceIds = [
-    ...(node.parentNodeId ? [node.parentNodeId] : []),
-    ...(node.mergeSources ?? []),
+    ...(parentNodeId ? [parentNodeId] : []),
+    ...(mergeSources ?? []),
   ];
   const allSources = sourceLabels ?? sourceIds;
 
@@ -637,7 +654,7 @@ function MergeSourcesNotice({
         {allSources.map((label, i) => {
           return (
             <div key={`${label}-${i}`} className="t-pre-block-quoted" title={label}>
-              ⧉ {label}
+              <ChatIcon size="sm" style={{ verticalAlign: 'text-bottom' }} /> {label}
             </div>
           );
         })}
@@ -646,29 +663,50 @@ function MergeSourcesNotice({
   );
 }
 
-function RuntimeWarningBanner({ node }: { node: ChatNodeState }) {
+interface LatestWarning {
+  warning: RuntimeWarning;
+  /** The message that carries it, else the turn it came in. */
+  ownerId: string;
+}
+
+/** The node's newest runtime warning, from a message or else the node. */
+function latestWarning(node: ChatNodeState | undefined): LatestWarning | null {
+  if (!node) return null;
   const owner = node.messages.findLast(message => message.warnings?.length);
   const warning = owner?.warnings?.at(-1) ?? node.warning;
+  return warning ? { warning, ownerId: owner?.id ?? node.activeTurnId ?? '' } : null;
+}
+
+const sameWarning = (a: LatestWarning | null, b: LatestWarning | null) =>
+  a === b || (!!a && !!b && a.warning === b.warning && a.ownerId === b.ownerId);
+
+/**
+ * Reads the warning on the structure channel: the 'warning' action is not
+ * HIGH_FREQ, so streamed chunks neither re-render the banner nor re-scan the
+ * messages.
+ */
+function RuntimeWarningBannerInner({ nodeId }: { nodeId: string }) {
+  const select = React.useCallback((nodes: Record<string, ChatNodeState>) => latestWarning(nodes[nodeId]), [nodeId]);
+  const latest = useOptionalStructuralSelector(select, sameWarning);
   const [dismissedKey, setDismissedKey] = React.useState<string>();
-  const key = warning ? `${owner?.id ?? node.activeTurnId ?? ''}:${warning.source}:${warning.category}:${warning.message}` : undefined;
+  const warning = latest?.warning;
+  const key = latest ? `${latest.ownerId}:${latest.warning.source}:${latest.warning.category}:${latest.warning.message}` : undefined;
   if (!warning || key === dismissedKey) return null;
   const label = warning.source === 'mcp' ? `MCP server "${warning.serverName ?? 'unknown'}"` : warning.source;
   return <div role="status" className="t-pre-block" style={{ margin: '8px 0', display: 'flex', gap: 8 }}>
     <span style={{ flex: 1, overflowWrap: 'anywhere' }}>{label}: {warning.message}</span>
-    <button type="button" aria-label="Dismiss warning" onClick={() => setDismissedKey(key)}>×</button>
+    <button type="button" aria-label="Dismiss warning" onClick={() => setDismissedKey(key)}><CloseIcon size="sm" /></button>
   </div>;
 }
 
-function McpServerError({ node }: { node: ChatNodeState }) {
+function McpServerErrorInner({ error }: { error: ChatNodeState['mcpServerError'] }) {
   const [dismissed, setDismissed] = React.useState(false);
 
   // Reset local dismiss when the error identity changes (new failure on same node).
-  const errorKey = node.mcpServerError
-    ? `${node.mcpServerError.serverName}::${node.mcpServerError.error}`
-    : null;
+  const errorKey = error ? `${error.serverName}::${error.error}` : null;
   React.useEffect(() => { setDismissed(false); }, [errorKey]);
 
-  if (!node.mcpServerError || dismissed) return null;
+  if (!error || dismissed) return null;
 
   return (
     <div
@@ -685,8 +723,9 @@ function McpServerError({ node }: { node: ChatNodeState }) {
         gap: 8,
       }}
     >
+      <WarningIcon size="sm" style={{ flexShrink: 0 }} />
       <span style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-        ⚠ MCP server &quot;{node.mcpServerError.serverName}&quot; failed: {node.mcpServerError.error}
+        MCP server &quot;{error.serverName}&quot; failed: {error.error}
       </span>
       <button
         type="button"
@@ -703,15 +742,18 @@ function McpServerError({ node }: { node: ChatNodeState }) {
           lineHeight: 1,
           opacity: 0.7,
           flexShrink: 0,
+          display: 'inline-flex',
         }}
       >
-        ×
+        <CloseIcon />
       </button>
     </div>
   );
 }
 
-function followUpsLoading(node: ChatNodeState): boolean {
+type FollowUpFields = Pick<ChatNodeState, 'followUps' | 'status' | 'visibleResponseComplete' | 'followUpsGenerating'>;
+
+function followUpsLoading(node: FollowUpFields): boolean {
   return node.status === 'streaming' && !!node.followUpsGenerating && node.followUps.length === 0;
 }
 
@@ -733,20 +775,27 @@ function sentFromHere(shown: ChatNodeState | null, node: ChatNodeState): boolean
   return !!sent && isFresh(sent.createdAt) && lastUserKey(node) !== lastUserKey(shown);
 }
 
-function FollowUpsSection({
-  node,
+function FollowUpsSectionInner({
+  followUps,
+  status,
+  visibleResponseComplete,
+  followUpsGenerating,
   leaving,
   onLeft,
+  arriving,
+  onArrived,
   collapsed,
   onToggleCollapsed,
   onContinueFollowUp,
   onBranchFollowUp,
   disabled,
-}: {
-  node: ChatNodeState;
+}: FollowUpFields & {
   /** A send cleared it: fade out (120ms), then onLeft. */
   leaving: boolean;
   onLeft: () => void;
+  /** Its turn ended on screen: the rows pop in; the last one's end calls onArrived. */
+  arriving: boolean;
+  onArrived: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onContinueFollowUp: (question: string) => void;
@@ -759,21 +808,21 @@ function FollowUpsSection({
   React.useLayoutEffect(() => {
     const el = sectionRef.current;
     if (!leaving || !el) return;
-    const controls = animate(el, { opacity: 0 }, { duration: 0.12, ease: 'linear', onComplete: onLeft });
+    const controls = animate(el, { opacity: 0 }, { duration: DUR.brief, ease: 'linear', onComplete: onLeft });
     return () => {
       controls.stop();
       // Shown again (the send was refused and its follow-ups came back).
       el.style.opacity = '';
     };
   }, [leaving, onLeft]);
-  const loading = followUpsLoading(node);
+  const loading = followUpsLoading({ followUps, status, followUpsGenerating });
   // On a phone a background branch leaves the screen as it was, so the button
   // keeps the trace: it reads Branched. New follow-ups start clean.
   const phone = usePhoneLayout();
   const [branched, setBranched] = React.useState<ReadonlySet<string>>(() => new Set());
-  const [branchedFor, setBranchedFor] = React.useState(node.followUps);
-  if (branchedFor !== node.followUps) {
-    setBranchedFor(node.followUps);
+  const [branchedFor, setBranchedFor] = React.useState(followUps);
+  if (branchedFor !== followUps) {
+    setBranchedFor(followUps);
     setBranched(new Set());
   }
 
@@ -787,32 +836,32 @@ function FollowUpsSection({
       aria-hidden={present ? undefined : true}
       inert={!present}
     >
-      <header className="t-followups-heading">
-        <h3>Explore further</h3>
+      <h3 className="t-followups-heading">
         <button
           type="button"
           className="t-followups-toggle"
-          aria-label={collapsed ? 'Expand follow-ups' : 'Collapse follow-ups'}
-          title={collapsed ? 'Expand follow-ups' : 'Collapse follow-ups'}
           aria-expanded={!collapsed}
           aria-controls={contentId}
           onClick={onToggleCollapsed}
         >
-          <ChevronDown size={15} aria-hidden />
+          Explore further
+          <span className="t-followups-chevron" aria-hidden><ChevronDownIcon /></span>
         </button>
-      </header>
+      </h3>
       <div id={contentId} hidden={collapsed}>
         {loading ? (
           <>
-            <div className="t-followups-loading" role="status"><LoaderCircle size={14} aria-hidden className="motion-safe:animate-spin" />Preparing next steps...</div>
+            <div className="t-followups-loading" role="status"><SpinnerIcon className="motion-safe:animate-spin" />Preparing next steps…</div>
             <div aria-hidden>{[0, 1, 2].map(i => <div key={i} className="t-followup-skeleton" />)}</div>
           </>
-        ) : node.followUps.slice(0, 3).map((q, i) => (
+        ) : followUps.slice(0, 3).map((q, i, shown) => (
           <FollowUpRow
             key={i}
             index={i}
             question={q}
-            disabled={disabled || (node.status === 'streaming' && !node.visibleResponseComplete)}
+            arriving={arriving}
+            onArrived={i === shown.length - 1 ? onArrived : undefined}
+            disabled={disabled || (status === 'streaming' && !visibleResponseComplete)}
             onContinue={onContinueFollowUp}
             onBranch={(question) => {
               if (phone) setBranched((prev) => new Set(prev).add(question));

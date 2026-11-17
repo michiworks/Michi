@@ -28,7 +28,7 @@ describe('BrowserDock', () => {
 
   it('keeps the page visible while the dock is being resized', () => {
     render(<BrowserDock items={items} focusedPane="one" />, { wrapper });
-    const handle = screen.getByTitle('Drag to resize · Double-click to reset');
+    const handle = screen.getByRole('separator', { name: 'Resize browser' });
     handle.setPointerCapture = vi.fn();
     fireEvent.pointerDown(handle, { pointerId: 1, clientX: 400 });
     expect(screen.getByTestId('one').getAttribute('data-active')).toBe('true');
@@ -40,7 +40,7 @@ describe('BrowserDock', () => {
     const dock = container.querySelector<HTMLElement>('[data-browser-dock]')!;
     dock.getBoundingClientRect = () => ({ width: 600 } as DOMRect);
     Object.defineProperty(dock.parentElement!, 'clientWidth', { configurable: true, value: 1600 });
-    const handle = screen.getByTitle('Drag to resize · Double-click to reset');
+    const handle = screen.getByRole('separator', { name: 'Resize browser' });
     handle.setPointerCapture = vi.fn();
     // The handle is on the dock's left edge: moving left widens it.
     handle.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 1000 }));

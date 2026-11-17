@@ -130,7 +130,7 @@ class FakeChatManager implements CompanionTurnChatManager {
 function material(now: number): CompanionMaterial {
   return {
     now, lastLookAt: null, changes: [], open: [], goals: [], notes: '', notesRevision: 0, rules: '', reminders: [],
-    displayName: 'Michi', focus: [], cardResults: [], reports: [], catchUp: null, briefCurate: null,
+    displayName: 'Michi', focus: [], cardResults: [], reports: [],
   };
 }
 

@@ -23,7 +23,7 @@ function rule(css, selector) {
 }
 
 it('loops running indicators through classes, which the reduced-motion rules can stop', () => {
-  const inline = /['"`](tpulse|termBreathe|pulse|tspin) [^'"`]*infinite['"`]/;
+  const inline = /['"`](tpulse|termBreathe|pulse|tspin|tblink) [^'"`]*infinite['"`]/;
   const offenders = sources(src).filter((path) => inline.test(readFileSync(path, 'utf8')));
   expect(offenders.map((path) => relative(src, path))).toEqual([]);
 });

@@ -36,6 +36,8 @@ export interface CodexModel {
   isDefault: boolean;
   supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>;
   defaultReasoningEffort: string;
+  /** Speed tiers besides standard (codex 0.163+); absent on older app-servers. */
+  serviceTiers?: Array<{ id: string; name: string; description: string }>;
 }
 
 /** Name of the host's MCP server in a session's Codex config (a frozen external name). */

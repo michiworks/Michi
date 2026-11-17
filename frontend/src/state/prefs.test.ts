@@ -1,5 +1,6 @@
 import { SERVER_PREF_KEYS } from 'michi-shared';
 import { CORNER_RADIUS_MAX, DEFAULT_PREFS, PREF_STORAGE, normalizeCornerRadius } from './prefs';
+import { messageDensity } from './density';
 
 describe('DEFAULT_PREFS', () => {
   it('has slate as default terminal palette', () => {
@@ -14,8 +15,10 @@ describe('DEFAULT_PREFS', () => {
     expect(DEFAULT_PREFS.terminalAccentOverrides).toEqual({});
   });
 
-  it('has compact density by default', () => {
-    expect(DEFAULT_PREFS.terminalDensity).toBe('compact');
+  it('has the middle density by default: comfortable sidebar rows, compact messages', () => {
+    expect(DEFAULT_PREFS.sidebarDensity).toBe('comfortable');
+    expect(messageDensity(DEFAULT_PREFS.sidebarDensity)).toBe('compact');
+    expect([messageDensity('compact'), messageDensity('airy')]).toEqual(['dense', 'comfortable']);
   });
 
   it('has pane hairline rules enabled by default', () => {

@@ -128,6 +128,26 @@ describe('TreeSelectionBar', () => {
     expect(createMergedChat).not.toHaveBeenCalled();
   });
 
+  it('draws Select all as a box: mixed over part of the threads, checked over all, and unchecking clears', () => {
+    const store = makeStore({ treeSelection: new Set(['t-1']) });
+    mockHooks(store);
+    const { rerender } = render(<TreeSelectionBar />);
+    const box = screen.getByRole('checkbox', { name: 'Select all' }) as HTMLInputElement;
+    expect(box.indeterminate).toBe(true);
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    expect(store.selectAllTrees).toHaveBeenCalledOnce();
+
+    mockHooks({ ...store, treeSelection: new Set(['t-1', 't-2']) });
+    rerender(<TreeSelectionBar />);
+    expect(box.indeterminate).toBe(false);
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    expect(store.clearTreeSelection).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear selection' }));
+    expect(store.clearTreeSelection).toHaveBeenCalledTimes(2);
+  });
+
   it('shows that hint when every selected thread is in another workspace', () => {
     mockHooks(makeStore({ treeSelection: new Set(['t-x', 't-y']) }));
 

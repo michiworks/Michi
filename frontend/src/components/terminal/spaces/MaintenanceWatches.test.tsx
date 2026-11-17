@@ -61,6 +61,14 @@ describe('MaintenanceWatches', () => {
     expect(maintenance.removeWatch).toHaveBeenCalledWith('watch-1');
   });
 
+  it('moves focus into a watch’s form in place of Edit, and back to Edit when the form closes', () => {
+    render(<MaintenanceWatches maintenance={state([watch()])} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Name' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Edit' }));
+  });
+
   it('shows why a watch paused itself and offers to turn it back on', () => {
     const maintenance = state([watch({ enabled: false, nextCheckAt: null, pausedReason: 'Paused after 3 failed checks in a row: approval needed',
       lastRun: { state: 'failed', startedAt: 1, finishedAt: 2, summary: null, error: 'approval needed' } })]);

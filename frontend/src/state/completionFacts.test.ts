@@ -115,6 +115,21 @@ describe('reducers', () => {
     expect(reduceNodes(all, { type: 'mark-all-read', viewedAt: 30 })).toBe(all);
   });
 
+  it('what a seen view marks, a pane has yet to show; Read all and a plain view leave nothing', () => {
+    const unread = { n1: node({ completionSeq: 3, seenCompletionSeq: 1 }) };
+    const opened = reduceNodes(unread, { type: 'node-viewed', nodeId: 'n1', viewedAt: 10, seen: true });
+    expect(opened.n1.unreadOnOpen).toBe(2);
+    // A second mark before a pane showed it adds the replies since.
+    const more = reduceNodes({ n1: { ...opened.n1, completionSeq: 4 } }, { type: 'node-viewed', nodeId: 'n1', viewedAt: 11, seen: true });
+    expect(more.n1.unreadOnOpen).toBe(3);
+    expect(reduceNodes(more, { type: 'node-viewed', nodeId: 'n1', viewedAt: 12, seen: true }).n1.unreadOnOpen).toBe(3);
+    const shown = reduceNodes(more, { type: 'unread-on-open-shown', nodeId: 'n1' });
+    expect('unreadOnOpen' in shown.n1).toBe(false);
+    expect(reduceNodes(shown, { type: 'unread-on-open-shown', nodeId: 'n1' })).toBe(shown);
+    expect(reduceNodes(unread, { type: 'node-viewed', nodeId: 'n1', viewedAt: 10 }).n1.unreadOnOpen).toBeUndefined();
+    expect(reduceNodes(unread, { type: 'mark-all-read', viewedAt: 20 }).n1.unreadOnOpen).toBeUndefined();
+  });
+
   it('a gap snapshot never moves the counts back', () => {
     const server = node({ completionSeq: 3, seenCompletionSeq: 1, lastCompletedAt: 30 });
     expect(mergeCompletionFacts(server, node({ completionSeq: 2, seenCompletionSeq: 3, lastCompletedAt: 20 })))
@@ -128,7 +143,7 @@ describe('reducers', () => {
 
   it('a pending tree read ignores the seen count like the view mark', () => {
     const before = node({ completionSeq: 2, seenCompletionSeq: 1, viewedAt: 1 });
-    expect(sameTreeMessageNode(before, { ...before, seenCompletionSeq: 2, viewedAt: 5 })).toBe(true);
+    expect(sameTreeMessageNode(before, { ...before, seenCompletionSeq: 2, viewedAt: 5, unreadOnOpen: 1 })).toBe(true);
     expect(sameTreeMessageNode(before, { ...before, completionSeq: 3 })).toBe(false);
   });
 });

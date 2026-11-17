@@ -11,6 +11,7 @@ import { useBackgroundSubagentLiveness, useWorkflowRunsForNodes } from '../../..
 import { HoverTip } from '../../ui/Popover';
 import { TOPBAR_TIP_DELAY_MS } from '../TopbarIconButton';
 import { openBackgroundWork } from './backgroundWorkEvents';
+import { AgentRunGlyph } from '../icons';
 
 /**
  * What the top-bar button shows for the open panes (selectBackgroundWorkIndicator).
@@ -97,7 +98,7 @@ export default function BackgroundWorkButton({
           WebkitAppRegion: 'no-drag',
         } as React.CSSProperties}
       >
-        <span aria-hidden className={state === 'running' ? 'agent-glyph-run' : undefined} style={{ color, fontSize: 'var(--bgw-glyph-size, var(--fs-2xs))' }}>◆</span>
+        <AgentRunGlyph running={state === 'running'} style={{ color }} />
         <span>{runningCount > 0 ? runningCount : indicator.total}</span>
       </button>
     </HoverTip>

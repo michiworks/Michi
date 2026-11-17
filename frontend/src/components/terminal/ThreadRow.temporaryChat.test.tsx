@@ -13,10 +13,9 @@ vi.mock('../../state/prefs', () => ({
   usePrefs: () => ({ prefs: { showSidebarTimestamps: false, sidebarRowStyle: H.sidebarRowStyle } }),
 }));
 vi.mock('../../state/chatStore', () => ({
-  useChatNode: () => H.node,
   useChatActions: () => ({ clearTreeSelection: vi.fn() }),
   useChatProjects: () => ({ projects: [], openPanes: [], focusedPane: null, treeSelection: new Set<string>(), focusedNodeId: null }),
-  useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector({}),
+  useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector({ n1: H.node }),
 }));
 
 function node(patch: Partial<ChatNodeState> = {}): ChatNodeState {

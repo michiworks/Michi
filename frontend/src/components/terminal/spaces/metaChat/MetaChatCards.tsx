@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { MessageSquare, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import type { LayoutRuleSectionLimit, PageChangeDto, PageLayoutRule } from 'michi-shared';
 import type { ToolCallState } from '../../../../state/chatTypes';
 import { Button } from '../../../ui/controls';
 import { AssistantLinkChip } from '../../assistant/AssistantLinks';
+import { CompanionGlyph } from '../../companion/CompanionGlyph';
+import { ChatIcon, ChevronRightIcon } from '../../icons';
 import {
   normalizeToolResultEnvelope, normalizeTurnToolName, parseTurnPageReceipt, putsTaskBoard, receiptPageId, receiptRevealTarget, receiptShows, taskBoardPageId, taskWriteLine, type TurnPageReceipt,
 } from '../../../../lib/turnPageReceipt';
@@ -20,6 +21,7 @@ import {
   getPageCardState, setPageCardState, subscribePageCards, type PageCardState,
 } from '../../../../state/metaChat/pageCardStates';
 import { LayoutRulesPopover } from '../layoutRules/LayoutRulesPopover';
+import { MenuPresence } from '../../../ContextMenu';
 import { useLayoutRules } from '../layoutRules/useLayoutRules';
 import { useMetaChatRevealPage } from './metaChatRevealPage';
 // The cards' and the panel's shared Pages styles (the window that loaded them is retired).
@@ -191,7 +193,7 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
   const label = tasks ? `${tasks}${suggestions}` : board ? `Added a task board to ${receipt.title}${more}` : `${verb} ${receipt.title} · ${summary}`;
   return (
     <div className={`assistant-receipt meta-chat-card${off ? ' is-undone' : ''}`} data-page-card={state.kind} data-undone={off || undefined}>
-      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><Sparkles size={13} /></span>
+      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><CompanionGlyph /></span>
       <span className="assistant-receipt__label meta-chat-card__label" title={label}>
         {tasks
           ? <><b>{tasks}</b>{suggestions}</>
@@ -201,10 +203,10 @@ function PageWriteCard({ toolId, tool, receipt, filled = NO_RECEIPTS, boardPageI
         {resolved}
         {off && cutOff && ' · undone'}
       </span>
-      {pageId && <Button variant="ghost" size="sm" className="meta-chat-card__btn" onClick={view}>View</Button>}
+      {pageId && <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__primary" aria-label="View" title="View" onClick={view}><ChevronRightIcon aria-hidden="true" /></Button>}
       {state.kind !== 'suggestion' && !(cutOff && !receipt.batchId) && (off
-        ? <Button variant="ghost" size="sm" className="meta-chat-card__btn" disabled={busy} onClick={() => { void restore(); }}>Restore</Button>
-        : <Button variant="ghost" size="sm" className="meta-chat-card__btn" disabled={busy} onClick={() => { void undo(); }}>Undo</Button>)}
+        ? <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__side" disabled={busy} onClick={() => { void restore(); }}>Restore</Button>
+        : <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__side" disabled={busy} onClick={() => { void undo(); }}>Undo</Button>)}
     </div>
   );
 }
@@ -213,7 +215,7 @@ function ConversationCard({ card, context }: { card: ConversationStartCard; cont
   if (card.status === 'declined') {
     return (
       <div className="assistant-receipt meta-chat-card is-undone" data-conversation-card="declined">
-        <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><MessageSquare size={13} /></span>
+        <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><ChatIcon /></span>
         <span className="assistant-receipt__label meta-chat-card__label">New conversation not started: you declined</span>
       </div>
     );
@@ -222,14 +224,15 @@ function ConversationCard({ card, context }: { card: ConversationStartCard; cont
   const meta = [context.runtimeLabel(c.runtimeId), c.workspaceName, card.status === 'queued' ? 'queued' : 'running'].filter(Boolean).join(' · ');
   return (
     <div className="assistant-receipt meta-chat-card meta-chat-card--conversation" data-conversation-card={card.status}>
-      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><MessageSquare size={13} /></span>
+      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><ChatIcon /></span>
       <span className="meta-chat-card__label meta-chat-card__label--wrap" title={`New conversation ${c.title} · ${meta}`}>
         <span className="meta-chat-card__line">New conversation <b>{c.title}</b></span>
         <span className="meta-chat-card__line meta-chat-card__meta">{meta}</span>
       </span>
       <span className="meta-chat-card__open">
-        <AssistantLinkChip link={{ kind: 'node', id: c.nodeId }}>Open conversation →</AssistantLinkChip>
+        <AssistantLinkChip link={{ kind: 'node', id: c.nodeId }}>Open conversation</AssistantLinkChip>
       </span>
+      <ChevronRightIcon className="meta-chat-card__chevron" aria-hidden="true" />
     </div>
   );
 }
@@ -324,21 +327,21 @@ function LayoutRuleCard({ toolId, rule, context }: { toolId: string; rule: Layou
 
   return (
     <div className={`assistant-receipt meta-chat-card${undone ? ' is-undone' : ''}`} data-rule-card={undone ? 'undone' : 'saved'} data-undone={undone || undefined}>
-      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><Sparkles size={13} /></span>
+      <span className="assistant-receipt__glyph meta-chat-card__glyph" aria-hidden="true"><CompanionGlyph /></span>
       <span className="assistant-receipt__label meta-chat-card__label" title={`Updated ${rule.pageTitle} · saved as a layout rule: “${rule.text}”`}>
         Updated <b>{rule.pageTitle}</b> · saved as a layout rule: “{rule.text}”
       </span>
-      <Button variant="ghost" size="sm" className="meta-chat-card__btn" aria-haspopup="dialog" aria-expanded={Boolean(listAnchor)}
+      <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__primary" aria-label="View" title="View" aria-haspopup="dialog" aria-expanded={Boolean(listAnchor)}
         onClick={(event) => {
           const anchor = event.currentTarget;
           if (listAnchor) { setListAnchor(null); return; }
           void openSpacesPage({ pageId: rule.pageId, backendConnectionId: connection, currentPageId: context.currentPageId });
           setListAnchor(anchor);
-        }}>View</Button>
+        }}><ChevronRightIcon aria-hidden="true" /></Button>
       {undone
-        ? <Button variant="ghost" size="sm" className="meta-chat-card__btn" disabled={busy} onClick={() => { void restore(); }}>Restore</Button>
-        : <Button variant="ghost" size="sm" className="meta-chat-card__btn" disabled={busy} onClick={() => { void undo(); }}>Undo</Button>}
-      {listAnchor && <LayoutRuleList pageId={rule.pageId} backendConnectionId={connection} anchor={listAnchor} onClose={() => setListAnchor(null)} />}
+        ? <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__side" disabled={busy} onClick={() => { void restore(); }}>Restore</Button>
+        : <Button variant="ghost" size="sm" className="meta-chat-card__btn meta-chat-card__side" disabled={busy} onClick={() => { void undo(); }}>Undo</Button>}
+      <MenuPresence>{listAnchor && <LayoutRuleList key="rules" pageId={rule.pageId} backendConnectionId={connection} anchor={listAnchor} onClose={() => setListAnchor(null)} />}</MenuPresence>
     </div>
   );
 }

@@ -402,7 +402,7 @@ test('Pi Michi chat omits metadata glue and reminders on fresh and restored turn
   }
 });
 
-test('Pi sends the Michi Memory block ahead of the Pages context for the model only', async () => {
+test('Pi sends the workspace instructions, then the Michi Memory block, ahead of the Pages context for the model only', async () => {
   const stub = stubPiForMetaAgent([]);
   const { PiSession } = require('../src/agents/pi/PiSession') as typeof import('../src/agents/pi/PiSession');
   const session = new PiSession('pi-memory', {
@@ -411,11 +411,12 @@ test('Pi sends the Michi Memory block ahead of the Pages context for the model o
     owner: chatOwner('pi-memory'),
   });
   await drainPi(session, 'first question', {
+    instructionsContext: 'Workspace instructions as they are now:\n\nUse pnpm.',
     memoryContext: '<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>',
     pageContext: 'Michi Pages manifest (JSON): {}',
   });
   await drainPi(session, 'second question');
-  assert.equal(stub.prompts[0], '<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question');
+  assert.equal(stub.prompts[0], 'Workspace instructions as they are now:\n\nUse pnpm.\n\n---\n\n<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question');
   assert.equal(stub.prompts[1], 'second question', 'a turn without a block sends none');
   assert.deepEqual(session.getHistory().filter((m) => m.role === 'user').map((m) => m.content), ['first question', 'second question']);
   session.destroy();

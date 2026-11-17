@@ -374,4 +374,42 @@ describe('ComposerModelPicker placement', () => {
       expect(screen.queryByRole('menu')).toBeNull();
     });
   });
+
+  describe('speed tier', () => {
+    const ultrafast = { id: 'ultrafast', name: 'Ultrafast', description: 'The fastest available responses for latency-sensitive work.' };
+    const tiered: Partial<ComposerModelPickerProps> = {
+      providerModels: [{ id: 'fast', label: 'Fast', serviceTiers: [ultrafast] }, { id: 'deep', label: 'Deep' }],
+    };
+
+    it("is a switch for each tier the chat's model lists, saved as the tier or standard", async () => {
+      const onSaveServiceTier = vi.fn(async () => {});
+      const view = render(<ComposerModelPicker {...baseProps} {...tiered} serviceTier={null} onSaveServiceTier={onSaveServiceTier} />);
+      const toggle = screen.getByRole('switch', { name: /Ultrafast/ });
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(toggle.textContent).toMatch(/fastest available responses/);
+      await act(async () => { fireEvent.click(toggle); });
+      expect(onSaveServiceTier).toHaveBeenCalledExactlyOnceWith('ultrafast');
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      view.rerender(<ComposerModelPicker {...baseProps} {...tiered} serviceTier="ultrafast" onSaveServiceTier={onSaveServiceTier} />);
+      await act(async () => { fireEvent.click(screen.getByRole('switch', { name: /Ultrafast/ })); });
+      expect(onSaveServiceTier).toHaveBeenLastCalledWith(null);
+    });
+
+    it('turns back after a failed save', async () => {
+      const onSaveServiceTier = vi.fn(async () => { throw new Error('Chat not found'); });
+      render(<ComposerModelPicker {...baseProps} {...tiered} serviceTier={null} onSaveServiceTier={onSaveServiceTier} />);
+      const toggle = screen.getByRole('switch', { name: /Ultrafast/ });
+      await act(async () => { fireEvent.click(toggle); });
+      expect(toggle.getAttribute('aria-checked')).toBe('false');
+      expect(screen.getByRole('alert').textContent).toBe('Chat not found');
+    });
+
+    it('is not offered for a model without tiers, or where the chat cannot have one', () => {
+      const { rerender } = render(<ComposerModelPicker {...baseProps} {...tiered}
+        resolvedBinding={{ ...baseProps.resolvedBinding, model: 'deep' }} serviceTier={null} onSaveServiceTier={vi.fn()} />);
+      expect(screen.queryByRole('switch')).toBeNull();
+      rerender(<ComposerModelPicker {...baseProps} {...tiered} />);
+      expect(screen.queryByRole('switch')).toBeNull();
+    });
+  });
 });

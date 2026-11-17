@@ -1,4 +1,5 @@
 import MarkdownContent from './MarkdownContent';
+import { TERM_PROSE_CLASS } from './markdownProse';
 import { DrawerShell } from './ui/DrawerShell';
 import { Button } from './ui/controls';
 
@@ -15,13 +16,8 @@ interface ExportPanelProps {
   onSave(): void;
 }
 
-const PANEL_PROSE =
-  'prose prose-sm max-w-none wrap-break-word ' +
-  '[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 ' +
-  '[&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg) ' +
-  '[&_p]:text-(--term-mid) [&_li]:text-(--term-mid) ' +
-  '[&_strong]:text-(--term-fg) [&_a]:text-(--term-accent) ' +
-  '[&_code]:text-(--term-fg) [&_code]:bg-(--term-alt) [&_code]:px-1 [&_code]:rounded-(--ui-radius-sm)';
+/** The shared prose colours, with Export's own inline-code padding and corners. */
+const PANEL_PROSE = `${TERM_PROSE_CLASS} [&_code]:px-1 [&_code]:rounded-(--ui-radius-sm)`;
 
 export default function ExportPanel({ open, state, onClose, onSave }: ExportPanelProps) {
   const headerTitle = state.kind === 'idle' ? 'Export' : `Export · ${state.exportTitle}`;
@@ -52,7 +48,7 @@ export default function ExportPanel({ open, state, onClose, onSave }: ExportPane
         )}
 
         {state.kind === 'error' && (
-          <div style={{ padding: 18 }}>
+          <div role="alert" style={{ padding: 18 }}>
             <div
               style={{
                 fontSize: 'var(--fs-md)',
@@ -77,7 +73,7 @@ export default function ExportPanel({ open, state, onClose, onSave }: ExportPane
         )}
 
         {state.kind === 'loading' && (
-          <div role="status" className="p-5 text-muted">Loading conversation history…</div>
+          <div role="status" className="p-5 text-fg-subtle">Loading conversation history…</div>
         )}
 
         {state.kind === 'done' && (

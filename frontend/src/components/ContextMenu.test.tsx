@@ -102,6 +102,55 @@ describe('ContextMenu confirmation', () => {
   });
 });
 
+describe('ContextMenu keyboard focus', () => {
+  const sections = (run = vi.fn()) => [{ items: [
+    { id: 'a', label: 'Alpha', run },
+    { id: 'off', label: 'Off', disabled: true, run },
+    { id: 'b', label: 'Beta', run },
+  ] }];
+
+  it('focuses its first enabled row and moves with arrows, Home and End past disabled rows', () => {
+    render(<ContextMenu x={20} y={40} sections={sections()} onClose={() => {}} />);
+    const alpha = screen.getByRole('menuitem', { name: 'Alpha' });
+    const beta = screen.getByRole('menuitem', { name: 'Beta' });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(beta);
+    fireEvent.keyDown(beta, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key: 'End' });
+    expect(document.activeElement).toBe(beta);
+    fireEvent.keyDown(beta, { key: 'Home' });
+    expect(document.activeElement).toBe(alpha);
+  });
+
+  it.each(['Escape', 'Tab', 'Enter'])('hands focus back to what held it as the menu opened on %s', (key) => {
+    // Reduced motion: a choice runs without its confirm blink.
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true }));
+    const run = vi.fn();
+    const onClose = vi.fn();
+    render(<button type="button">Opener</button>);
+    const opener = screen.getByRole('button', { name: 'Opener' });
+    opener.focus();
+    render(<ContextMenu x={20} y={40} sections={sections(run)} onClose={onClose} />);
+    const alpha = screen.getByRole('menuitem', { name: 'Alpha' });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key });
+    expect(document.activeElement).toBe(opener);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledTimes(key === 'Enter' ? 1 : 0);
+  });
+
+  it('hands focus to its trigger when it has one', () => {
+    render(<><button type="button">Opener</button><button type="button">More</button></>);
+    const [opener, trigger] = screen.getAllByRole('button');
+    opener.focus();
+    render(<ContextMenu x={20} y={40} trigger={trigger} sections={sections()} onClose={() => {}} />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(document.activeElement).toBe(trigger);
+  });
+});
+
 describe('ContextMenu toolbar anchoring', () => {
   const rect = (height: number) => ({ x: 0, y: 0, top: 0, left: 0, right: 480, bottom: height, width: 480, height, toJSON: () => ({}) }) as DOMRect;
   const openAnchored = (menuHeight: number, triggerTop: number, triggerBottom: number, viewport: number) => {
@@ -168,6 +217,20 @@ describe('ContextMenu description detail card', () => {
     fireEvent.mouseEnter(screen.getByRole('menuitem', { name: /settings-migration/ }));
     act(() => { vi.advanceTimersByTime(500); });
     expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+});
+
+describe('ContextMenu filter', () => {
+  it('says the filter found nothing, in place of the emptied sections and their dividers', () => {
+    render(<ContextMenu x={20} y={40} searchable onClose={() => {}}
+      sections={[{ items: [{ id: 'open', label: 'Open', run: vi.fn() }] }, { label: 'More', items: [{ id: 'rename', label: 'Rename', run: vi.fn() }] }]} />);
+    const filter = screen.getByRole('textbox');
+    fireEvent.change(filter, { target: { value: 'zzz' } });
+    expect(screen.getByRole('status').textContent).toBe('No matches for “zzz”');
+    expect(document.querySelector('.michi-menu-divider')).toBeNull();
+    fireEvent.change(filter, { target: { value: 'ren' } });
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByText('Rename')).toBeTruthy();
   });
 });
 

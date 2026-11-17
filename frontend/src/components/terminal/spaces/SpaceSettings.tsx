@@ -7,6 +7,7 @@ import { layoutRuleMeta } from './layoutRules/LayoutRulesPopover';
 import { LayoutPreferencesEditor } from './layoutRules/LayoutPreferencesEditor';
 import { MaintenanceStatus } from './MaintenanceStatus';
 import { useCompanionName } from '../../../state/companion/companionName';
+import { Button } from '../../ui/controls';
 import './spaceSettings.css';
 
 const SUGGESTIONS = ['Put risks first', 'Show the next decisions at the top', 'Keep the summary short'];
@@ -27,8 +28,9 @@ export function SpaceSettings({ page, connectionId, spaceId, spaceTitle, onBack,
     try { await action(); setSaved(true); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not save changes.'); }
     finally { setBusy(false); }
   };
+  // These settings replace the page and its gear, so focus starts on Back (ST-10).
   return <section className="space-settings" aria-label="Page settings">
-    <button type="button" className="space-settings__back" onClick={onBack}>← Back to page</button>
+    <Button autoFocus variant="ghost" size="sm" className="space-settings__back" onClick={onBack}>← Back to page</Button>
     <h1 className="spaces-home__title">{page.title} · Settings</h1>
     {error && <p role="alert">{error}</p>}
     {saved && <p role="status" className="spaces-home-muted">Saved</p>}

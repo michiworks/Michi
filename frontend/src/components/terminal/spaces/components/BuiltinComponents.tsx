@@ -12,6 +12,7 @@ import {
   type ThreadCardItem,
   type ThreadCardState,
 } from 'michi-shared';
+import { Button } from '../../../ui/controls';
 import { MichiBlock } from '../../content/page/MichiBlock';
 import type { MichiBlockCtx } from '../../content/page/blockTypes';
 import { toggledChecklist } from '../../content/page/pageEdits';
@@ -134,16 +135,16 @@ export function BuiltinComponents({ onInsert, now: fixedNow }: { onInsert?: (blo
     <div className="component-catalog__heading"><h2>Built-in components</h2><span>{all.length}</span></div>
     <p className="component-catalog__description">The building blocks of a page. The assistant uses these first and makes a workspace component only when none fits. Previews use sample content; what you change here stays in the preview.</p>
     <input className="component-catalog__search" type="search" aria-label="Search components" placeholder="Search components, such as a chart or a checklist" value={query} onChange={(event) => setQuery(event.target.value)} />
-    <div className="component-catalog__filters" role="group" aria-label="Component categories">{CATEGORIES.map((item) => <button key={item} type="button" aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}</div>
+    <div className="component-catalog__filters" role="group" aria-label="Component categories">{CATEGORIES.map((item) => <button key={item} type="button" className={`t-text-btn${category === item ? ' is-active' : ''}`} aria-pressed={category === item} onClick={() => setCategory(item)}>{item}</button>)}</div>
     {error && <p role="alert">{error}</p>}
     <div className="component-catalog__grid">{items.map((item) => <article className="component-catalog__card" key={item.type} data-wide={item.wide || undefined}>
       <div className="component-catalog__preview spaces-home" data-native-page=""><Sample block={item.block} now={now} /></div>
       <div className="component-catalog__caption"><div><h3>{item.name}</h3><code>{item.type}</code></div><p>{item.description}</p>
-        {item.addedBy ? <p className="component-catalog__added-by">{item.addedBy}</p> : onInsert && <button type="button" aria-label={`Add ${item.name} to the page`} disabled={busy !== null} onClick={async () => {
+        {item.addedBy ? <p className="component-catalog__added-by">{item.addedBy}</p> : onInsert && <Button size="sm" aria-label={`Add ${item.name} to the page`} disabled={busy !== null} onClick={async () => {
           setBusy(item.type); setError(null);
           try { await onInsert(item.block); } catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not insert this component.'); }
           finally { setBusy(null); }
-        }}>{busy === item.type ? 'Adding…' : 'Add to page'}</button>}
+        }}>{busy === item.type ? 'Adding…' : 'Add to page'}</Button>}
       </div>
     </article>)}</div>
     {!items.length && <p className="component-catalog__description" role="status">No components match. Try another search or category.</p>}

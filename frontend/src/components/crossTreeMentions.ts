@@ -7,8 +7,6 @@ import { hasMentionableContent, type CrossTreeGroup } from './mentionItems';
 /** Upper bound on cross-tree candidates so the @ popup stays scannable. */
 export const CROSS_TREE_MENTION_CAP = 50;
 
-/** Shared empty result so structural selectors can return a stable reference. */
-export const EMPTY_CROSS_TREE_GROUPS: CrossTreeGroup[] = [];
 
 /**
  * Collect @-mentionable nodes from threads OTHER than `excludeTreeId`, grouped
@@ -19,9 +17,6 @@ export const EMPTY_CROSS_TREE_GROUPS: CrossTreeGroup[] = [];
  *
  * Pass `excludeTreeId: null` to include every thread — the Home composer has
  * no current thread, so every conversation in the workspace is "cross-tree".
- *
- * Pure: safe to call from a structural selector. Returns
- * EMPTY_CROSS_TREE_GROUPS (a stable reference) when nothing qualifies.
  */
 export function collectCrossTreeGroups(
   nodesMap: Record<string, ChatNodeState>,
@@ -56,5 +51,5 @@ export function collectCrossTreeGroups(
       totalCount += treeNodes.length;
     }
   }
-  return groups.length > 0 ? groups : EMPTY_CROSS_TREE_GROUPS;
+  return groups;
 }

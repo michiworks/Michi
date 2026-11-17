@@ -1,18 +1,21 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { ModalShell } from './ui/ModalShell';
+import { CompanionGlyph } from './terminal/companion/CompanionGlyph';
+import { ICON_PX, WarningIcon } from './terminal/icons';
 import { Button } from './ui/controls';
 import { useChatStore } from '../state/chatStore';
 import { usePrefs } from '../state/prefs';
 import { saveAgentOptions } from '../services/api';
 import { useAgentModelCatalog } from '../hooks/useAgentModelCatalog';
 import { filterVisibleRuntimes } from '../lib/runtimeVisibility';
+import './FirstRunSetup.css';
 
 /** First-run setup reflects an explicit runtime choice. Existing workspaces skip it. */
 type ChipKind = 'ready' | 'setup' | 'na';
 function StateChip({ kind, children }: { kind: ChipKind; children: React.ReactNode }) {
   const palette: Record<ChipKind, { color: string; bg: string }> = {
     ready: { color: 'var(--term-digest)', bg: 'var(--term-digest-f)' },
-    setup: { color: 'var(--term-select)', bg: 'var(--term-select-f)' },
+    setup: { color: 'var(--term-waiting-text)', bg: 'var(--term-select-f)' },
     na: { color: 'var(--term-muted)', bg: 'var(--term-alt)' },
   };
   const { color, bg } = palette[kind];
@@ -34,7 +37,7 @@ function StateChip({ kind, children }: { kind: ChipKind; children: React.ReactNo
     >
       <span
         aria-hidden
-        style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }}
+        style={{ width: 6, height: 6, borderRadius: 'var(--ui-radius-pill)', background: 'currentColor' }}
       />
       {children}
     </span>
@@ -47,6 +50,7 @@ export default function FirstRunSetup() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [requestedRuntime, setRequestedRuntime] = useState<string | null>(null);
+  const runtimeName = useId();
 
   const status = agentStatus;
   const completed = prefs.onboardingCompletedAt != null;
@@ -108,7 +112,7 @@ export default function FirstRunSetup() {
   const primaryLabel = !activeRuntime ? 'Choose a runtime' : needsKey ? `Set up ${activeLabel} key →` : `Start with ${activeLabel} →`;
 
   return (
-    <ModalShell open dismissible={canContinue} onClose={complete} title="Setup" titleGlyph="◆" width={480}>
+    <ModalShell open dismissible={canContinue} onClose={complete} title="Setup" titleGlyph={<CompanionGlyph size={ICON_PX.sm} />} width={480}>
       <div
         className="term-scrollbar"
         style={{ padding: '18px 18px 20px', display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto' }}
@@ -122,47 +126,30 @@ export default function FirstRunSetup() {
           </div>
         </div>
 
-        {/* Runtime — directly pickable, no disclosure. */}
+        {/* Runtime — directly pickable, no disclosure. While a choice saves,
+            the rows stay focusable and ignore picks (selectRuntime returns). */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <label style={FIELD_LABEL}>Runtime</label>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span id={`${runtimeName}-label`} style={FIELD_LABEL}>Runtime</span>
+          <div
+            role="radiogroup"
+            aria-labelledby={`${runtimeName}-label`}
+            aria-disabled={saving || undefined}
+            aria-busy={saving || undefined}
+            className="first-run-runtimes"
+          >
             {runtimes.map((r) => {
               const selected = r.id === status.runtime;
               const disabled = r.available === false;
               const rowNeedsKey = !!r.requiresApiKey;
               return (
-                <button
-                  key={r.id}
-                  type="button"
-                  aria-pressed={selected}
-                  disabled={disabled || saving}
-                  onClick={() => void selectRuntime(r.id)}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 12,
-                    textAlign: 'left',
-                    fontFamily: 'var(--ui-font)',
-                    border: selected ? '1px solid var(--term-accent)' : '1px solid var(--term-line)',
-                    background: selected
-                      ? 'color-mix(in srgb, var(--term-accent) 6%, var(--term-surface))'
-                      : 'transparent',
-                    padding: '11px 13px',
-                    cursor: disabled ? 'not-allowed' : 'pointer',
-                    opacity: disabled ? 0.6 : 1,
-                  }}
-                >
-                  <span
-                    aria-hidden
-                    style={{
-                      width: 15,
-                      height: 15,
-                      borderRadius: '50%',
-                      flexShrink: 0,
-                      border: `2px solid ${selected ? 'var(--term-accent)' : 'var(--term-line-s)'}`,
-                      background: selected ? 'var(--term-accent)' : 'transparent',
-                      boxShadow: selected ? 'inset 0 0 0 2.5px var(--term-surface)' : 'none',
-                    }}
+                <label key={r.id} className="first-run-runtime">
+                  <input
+                    type="radio"
+                    name={runtimeName}
+                    value={r.id}
+                    checked={selected}
+                    disabled={disabled}
+                    onChange={() => void selectRuntime(r.id)}
                   />
                   <span style={{ flex: 1, minWidth: 0 }}>
                     <span
@@ -188,7 +175,7 @@ export default function FirstRunSetup() {
                   <StateChip kind={disabled ? 'na' : rowNeedsKey ? 'setup' : 'ready'}>
                     {disabled ? 'unavailable' : rowNeedsKey ? 'needs API key' : 'ready'}
                   </StateChip>
-                </button>
+                </label>
               );
             })}
           </div>
@@ -216,9 +203,7 @@ export default function FirstRunSetup() {
               lineHeight: 1.5,
             }}
           >
-            <span aria-hidden style={{ color: 'var(--term-select)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-              ▲
-            </span>
+            <WarningIcon aria-hidden style={{ color: 'var(--term-select)', flexShrink: 0, marginTop: 3 }} />
             <span>
               <b>{activeLabel} runs on your own AI provider.</b> Add an API key to continue — we'll walk you
               through it. Stored locally on this device.

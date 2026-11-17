@@ -20,7 +20,6 @@ const OWN_TOOLS = [
   'companion_save_notes',
   'companion_goal_progress',
   'companion_propose',
-  'companion_publish_brief',
   'companion_set_name',
   'companion_set_notifications',
   'companion_cr_detail',
@@ -141,6 +140,8 @@ function ownLine(name: OwnTool, input: Record<string, unknown>, doing: boolean, 
         case 'dismiss': return `${say('Marking', 'Marked')} ${item()} done`;
         case 'mute': return `${say('Muting', 'Muted')} ${item()}`;
         case 'restore': return `${say('Bringing back', 'Brought back')} ${item()}`;
+        case 'raise': return `${say('Raising', 'Raised')} ${item()}`;
+        case 'lower': return `${say('No longer raising', 'Stopped raising')} ${item()}`;
         default: return `${say('Updating', 'Updated')} ${item()}`;
       }
     case 'companion_save_notes': return say('Saving its notes', 'Saved its notes');
@@ -150,7 +151,6 @@ function ownLine(name: OwnTool, input: Record<string, unknown>, doing: boolean, 
       return `${say('Noting progress on', 'Noted progress on')} ${goal ? quoted(goal) : 'a goal'}`;
     }
     case 'companion_propose': return `${say('Suggesting', 'Suggested')} ${PROPOSAL_WORDS[str(input.kind) ?? ''] ?? 'a change'}`;
-    case 'companion_publish_brief': return say('Writing today’s brief', 'Wrote today’s brief');
     case 'companion_set_name': {
       const next = str(input.name);
       return next ? `${say('Changing its name to', 'Changed its name to')} ${quoted(next)}` : say('Changing its name', 'Changed its name');
@@ -239,7 +239,6 @@ function phrase(name: OwnTool | 'michi' | 'tasks' | 'docs', tools: readonly Tool
     case 'companion_save_notes': return 'saved its notes';
     case 'companion_goal_progress': return 'noted goal progress';
     case 'companion_propose': return n === 1 ? 'suggested a change' : `suggested ${n} changes`;
-    case 'companion_publish_brief': return 'wrote today’s brief';
     case 'companion_set_name': return 'changed its name';
     case 'companion_set_notifications': return 'changed your notifications';
     case 'companion_cr_detail': {

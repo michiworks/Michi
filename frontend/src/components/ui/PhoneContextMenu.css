@@ -5,7 +5,7 @@
   position: fixed;
   inset: 0;
   /* Right-click menus sit above every other popover (ContextMenu). */
-  z-index: 1100;
+  z-index: var(--z-context-menu);
   font-family: var(--ui-font);
   -webkit-tap-highlight-color: transparent;
   /* The layer opens under the finger still holding: no selection or callout on it. */
@@ -27,8 +27,6 @@
   position: absolute;
   inset: 0;
   background: color-mix(in srgb, var(--term-bg) 36%, transparent);
-  -webkit-backdrop-filter: blur(9px) saturate(1.1);
-  backdrop-filter: blur(9px) saturate(1.1);
 }
 .phone-menu-lift {
   position: absolute;
@@ -44,7 +42,8 @@
   margin: 0 !important;
 }
 
-/* A translucent material panel, like the system's. */
+/* An opaque panel: it moves over a transcript that may be streaming, so
+   nothing here blurs what is behind it (the scrim above only dims). */
 .phone-menu {
   position: absolute;
   width: 250px;
@@ -54,9 +53,7 @@
   overscroll-behavior: contain;
   scrollbar-width: none;
   border-radius: calc(var(--ui-radius-lg) + 5px);
-  background: color-mix(in srgb, var(--term-float-bg, var(--term-surface)) 82%, transparent);
-  -webkit-backdrop-filter: blur(24px) saturate(1.8);
-  backdrop-filter: blur(24px) saturate(1.8);
+  background: var(--term-float-bg, var(--term-surface));
   box-shadow: 0 0 0 0.5px color-mix(in srgb, var(--term-line) 80%, transparent), var(--term-float-shadow);
   color: var(--term-fg);
   outline: none;

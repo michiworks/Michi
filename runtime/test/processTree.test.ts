@@ -10,6 +10,27 @@ describe("processTree", () => {
     assert.deepEqual(killed, []);
   });
 
+  test("killProcessTree refuses init, this process and its parent on every platform", () => {
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      const killed: number[] = [];
+      const ran: Array<readonly string[]> = [];
+      for (const pid of [1, process.pid, process.ppid]) {
+        killProcessTree(pid, "SIGKILL", {
+          platform,
+          execFileSync: ((_cmd: string, args: readonly string[]) => {
+            ran.push(args);
+            return Buffer.alloc(0);
+          }) as typeof import("node:child_process").execFileSync,
+          kill: (target) => { killed.push(target); return true; },
+        });
+      }
+      assert.deepEqual([killed, ran], [[], []], platform);
+    }
+    const killed: number[] = [];
+    killProcessTree(4242, "SIGTERM", { platform: "linux", kill: (target) => { killed.push(target); return true; } });
+    assert.deepEqual(killed, [-4242], "a child's own group is still signalled");
+  });
+
   test("Windows SIGTERM uses taskkill /T /PID", () => {
     const calls: Array<[string, readonly string[]]> = [];
     killProcessTree(4242, "SIGTERM", {

@@ -6,7 +6,7 @@ import {
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy, type SortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { LayoutGroupContext, motion, useReducedMotionConfig } from 'motion/react';
-import { Plus } from 'lucide-react';
+import { PlusIcon } from '../../../icons';
 import type { MichiDatabase, MichiDbColumn, MichiDbRow, DatabaseRowStatus } from 'michi-shared';
 import { isTaskDb } from 'michi-shared';
 import { ThreadStateDot } from '../../ThreadStateDot';
@@ -70,6 +70,8 @@ const DROP = { duration: 180, easing: `cubic-bezier(${EASE.drawer.join(',')})` }
 const CARD_MOTION = { layout: SPRING.soft };
 /** A card travelling to another column passes over the ones it leaves. */
 const LIFT: CSSProperties = { position: 'relative', zIndex: 1 };
+/** The longest a lift lasts (a hold, not a motion timing): it drops then if no trip has ended it. */
+const LIFT_HOLD_MS = 600;
 /** While a card is carried dnd-kit moves the slots; the cards inside do not measure themselves. */
 const CARRYING = 'carrying';
 /**
@@ -521,7 +523,7 @@ function BoardColumn({ columnKey, name, head, over, refused, rest, onMore, addLa
         <NewCardField label={addName} onDone={(text, refocus) => { setAdding(false); if (refocus) requestAnimationFrame(() => addRef.current?.focus()); if (text) onAdd(text); }} />
       ) : (
         <button ref={addRef} type="button" className="michi-db-col__add" aria-label={addName} onClick={() => setAdding(true)}>
-          <Plus size={13} strokeWidth={1.8} aria-hidden="true" />
+          <PlusIcon aria-hidden="true" />
           {addLabel}
         </button>
       ))}
@@ -627,17 +629,20 @@ const BoardCard = memo(function BoardCard({ db, row, column, sortId, layoutId, l
   handlers: ThreadItemHandlers;
   movable: boolean;
 }) {
+  // Under either reduced-motion trigger the cards a drag passes jump into place instead of sliding (TR-42).
+  const reduced = useReducedMotionConfig() === true;
   const sortable = useSortable({
     id: sortId,
     data: { row: row.id, column } satisfies CardData,
     disabled: !movable,
     attributes: { roleDescription: 'draggable card' },
+    transition: reduced ? null : undefined,
   });
   // Lifted for the trip only; a trip that never starts (reduced motion) drops it soon after.
   const [lifted, setLifted] = useState(lift);
   useEffect(() => {
     if (!lifted) return undefined;
-    const timer = window.setTimeout(() => setLifted(false), 600);
+    const timer = window.setTimeout(() => setLifted(false), LIFT_HOLD_MS);
     return () => window.clearTimeout(timer);
   }, [lifted]);
   const item = threadItemProps(row.id, handlers, 'button');

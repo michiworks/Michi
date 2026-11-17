@@ -77,7 +77,7 @@ export function PageReceiptRow({ writes, workspaceId, backendConnectionId, board
   const openPage = (pageId: string) => {
     openPagePane?.({ pageId, workspaceId: ownWorkspaceId, backendConnectionId, title: receipt.title });
     const target = receiptRevealTarget(receipt);
-    if (target) revealPageTarget({ ...target, pane: { pageId, workspaceId: ownWorkspaceId, backendConnectionId } });
+    if (target) revealPageTarget({ ...target, pane: { pageId, workspaceId: ownWorkspaceId, backendConnectionId } }, { land: 'instant' });
   };
   return (
     <ReceiptRow

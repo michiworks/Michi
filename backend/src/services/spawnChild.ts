@@ -18,9 +18,10 @@ import type { AgentRuntime, AgentSession } from '../agents/types';
 import { resolveModel, resolveProvider, resolveReasoning } from './agentConfig';
 import { readNodePermissionSetting, writeNodePermissionMode } from './chatPermissions';
 import { insertChildThreadNode, openChildThreadSession } from './childThreadSession';
-import { getNode, getNodeSessionBinding, getWorkspace } from './dbRepository';
+import { getNode, getNodeSessionBinding, getWorkspace, type NodeRow } from './dbRepository';
 import { log } from './logger';
 import { tryForkChatSession } from './nativeFork';
+import { spawnBranchesRefusal } from './spawnLimits';
 import { resolveNewThreadProfile } from './threadProfile';
 
 export type SpawnChildArgs = Parameters<AgentToolBridgeDeps['createChild']>[0];
@@ -33,17 +34,25 @@ export interface SpawnChildDeps {
   newTurnId?: () => string;
 }
 
+/** The spawning chat's node: the session's binding, or on the desktop the id itself. */
+function spawnParentNode(parentChatId: string, ownerUserId: string | null | undefined): NodeRow | null {
+  const binding = getNodeSessionBinding(parentChatId, ownerUserId ?? undefined);
+  if (binding) return getNode(binding.nodeId);
+  return process.env.MICHI_CLOUD === '1' ? null : getNode(parentChatId);
+}
+
+/** AgentToolBridgeDeps.spawnRefusal: the limits of services/spawnLimits.ts for the spawning chat. */
+export function spawnRefusal(args: { parentChatId: string; ownerUserId?: string | null; requested: number }): string | null {
+  const parent = spawnParentNode(args.parentChatId, args.ownerUserId);
+  return parent ? spawnBranchesRefusal(parent.id, args.requested) : null;
+}
+
 export async function createSpawnChild(
   runtime: AgentRuntime,
   args: SpawnChildArgs,
   deps: SpawnChildDeps,
 ): Promise<{ chatId: string; nodeId: string }> {
-  const parentBinding = getNodeSessionBinding(args.parentChatId, args.ownerUserId ?? undefined);
-  const parentNode = parentBinding
-    ? getNode(parentBinding.nodeId)
-    : process.env.MICHI_CLOUD === '1'
-      ? null
-      : getNode(args.parentChatId);
+  const parentNode = spawnParentNode(args.parentChatId, args.ownerUserId);
   if (!parentNode) throw new Error(`spawn parent node not found for ${args.parentChatId}`);
   const workspace = getWorkspace(parentNode.workspace_id);
   if (!workspace) throw new Error(`spawn workspace ${parentNode.workspace_id} not found`);

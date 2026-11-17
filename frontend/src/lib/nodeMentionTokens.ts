@@ -53,3 +53,19 @@ export function replaceNodeMentionTokens(
   }
   return result + text.slice(cursor);
 }
+
+/**
+ * The stored text of a sent message shows each chat it mentioned as
+ * @<label>. To send it again, put the wire tokens back so those chats are
+ * attached again; a mention the text no longer has (edited out) stays out.
+ * Longer labels go first, so @Plan does not cut into @Plan B.
+ */
+export function restoreNodeMentionTokens(
+  text: string,
+  mentions: ReadonlyArray<{ kind: string; refId: string; label: string }> | undefined,
+): string {
+  const nodes = (mentions ?? []).filter((mention) => mention.kind === 'node' && mention.label);
+  return [...nodes]
+    .sort((a, b) => b.label.length - a.label.length)
+    .reduce((result, mention) => result.split(`@${mention.label}`).join(encodeNodeMentionToken(mention.refId)), text);
+}

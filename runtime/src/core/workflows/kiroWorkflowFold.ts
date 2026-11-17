@@ -1,4 +1,5 @@
 import {
+  clampWorkflowResult,
   clampWorkflowText,
   isWorkflowRunTerminal,
   settleWorkflowNodes,
@@ -13,6 +14,11 @@ import {
   type WorkflowWatchDto,
 } from 'michi-shared';
 import { appendWorkflowLog } from './claudeWorkflowFold';
+
+/** A step's captured output, text only, cut by structure when it is JSON. */
+function capturedResult(value: unknown): string | undefined {
+  return typeof value === 'string' ? clampWorkflowResult(value, WORKFLOW_LIMITS.result) : undefined;
+}
 
 /**
  * Kiro CLI V3 workflows. Notifications (no request id):
@@ -405,7 +411,7 @@ function finalEntries(root: unknown): Map<string, FinalEntry[]> {
       const entry: FinalEntry = { status: nodeStatus(str(node['status'])) };
       const iteration = num(node['iteration']);
       if (iteration !== undefined) entry.iteration = iteration;
-      const result = clampWorkflowText(node['capturedOutput'], WORKFLOW_LIMITS.result);
+      const result = capturedResult(node['capturedOutput']);
       if (result) entry.result = result;
       const error = clampWorkflowText(node['failureReason'], WORKFLOW_LIMITS.error);
       if (error) entry.error = error;
@@ -539,14 +545,16 @@ function applyNotification(run: WorkflowRunDtoV1, method: string, params: Params
     let next: WorkflowRunDtoV1 = { ...withoutInterrupted(run), status, endedAt: run.endedAt ?? now, ...(credits !== undefined ? { usage: { ...run.usage, credits } } : {}) };
     if (captured) {
       for (const [id, output] of Object.entries(captured)) {
-        const text = clampWorkflowText(typeof output === 'string' ? output : JSON.stringify(output), WORKFLOW_LIMITS.result);
+        const text = clampWorkflowResult(output, WORKFLOW_LIMITS.result);
         if (text) next = updateNode(next, id, (node) => node.result ? node : { ...node, result: text });
       }
     }
     next = reconcileFinalState(next, finalState?.['root']);
     const explicit = finalState?.['result'] ?? finalState?.['output'];
     const lastCompleted = [...next.nodes].reverse().find((node) => !node.parentId && node.result);
-    const result = clampWorkflowText(typeof explicit === 'string' ? explicit : explicit !== undefined ? JSON.stringify(explicit, null, 2) : lastCompleted?.result, WORKFLOW_LIMITS.result);
+    const result = explicit !== undefined
+      ? clampWorkflowResult(explicit, WORKFLOW_LIMITS.runResult, { pretty: true })
+      : clampWorkflowText(lastCompleted?.result, WORKFLOW_LIMITS.result);
     const failure = clampWorkflowText(finalState?.['failureReason'] ?? finalState?.['error'], WORKFLOW_LIMITS.line);
     return {
       ...next,
@@ -592,7 +600,7 @@ function applyNotification(run: WorkflowRunDtoV1, method: string, params: Params
   }
   if (event === 'node_complete' && nodeId) {
     const status = nodeStatus(str(params['status']));
-    const result = clampWorkflowText(params['capturedOutput'], WORKFLOW_LIMITS.result);
+    const result = capturedResult(params['capturedOutput']);
     const error = clampWorkflowText(params['failureReason'], WORKFLOW_LIMITS.error);
     const credits = creditsOf(params['credits']);
     const artifacts = artifactsOf(params['artifacts']);

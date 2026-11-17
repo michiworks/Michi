@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { backendEntityId } from '../config/backendIdentity';
-import { encodeNodeMentionToken, readNodeMentionTokens, replaceNodeMentionTokens } from './nodeMentionTokens';
+import { encodeNodeMentionToken, readNodeMentionTokens, replaceNodeMentionTokens, restoreNodeMentionTokens } from './nodeMentionTokens';
 
 describe('node mention wire tokens', () => {
   it('keeps existing local tokens byte-for-byte compatible', () => {
@@ -46,5 +46,18 @@ describe('node mention wire tokens', () => {
     const text = `${first}, ${second}).\n@node:local\t\nDone`;
     expect(readNodeMentionTokens(text).map((token) => token.nodeId)).toEqual([firstId, secondId, 'local']);
     expect(replaceNodeMentionTokens(text, () => '')).toBe(', ).\n\nDone');
+  });
+});
+
+describe('restoreNodeMentionTokens', () => {
+  it('turns the @labels a message showed back into tokens, the longer label first', () => {
+    const mentions = [
+      { kind: 'node', refId: 'n-plan', label: 'Plan' },
+      { kind: 'node', refId: 'n-plan-b', label: 'Plan B' },
+      { kind: 'node', refId: 'n-gone', label: 'Edited out' },
+      { kind: 'context', refId: 'c-1', label: 'notes' },
+    ];
+    expect(restoreNodeMentionTokens('compare @Plan B with @Plan and @notes', mentions))
+      .toBe(`compare ${encodeNodeMentionToken('n-plan-b')} with ${encodeNodeMentionToken('n-plan')} and @notes`);
   });
 });

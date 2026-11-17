@@ -105,6 +105,16 @@ describe('native page change presentation', () => {
     expect(onLoadMore).toHaveBeenCalledOnce();
   });
 
+  it('says Activity is loading only while the page is read, and keeps a read-only page\'s actions off', () => {
+    const props = { onAccept: vi.fn(), onDismiss: vi.fn(), onReopen: vi.fn(), onRevert: vi.fn(), onRedo: vi.fn(), onRevertBatch: vi.fn(), onOpenSource: vi.fn(), error: null };
+    const { rerender } = render(<PageChanges changes={[]} {...props} loading />);
+    expect(screen.getByRole('status').textContent).toBe('Loading page changes…');
+    rerender(<PageChanges changes={[]} {...props} loading={false} readOnly />);
+    expect(screen.queryByRole('status')).toBeNull();
+    rerender(<PageChanges changes={[blockChange({ proposalState: null, applicationState: 'applied', appliedRev: 2 })]} {...props} loading={false} readOnly />);
+    expect((screen.getByRole('button', { name: 'Undo all (1)' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it.each(['card', 'inline'] as const)('shows and edits the proposed row text of a %s row suggestion', (variant) => {
     const onAccept = vi.fn();
     const change = rowChange({ kind: 'row', op: 'patch', id: 'r1', values: { status: 'done' }, body: 'Agent notes' });

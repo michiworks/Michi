@@ -14,6 +14,7 @@
  * Default timeout 30s, max 5 min. Exit code is reported separately.
  */
 
+import { StringDecoder } from "node:string_decoder";
 import { findOnPath } from "../executableLookup";
 import { spawnAgentProcess, killProcessTree } from "../processTree";
 import { resolveWithinCwd, PathSandboxError } from "./pathSandbox";
@@ -109,21 +110,26 @@ export async function executeBash(
     });
     let buf = "";
     let bufferTruncated = false;
-    const append = (chunk: Buffer) => {
+    const append = (text: string) => {
         if (buf.length >= OUTPUT_BUFFER_CAP) {
             bufferTruncated = true;
             return;
         }
         const remaining = OUTPUT_BUFFER_CAP - buf.length;
-        const text = chunk.toString("utf-8");
         if (text.length <= remaining) buf += text;
         else {
             buf += text.slice(0, remaining);
             bufferTruncated = true;
         }
     };
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    // One decoder per stream: a read can end inside a multi-byte character,
+    // and decoding each chunk alone turns both halves into U+FFFD.
+    const decodeInto = () => {
+        const decoder = new StringDecoder("utf8");
+        return (chunk: Buffer) => append(decoder.write(chunk));
+    };
+    child.stdout.on("data", decodeInto());
+    child.stderr.on("data", decodeInto());
 
     const result = await new Promise<{ code: number | null; timedOut: boolean }>((resolve) => {
         let resolved = false;

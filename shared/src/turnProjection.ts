@@ -1,5 +1,6 @@
 import type { ChatStreamEvent, DurableMessageMetadata, PlanEntry, ToolCallStreamPayload, UserInputQuestion, UserInputAnswer } from './chatStreamEvents';
 import { extractKiroSteering, mergeSteeringReports } from './kiroSteering';
+import { turnEndMarkOf } from './turnEnd';
 import {
   applySubagentActivity,
   finalizeSubagentRoster,
@@ -55,7 +56,8 @@ export function userInputInteractionId(turnId: string, requestId: number): strin
 export function normalizeUserInputQuestions(interactionId: string, questions: UserInputQuestion[]): UserInputQuestion[] {
   return questions.map((question, index) => ({ id: question.id ?? `${interactionId}:q:${index}`, question: question.question,
     ...(question.header !== undefined ? { header: question.header } : {}), multiSelect: question.multiSelect,
-    options: question.options.map(option => ({ label: option.label, ...(option.description !== undefined ? { description: option.description } : {}) })) }));
+    options: question.options.map(option => ({ label: option.label, ...(option.description !== undefined ? { description: option.description } : {}) })),
+    ...(question.field !== undefined ? { field: question.field } : {}) }));
 }
 
 export function normalizeUserInputAnswers(questions: UserInputQuestion[], answers: UserInputAnswer[]): UserInputAnswer[] {
@@ -76,7 +78,9 @@ export type DurableAssistantBlock =
   | ({ id: string; kind: 'thinking'; rawText: string; streaming?: boolean } & DurableTextBlockTiming)
   | { id: string; kind: 'tool'; toolCallId: string; section: 'answer' | 'thinking'; rawOffset: number }
   | { id: string; kind: 'user-input'; requestId: number; interaction?: DurableUserInput; section: 'answer'; rawOffset: number }
-  | { id: string; kind: 'image'; workspaceId: string; path: string; caption?: string; mimeType: string; size: number };
+  | { id: string; kind: 'image'; workspaceId: string; path: string; caption?: string; mimeType: string; size: number }
+  /** Rich blocks the agent showed (show_blocks); each block keeps the id Michi gave it. */
+  | { id: string; kind: 'blocks'; blocks: unknown[]; title?: string; fallbackText: string };
 
 export interface DurableMessage {
   id: string;
@@ -365,7 +369,20 @@ export function finalizeTurnContent(raw: string): string {
  */
 export function turnLeftAnswer(content: string, blocks: readonly { kind: string }[]): boolean {
   if (content.trim()) return true;
-  return blocks.some((block) => block.kind === 'tool' || block.kind === 'image' || block.kind === 'user-input');
+  return blocks.some((block) => block.kind === 'tool' || block.kind === 'image' || block.kind === 'user-input' || block.kind === 'blocks');
+}
+
+/**
+ * A finished reply's stored content: its finalized answer text, then the
+ * plain text of each set of blocks it showed. Windows that do not draw
+ * `blocks` show the content in their place; searches, exports and rebuilt
+ * runtime history read it too.
+ */
+export function contentWithBlocksFallback(content: string, blocks: readonly { kind: string; fallbackText?: unknown }[]): string {
+  const fallbacks = blocks.flatMap((block) => (
+    block.kind === 'blocks' && typeof block.fallbackText === 'string' && block.fallbackText.trim() ? [block.fallbackText.trim()] : []
+  ));
+  return fallbacks.length ? [content.trim(), ...fallbacks].filter(Boolean).join('\n\n') : content;
 }
 
 function couldStillBeSentinel(value: string): boolean {
@@ -834,6 +851,19 @@ export function applyTurnEvent(
       next = { ...next, assistantMessage: { ...next.assistantMessage, blocks } };
       break;
     }
+    case 'blocks': {
+      const blocks = next.assistantMessage.blocks.slice();
+      closeTrailingTextBlock(blocks, streamEvent.data.observedAt);
+      blocks.push({
+        id: nextBlockId(next, blocks),
+        kind: 'blocks',
+        blocks: streamEvent.data.blocks,
+        ...(streamEvent.data.title !== undefined ? { title: streamEvent.data.title } : {}),
+        fallbackText: streamEvent.data.fallbackText,
+      });
+      next = { ...next, assistantMessage: { ...next.assistantMessage, blocks } };
+      break;
+    }
     case 'title':
       if (streamEvent.data.title.trim()) {
         next = { ...next, nodeMetadata: { ...next.nodeMetadata, title: streamEvent.data.title.trim() } };
@@ -863,7 +893,9 @@ export function applyTurnEvent(
         : stopReason === 'error'
           ? 'error'
           : 'completed';
-      const assistantMessage = finalizeMessage(next.assistantMessage, status !== 'completed', streamEvent.data.completedAt ?? streamEvent.data.observedAt);
+      const finalized = finalizeMessage(next.assistantMessage, status !== 'completed', streamEvent.data.completedAt ?? streamEvent.data.observedAt);
+      const turnEnd = turnEndMarkOf(stopReason);
+      const assistantMessage = turnEnd ? { ...finalized, metadata: { ...finalized.metadata, turnEnd } } : finalized;
       const rawAnswer = rawAnswerContent(assistantMessage.blocks);
       next = {
         ...next,
@@ -871,7 +903,7 @@ export function applyTurnEvent(
         stopReason,
         completedAt: streamEvent.data.completedAt,
         nodeMetadata: { ...extractTurnMetadata(rawAnswer), ...next.nodeMetadata },
-        assistantMessage: { ...assistantMessage, content: finalizeTurnContent(rawAnswer) },
+        assistantMessage: { ...assistantMessage, content: contentWithBlocksFallback(finalizeTurnContent(rawAnswer), assistantMessage.blocks) },
       };
       break;
     }
@@ -884,7 +916,7 @@ export function applyTurnEvent(
         error: streamEvent.data.message,
         completedAt: streamEvent.data.completedAt,
         nodeMetadata: { ...extractTurnMetadata(rawAnswer), ...next.nodeMetadata },
-        assistantMessage: { ...assistantMessage, content: finalizeTurnContent(rawAnswer) },
+        assistantMessage: { ...assistantMessage, content: contentWithBlocksFallback(finalizeTurnContent(rawAnswer), assistantMessage.blocks) },
       };
       break;
     }

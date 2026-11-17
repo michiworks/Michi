@@ -22,6 +22,7 @@ import {
   type RecallConcept,
 } from './memoryTerms';
 import { relayedInput } from './typedText';
+import { IDLE_SINCE_SQL, isExpired } from './validity';
 
 /**
  * Michi Memory's recall index (spec §3; tables from migrations 0071 and
@@ -47,15 +48,12 @@ import { relayedInput } from './typedText';
  *  - Hiding: a forgotten memory's document goes with it; conversation turns
  *    are chat history, which forgetting a memory leaves as it is (as
  *    ChatGPT's and Claude's chat history). A turn document is hidden only
- *    when the user asks Michi not to recall that excerpt (the reply footer's
- *    Don't recall, forgetConversationTurn), when its conversation stops
- *    learning (hideConversationTurns) and when the user deletes all their
- *    memories (resetOwnerRecall). A hidden document keeps no text and no
- *    index entry, no search returns it, indexing its turn again leaves it
- *    hidden, and an extraction tombstone keeps extraction from reading the
- *    footer's turn into a memory. A turn the user asked to forget what it
- *    says (memory_delete with its c: ref) is only kept out of automatic
- *    memory (keepTurnOutOfMemory): recall still shows it. Deleting a
+ *    when its conversation stops learning (hideConversationTurns) and when
+ *    the user deletes all their memories (resetOwnerRecall). A hidden
+ *    document keeps no text and no index entry, no search returns it, and
+ *    indexing its turn again leaves it hidden. A turn the user asked to
+ *    forget what it says (memory_delete with its c: ref) is only kept out of
+ *    automatic memory (keepTurnOutOfMemory): recall still shows it. Deleting a
  *    conversation takes its turn documents (0071's triggers), never the
  *    memories saved from it.
  *  - startRecallBackfill indexes what existed before, once per database and
@@ -323,8 +321,8 @@ interface TurnSource {
  * Write a turn's document (what the user typed, steers included, and the
  * reply), then bring the conversation's other documents up to its current
  * title (a title often arrives after the first turn). Null when the turn's
- * document is hidden (Don't recall, a conversation that stopped learning,
- * Delete all memories). A move to another workspace is followed by 0071's
+ * document is hidden (a conversation that stopped learning, Delete all
+ * memories). A move to another workspace is followed by 0071's
  * memory_recall_docs_node_moved.
  */
 function writeTurnDoc(source: TurnSource, options: WriteOptions = {}): number | null {
@@ -512,24 +510,6 @@ export function hideConversationTurns(ownerUserId: string, nodeId: string): numb
 }
 
 /**
- * Hide the past-conversation turn a c: ref names, when this scope may read
- * it (recallDocument's rules), and bar extraction from it: the user asked
- * Michi not to recall it (the reply footer's Don't recall, as ChatGPT's
- * "Don't mention this again"). True too when the owner's turn is hidden
- * already; false when there is no such turn. The conversation itself is
- * unchanged.
- */
-export function forgetConversationTurn(query: RecallDocumentQuery): boolean {
-  const hit = recallDocument({ ...query, kinds: ['turn'] });
-  if (!hit || hit.kind !== 'turn') return conversationTurnHidden(query?.ownerUserId, query?.docId);
-  memoryTransaction(() => {
-    hideDoc(hit.docId);
-    if (hit.turnId) keepTurnOutOfMemory(query.ownerUserId.trim(), hit.turnId, hit.workspaceId);
-  });
-  return true;
-}
-
-/**
  * Keep the past-conversation turn a c: ref names, when this scope may read it
  * (recallDocument's rules), out of automatic memory (keepTurnOutOfMemory):
  * the user asked to forget what it says (memory_delete with a c: ref). Recall
@@ -551,11 +531,6 @@ function hiddenTurnId(ownerUserId: unknown, docId: unknown): string | null {
   const row = prepareCached(`SELECT ref_id FROM memory_recall_docs WHERE id = ? AND owner_user_id = ? AND doc_kind = 'turn' AND hidden = 1`)
     .get(docId as number, owner) as { ref_id: string } | undefined;
   return row?.ref_id ?? null;
-}
-
-/** Whether the owner's past-conversation turn with this document id (a c: ref's) is hidden already. */
-export function conversationTurnHidden(ownerUserId: unknown, docId: unknown): boolean {
-  return hiddenTurnId(ownerUserId, docId) !== null;
 }
 
 // ── backfill ─────────────────────────────────────────────────────────────────
@@ -786,7 +761,10 @@ export interface RecallSearchQuery {
   /** Leave out this conversation's turns (the current one); memories from it stay. */
   excludeNodeId?: string | null;
   excludeNodeIds?: readonly string[];
-  /** Superseded memories too, ranked below active ones. Never what the user asked Michi to forget (hidden). */
+  /**
+   * Superseded memories, and memories past their end (validity.ts), too, ranked below active ones. Never what the
+   * user asked Michi to forget (hidden).
+   */
   includeInactive?: boolean;
   /**
    * The relevance gate for automatic recall (default true): a result must
@@ -830,6 +808,10 @@ export interface RecallMemoryInfo {
   importSource: MemoryImportSource | null;
   /** What it is about (MemoryRecord.topic), or null. */
   topic: string | null;
+  /** When it stops being true (validity.ts), or null. */
+  validUntil: number | null;
+  /** One of Michi's own workspace notes: when it was last written, used or confirmed (validity.IDLE_SINCE_SQL); else null. */
+  idleSince: number | null;
 }
 
 export interface RecallHit {
@@ -944,7 +926,7 @@ const HIT_SQL = `SELECT d.id, d.doc_kind, d.ref_id, d.node_id, d.turn_id, d.work
     m.version AS memory_version, m.source_risk AS memory_source_risk, m.event_at AS memory_event_at,
     m.observed_at AS memory_observed_at, m.created_at AS memory_created_at, m.body AS memory_body,
     m.keywords AS memory_keywords, m.workspace_id AS memory_workspace_id, m.import_source AS memory_import_source,
-    m.topic AS memory_topic
+    m.topic AS memory_topic, m.valid_until AS memory_valid_until, ${IDLE_SINCE_SQL} AS memory_idle_since
   FROM memory_recall_docs d
   LEFT JOIN nodes n ON n.id = d.node_id
   LEFT JOIN memories m ON d.doc_kind = 'memory' AND m.id = d.ref_id AND m.owner_user_id = d.owner_user_id
@@ -1000,6 +982,8 @@ export function recallableWorkspaces(ownerUserId: string, current: string | null
 interface Scope {
   ownerUserId: string;
   includeInactive: boolean;
+  /** What a memory's end (validity.ts) is checked against. */
+  now: number;
   after: number;
   before: number;
   memories: boolean;
@@ -1107,6 +1091,8 @@ interface HitRow {
   memory_workspace_id: string | null;
   memory_import_source: MemoryImportSource | null;
   memory_topic: string | null;
+  memory_valid_until: number | null;
+  memory_idle_since: number | null;
 }
 
 /** In Trash (an archived thread, kept in an arch-* group, is not). */
@@ -1136,6 +1122,7 @@ function hitOf(row: HitRow, scope: Scope, sets: ScopeSets, candidate: Candidate)
   }
   if (row.memory_row_id === null || row.memory_status === null || row.memory_body === null) return null;
   if (row.memory_status !== 'active' && !(scope.includeInactive && row.memory_status === 'superseded')) return null;
+  if (!scope.includeInactive && isExpired(row.memory_valid_until, scope.now)) return null;
   const workspaceId = row.memory_workspace_id;
   if (workspaceId === null ? !scope.userScope : !sets.memoryWorkspaces.has(workspaceId)) return null;
   return {
@@ -1148,7 +1135,7 @@ function hitOf(row: HitRow, scope: Scope, sets: ScopeSets, candidate: Candidate)
       eventAt: row.memory_event_at, observedAt: row.memory_observed_at ?? row.memory_created_at ?? row.at,
       keywords: row.memory_keywords ? row.memory_keywords.split('\n').filter(Boolean) : [],
       importSource: row.memory_import_source ?? null,
-      topic: row.memory_topic ?? null,
+      topic: row.memory_topic ?? null, validUntil: row.memory_valid_until, idleSince: row.memory_idle_since,
     },
   };
 }
@@ -1259,7 +1246,7 @@ export function recallSearch(query: RecallSearchQuery): RecallHit[] {
 
 /** What recallSearch and recallDocument read: the RecallSearchQuery fields that name a scope. */
 type RecallScopeQuery = Pick<RecallSearchQuery, 'workspaceIds' | 'includeUserScope' | 'memoryWorkspaceIds' | 'currentWorkspaceId'
-  | 'kinds' | 'after' | 'before' | 'excludeNodeId' | 'excludeNodeIds' | 'includeInactive'>;
+  | 'kinds' | 'after' | 'before' | 'excludeNodeId' | 'excludeNodeIds' | 'includeInactive' | 'now'>;
 
 export interface RecallDocumentQuery extends RecallScopeQuery {
   ownerUserId: string;
@@ -1311,6 +1298,7 @@ function searchScope(ownerUserId: string, query: RecallScopeQuery): Scope | null
   const scope: Scope = {
     ownerUserId,
     includeInactive: query.includeInactive === true,
+    now: typeof query.now === 'number' && Number.isFinite(query.now) ? query.now : Date.now(),
     after: validTime(query.after, -TIME_LIMIT),
     before: validTime(query.before, TIME_LIMIT + 1),
     memories: kinds.has('memory'),

@@ -1,7 +1,7 @@
 import React, { useRef, useState, useMemo, useCallback, useEffect } from 'react';
 import { formatTokenCount } from 'michi-shared';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
-import { lastInputWasTouch } from '../../lib/inputModality';
+import { lastInputWasKeyboard, lastInputWasTouch } from '../../lib/inputModality';
 import { PopoverSurface } from '../ui/Popover';
 import { useAnchoredPosition } from '../ui/useAnchoredPosition';
 
@@ -45,9 +45,10 @@ const formatTokens = (n: number) => formatTokenCount(n, { precise: true });
  * keyboard stays up and the field is not refocused). Hidden until usage
  * passes CONTEXT_RING_MIN_PERCENT.
  *
- * On hover, shows a styled tooltip with "Context usage: 75%" prominently
- * and optional token breakdown details below. A touch screen has no hover, so
- * a tap toggles the same card and the next tap outside the ring closes it.
+ * On hover or keyboard focus, shows a styled tooltip with "Context usage: 75%"
+ * prominently and optional token breakdown details below. A touch screen has
+ * no hover, so a tap toggles the same card and the next tap outside the ring
+ * closes it.
  */
 export const ContextRing = React.memo(function ContextRing({
   percentage,
@@ -74,7 +75,10 @@ export const ContextRing = React.memo(function ContextRing({
   const onEnter = useCallback(() => { if (!lastInputWasTouch()) setHovered(true); }, []);
   const onLeave = useCallback(() => { if (!lastInputWasTouch()) setHovered(false); }, []);
   const onTap = useCallback(() => { if (lastInputWasTouch()) setHovered(open => !open); }, []);
+  // Keyboard focus opens the card a hover would, and Esc or leaving closes it (WCAG 1.4.13).
+  const onFocus = useCallback(() => { if (lastInputWasKeyboard()) setHovered(true); }, []);
   const close = useCallback(() => setHovered(false), []);
+  const onKeyDown = useCallback((event: React.KeyboardEvent) => { if (event.key === 'Escape') setHovered(false); }, []);
 
   useEffect(() => {
     if (!hovered) return;
@@ -97,9 +101,13 @@ export const ContextRing = React.memo(function ContextRing({
         ref={anchorRef}
         className="t-toolbar-chip is-icon-only composer-context-ring"
         data-icononly="true"
+        tabIndex={0}
         onMouseEnter={onEnter}
         onMouseLeave={onLeave}
         onClick={onTap}
+        onFocus={onFocus}
+        onBlur={close}
+        onKeyDown={onKeyDown}
         aria-label={`Context usage: ${pct.toFixed(0)}%`}
         role="meter"
         aria-valuenow={pct}
@@ -207,6 +215,7 @@ function ContextRingTooltip({ anchorRef, pct, color, summary, onDismiss }: Toolt
       ref={surfaceRef}
       variant="tooltip"
       menuKind="usage"
+      animate
       className="michi-menu-usage"
       width="var(--m-width)"
       maxWidth="calc(100vw - 16px)"

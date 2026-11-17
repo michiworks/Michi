@@ -13,17 +13,13 @@ function pluralize(noun: string, count: number): string {
 /**
  * Base summary without the failed-count suffix, so renderers can color the
  * failure fragment independently (color marks state, never whole rows).
- *
- * `subagentStatus` replaces a lone SubAgent's status word ("in background",
- * "stopped"), which the tool status alone cannot say; see
- * useDelegationStatusLabel. Other summaries ignore it.
  */
-export function summarizeToolsBase(tools: ToolCallState[], subagentStatus?: string): string {
+export function summarizeToolsBase(tools: ToolCallState[]): string {
   if (tools.length === 0) return '';
 
   const subagentInfos = tools.map(subagentToolInfo);
   if (tools.length === 1 && subagentInfos[0]) {
-    return `${subagentHeading(subagentInfos[0])} · ${subagentStatus ?? subagentStatusLabel(tools[0].status)}`;
+    return `${subagentHeading(subagentInfos[0])} · ${subagentStatusLabel(tools[0].status)}`;
   }
   if (tools.length > 1 && subagentInfos.every(Boolean)) {
     const running = tools.filter((t) => isRunningStatus(t.status)).length;

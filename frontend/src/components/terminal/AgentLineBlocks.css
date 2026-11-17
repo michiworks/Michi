@@ -10,22 +10,19 @@
 .agent-line-run {
   --agent-line-hang: 24px;
   --agent-line-hover: color-mix(in srgb, var(--term-fg) 6%, transparent);
-  --agent-line-press: color-mix(in srgb, var(--term-fg) 10%, transparent);
   position: relative;
   container-type: inline-size;
   font-family: var(--ui-font);
 }
-/* Loose above, tight below: a run belongs to the prose that reports it, so it
-   sits 22px under what came before and 4px over what follows. Runs that
-   follow each other touch. */
+/* Equal space around prose; consecutive runs still touch. */
 .agent-line-group,
 .agent-line-run--thought,
-.agent-line-workfold { margin: 22px 0 4px; }
+.agent-line-workfold { margin: 12px 0; }
 .agent-line-group + .agent-line-group,
 .agent-line-run--thought + .agent-line-group,
-.agent-line-group + .agent-line-run--thought { margin-top: -4px; }
+.agent-line-group + .agent-line-run--thought { margin-top: -12px; }
 /* A run that opens a message has no prose above it: the gap between messages
-   already separates it, so adding 22px would push it off its own question. */
+   already separates it. */
 .terminal-message-assistant > :is(.agent-line-group, .agent-line-run--thought, .agent-line-workfold):first-child { margin-top: 0; }
 /* The count line under a message (MessageSubagents): a run's grid and type at
    the message's own distance. */
@@ -74,7 +71,7 @@ button.agent-line { cursor: pointer; }
 @media (hover: hover) {
   button.agent-line:hover { background: var(--agent-line-hover); color: var(--term-fg); }
 }
-button.agent-line:active { background: var(--agent-line-press); color: var(--term-fg); }
+button.agent-line:active { background: var(--agent-line-hover); color: var(--term-fg); }
 .agent-line:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 .agent-line__ico {
@@ -115,7 +112,7 @@ button.agent-line:active { background: var(--agent-line-press); color: var(--ter
   max-width: 100%;
   font-weight: 500;
   color: var(--term-mid);
-  transition: color 220ms ease-out;
+  transition: color var(--t-move) ease-out;
 }
 /* A settled run's sentence: one muted line across the whole text column. */
 .agent-line__lead.is-sentence { flex: 1 1 0; font-weight: 400; color: var(--term-muted); }
@@ -287,7 +284,7 @@ button.agent-line:active { background: var(--agent-line-press); color: var(--ter
   scrollbar-width: thin;
   scrollbar-color: var(--term-line) transparent;
 }
-.agent-line-thought--body:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.agent-line-thought--body:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 
 .agent-line-payload {
   margin: 4px 0 8px;
@@ -370,7 +367,7 @@ button.agent-line:active { background: var(--agent-line-press); color: var(--ter
   .agent-line-link:hover { background: var(--agent-line-hover); color: var(--term-fg); }
 }
 .agent-line-icon-btn:focus-visible,
-.agent-line-link:focus-visible { outline: var(--focus-ring); outline-offset: 0; }
+.agent-line-link:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* Subagents: today's line (opens Background work), in the line's metrics. */
 .agent-line--sub { display: flex; }

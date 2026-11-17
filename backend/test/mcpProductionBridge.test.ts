@@ -12,6 +12,7 @@ import { STDIO_DEFAULT_MAX_BUFFER_SIZE } from '@modelcontextprotocol/sdk/shared/
 import { ChatApprovalState } from '../src/agents/chatApprovalState';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { recordCompanionTaint } from '../src/services/turnTrust';
+import { noteMichiStartedTurn } from '../src/services/turnGuard';
 import { chatOwner } from './helpers/owners';
 import { activeTurnRow } from './helpers/checkinNodes';
 
@@ -218,7 +219,7 @@ test('real paginated first-page output schema and required-task metadata remain 
   assert.equal(JSON.parse((log.content[0] as any).text).includes('task-first'), false, 'required task must be refused before network invocation');
 });
 
-test('a turn that took in check-in material asks before every tool the production Pi bridge makes of a real server, whatever its mode, grants or session trust (DESIGN-v2 §2.8 T5)', async t => {
+test('the tools the production Pi bridge makes of a real server keep their grants and session trust after check-in material, and run in Michi\'s work (no dangerous kind)', async t => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'michi-bridge-taint-'));
   process.env.MICHI_DATA_DIR = tmpDir;
   closeDb();
@@ -253,7 +254,10 @@ test('a turn that took in check-in material asks before every tool the productio
   recordCompanionTaint({ nodeId: 'n-pi', turnId: 'turn-bridge' }, 'read_page', 'checkin');
   for (const tool of tools) {
     for (const mode of ['ask', 'trust', 'yolo'] as const) {
-      assert.equal(approvals.policy(owner, null, tool.name, false, mode), 'ask', `${tool.name} in ${mode}`);
+      assert.equal(approvals.policy(owner, null, tool.name, false, mode), 'allow', `${tool.name} in ${mode}`);
     }
   }
+  grants.clear();
+  noteMichiStartedTurn('n-pi', 'turn-bridge');
+  for (const tool of tools) assert.equal(new ChatApprovalState().policy(owner, null, tool.name, false, 'ask'), 'allow', `${tool.name} in Michi's work`);
 });

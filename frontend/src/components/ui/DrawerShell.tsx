@@ -6,6 +6,7 @@ import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { useBackLayer } from '../../lib/backStack';
 import { isImeComposing } from '../../lib/ime';
 import ResizeHandle from '../ResizeHandle';
+import { ChevronLeftIcon, CloseIcon } from '../terminal/icons';
 import './DrawerShell.css';
 import { useOverlayFocus } from './useOverlayFocus';
 import './OverlaySurface.css';
@@ -29,6 +30,18 @@ interface DrawerResize {
 // a little faster, inside the panel's slide.
 const SCRIM_IN: Transition = { duration: DUR.enter, ease: 'easeOut' };
 const SCRIM_OUT: Transition = { duration: DUR.scrimExit, ease: EASE.out };
+
+/** Whether the panel covers all of `element`: its box lies inside the
+ *  panel's, and the panel, not a popover drawn above it, shows at its centre. */
+function hiddenUnder(panel: HTMLElement, element: Element): boolean {
+  if (panel.contains(element)) return false;
+  const box = panel.getBoundingClientRect();
+  const rect = element.getBoundingClientRect();
+  if (!box.width || !box.height) return false;
+  if (rect.left < box.left || rect.right > box.right || rect.top < box.top || rect.bottom > box.bottom) return false;
+  const shown = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  return !!shown && panel.contains(shown);
+}
 
 /** Shared right-anchored drawer. Presence includes the retiring panel. */
 export interface DrawerShellProps {
@@ -123,6 +136,19 @@ export function DrawerShell({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, onClose, closeOnEscape]);
 
+  // The page stays usable beside a non-modal drawer, but the drawer never
+  // hides the focused control (TR-43): focus moving into page content under
+  // the panel closes it, and focus stays where it went.
+  React.useEffect(() => {
+    if (!open || modal) return;
+    const onFocus = (event: FocusEvent) => {
+      const panel = panelRef.current;
+      if (panel && event.target instanceof Element && hiddenUnder(panel, event.target)) onClose();
+    };
+    document.addEventListener('focusin', onFocus);
+    return () => document.removeEventListener('focusin', onFocus);
+  }, [open, modal, onClose]);
+
   // A phone shows the drawer as a page over the app: its header goes back,
   // and so does Back, dragging the panel off to the right. Its body text
   // reads a step larger (data-phone; the sizes are in mobile.css).
@@ -179,10 +205,7 @@ export function DrawerShell({
               title="Back (esc)"
               aria-label="Back"
             >
-              <svg width={18} height={18} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.6}
-                strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M10 3L5 8l5 5" />
-              </svg>
+              <ChevronLeftIcon size="lg" aria-hidden="true" />
             </button>
           )}
           <span className="ui-overlay-title">{closeControl === 'back' ? title : <>▸ {title}</>}</span>
@@ -197,7 +220,7 @@ export function DrawerShell({
               title="Close (esc)"
               aria-label="Close"
             >
-              ×
+              <CloseIcon aria-hidden="true" />
             </button>
           )}
         </div>
@@ -206,7 +229,9 @@ export function DrawerShell({
           <ResizeHandle
             paneRef={panelRef}
             side="left"
+            label={`Resize ${typeof title === 'string' ? title : ariaLabel ?? 'drawer'}`}
             min={DRAWER_MIN_WIDTH}
+            max={() => Math.round(window.innerWidth * DRAWER_MAX_VIEWPORT_SHARE)}
             onResize={(w) => resize.set(Math.min(w, Math.round(window.innerWidth * DRAWER_MAX_VIEWPORT_SHARE)))}
             onReset={resize.reset}
           />

@@ -69,6 +69,10 @@ const sampleEvents: ChatStreamEvent[] = [
     data: { path: '.shot.png', caption: 'a screenshot', mimeType: 'image/png', size: 53248 },
   },
   {
+    event: CHAT_STREAM_EVENTS.blocks,
+    data: { blocks: [{ type: 'poll', id: 'cb-1', question: 'Day?', options: ['Mon', 'Tue'] }], title: 'Pick', fallbackText: 'Pick\n\nDay?\n- Mon\n- Tue' },
+  },
+  {
     event: CHAT_STREAM_EVENTS.permissionRequest,
     data: {
       requestId: 7,

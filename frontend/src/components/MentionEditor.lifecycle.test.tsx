@@ -33,12 +33,12 @@ describe('MentionEditor across useEditor instance swaps', () => {
     const ref = createRef<MentionEditorHandle>();
     const onChange = vi.fn();
     const view = render(<MentionEditor ref={ref} value="" mentions={[]} onChange={onChange} currentNodeId="current"
-      sameTreeNodes={[]} artifacts={[]} onSubmit={() => {}} />);
+      artifacts={[]} onSubmit={() => {}} />);
     await waitFor(() => expect(ref.current?.editor && !ref.current.editor.isDestroyed).toBe(true));
     onChange.mockClear();
 
     view.rerender(<MentionEditor ref={ref} value="Tell me about Sample" mentions={[]} onChange={onChange} currentNodeId="current"
-      sameTreeNodes={[]} artifacts={[]} onSubmit={() => {}} />);
+      artifacts={[]} onSubmit={() => {}} />);
     await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe('Tell me about Sample'));
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -48,7 +48,7 @@ describe('MentionEditor across useEditor instance swaps', () => {
     race.destroyed = [];
     const ref = createRef<MentionEditorHandle>();
     render(<MentionEditor ref={ref} value="" mentions={[]} onChange={() => {}} currentNodeId="current"
-      sameTreeNodes={[]} artifacts={[]} onSubmit={() => {}} />);
+      artifacts={[]} onSubmit={() => {}} />);
     expect(race.destroyed).toHaveLength(1);
     await waitFor(() => {
       const editor = ref.current?.editor as Editor | null | undefined;

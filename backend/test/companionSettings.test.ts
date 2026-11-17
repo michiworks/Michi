@@ -5,7 +5,7 @@
  * setting (DESIGN-v2 §6), the v2 migration of the MVP's default name
  * (§8.1(c)), the sources off (conv-3), a new user's outside sources off (D17),
  * Pause Michi as the settings show and take it,
- * and the local wall-clock helpers the brief and the tools'
+ * and the local wall-clock helpers the tools'
  * times depend on (conv-2). Temp MICHI_DATA_DIR per test.
  */
 
@@ -118,13 +118,12 @@ describe('Companion settings', () => {
     assert.equal(getCompanionSettings().sources.email.enabled, false, 'the returned settings are a copy');
 
     const again = patchCompanionSettings({ paused: true, displayName: 'Robin', pollMinutes: 10,
-      brief: { time: '07:30' }, quietHours: { enabled: false, start: '22:00', end: '06:30' } });
+      quietHours: { enabled: false, start: '22:00', end: '06:30' } });
     assert.equal(again.heartbeat.intervalMinutes, 120, 'earlier patches stay');
     assert.equal(again.paused, true);
     assert.equal(again.displayName, 'Robin');
     assert.equal('notifications' in again, false, 'Michi has no notification level of its own: Settings › Notifications is the one');
     assert.equal(again.pollMinutes, 10);
-    assert.deepEqual(again.brief, { enabled: true, time: '07:30', days: [1, 2, 3, 4, 5] });
     assert.deepEqual(again.quietHours, { enabled: false, start: '22:00', end: '06:30' });
     assert.deepEqual(patchCompanionSettings({}), again, 'an empty patch changes nothing');
     assert.equal(patchCompanionSettings({ sources: { cr: { alias: null } } }).sources.cr.alias, null);
@@ -151,7 +150,7 @@ describe('Companion settings', () => {
     refused('enabled');
     refused(['enabled']);
     refused({ enabled: 'yes' }, /enabled must be true or false/);
-    refused({ brief: { time: '9:00' } }, /HH:MM/);
+    refused({ brief: { time: '09:00' } }, /unknown setting: brief/);
     refused({ quietHours: { start: '24:00' } }, /HH:MM/);
     refused({ quietHours: { start: '08:00' } }, /must differ/, );
     refused({ heartbeat: { intervalMinutes: 45 } }, /30, 60, 120, 240/);
@@ -187,7 +186,6 @@ describe('Companion settings', () => {
       pollMinutes: 999,
       displayName: 'Robin',
       heartbeat: { intervalMinutes: 45, enabled: false },
-      brief: { time: '7am', enabled: false },
       sources: { cr: { alias: 'BAD ALIAS', includeReviews: false }, pipeline: { watch: 'nope' }, system: { enabled: false } },
       // Michi's own notification level from before P4: no longer read.
       notifications: 'off',
@@ -197,7 +195,6 @@ describe('Companion settings', () => {
     const expected: CompanionSettings = structuredClone(DEFAULT_COMPANION_SETTINGS);
     expected.displayName = 'Robin';
     expected.heartbeat.enabled = false;
-    expected.brief.enabled = false;
     expected.sources.cr.includeReviews = false;
     assert.deepEqual(settings, expected, 'a stored pause is not read: Pause Michi is (migrateCompanionPause took it over once)');
 
@@ -212,19 +209,6 @@ describe('Companion settings', () => {
     assert.equal(patched.pollMinutes, DEFAULT_COMPANION_SETTINGS.pollMinutes);
     assert.equal(patched.paused, false);
     assert.deepEqual(JSON.parse(stored()!.value), { ...storedPart(patched), paused: true }, 'the old stored pause stays as it was, for a version to go back to');
-  });
-
-  test('the brief\'s days: Monday to Friday by default; stored workdays are read as them until it has its own; a patch replaces them', () => {
-    assert.deepEqual(getCompanionSettings().brief.days, [1, 2, 3, 4, 5]);
-    store({ workdays: [0, 6] });
-    assert.deepEqual(getCompanionSettings().brief.days, [0, 6], 'settings from before read the old workdays');
-    const next = patchCompanionSettings({ brief: { days: [3, 1, 3] } });
-    assert.deepEqual(next.brief.days, [1, 3]);
-    assert.deepEqual(next.workdays, [0, 6], 'the old field stays as it was, for a version');
-    assert.deepEqual(JSON.parse(stored()!.value).brief.days, [1, 3], 'written as the brief\'s own');
-    refused({ brief: { days: [] } }, /at least one day/);
-    store({ workdays: [0, 6], brief: { days: 'never' } });
-    assert.deepEqual(getCompanionSettings().brief.days, [0, 6], 'a bad stored list reads the old workdays too');
   });
 
   test('workdays: Monday to Friday by default; a patch replaces them, in week order without repeats; at least one', () => {

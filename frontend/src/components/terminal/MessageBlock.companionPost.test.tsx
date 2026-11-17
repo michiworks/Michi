@@ -29,7 +29,7 @@ function renderMessage(message: ChatMessage, decorations: MetaChatDecorations | 
   return render(
     <MarkdownLinkRendererContext.Provider value={marking('surrounding')}>
       <MetaChatDecorationsContext.Provider value={decorations}>
-        <MessageBlock m={message} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
+        <MessageBlock m={message} index={0} isDark={false} copyText={() => ''} showThoughts density="comfortable" />
       </MetaChatDecorationsContext.Provider>
     </MarkdownLinkRendererContext.Provider>,
   );

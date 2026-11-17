@@ -77,7 +77,7 @@ test('Digest uses the Home editor, uploads files, selects an Agent/model and sen
   const { ensures, messages } = await bootDigest(page);
   const editor = page.locator(`${CONVERSATION_COMPOSER} ${COMPOSER_EDITOR}`);
 
-  await page.getByTitle('Mention context or node', { exact: true }).click();
+  await page.getByRole('button', { name: 'Mention context or node', exact: true }).click();
   await expect(editor).toHaveText('@');
   await page.keyboard.press('Escape');
   await editor.fill('Explain the rollout');
@@ -85,7 +85,7 @@ test('Digest uses the Home editor, uploads files, selects an Agent/model and sen
   await editor.pressSequentially('and validation');
   expect(ensures).toHaveLength(1);
 
-  await page.getByTitle('Attach file', { exact: true }).click();
+  await page.getByRole('button', { name: 'Attach file', exact: true }).click();
   await page.locator('input[type="file"]').setInputFiles({
     name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('release notes'),
   });

@@ -104,13 +104,13 @@ describe('TPane branch banner', () => {
   it('names a fork branch of a multi-model plan and the chat it inherits', () => {
     state.child = branch({ multiModelRunId: 'wfr_1' });
     render(<TPane nodeId="n1" />);
-    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('⎇multi-model branch · inherits Memory timing' + 'Open plan');
+    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('multi-model branch · inherits Memory timing' + 'Open plan');
   });
 
   it('says a fresh branch got only its prompt', () => {
     state.child = branch({ multiModelRunId: 'wfr_1', freshContext: true });
     render(<TPane nodeId="n1" />);
-    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('⎇multi-model branch · fresh context, prompt only' + 'Open plan');
+    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('multi-model branch · fresh context, prompt only' + 'Open plan');
   });
 
   it('opens the plan in the drawer of the chat that started it', () => {
@@ -152,7 +152,7 @@ describe('TPane branch banner', () => {
   it('keeps "spawned by agent" for an agent\'s own branches', () => {
     state.child = branch({});
     render(<TPane nodeId="n1" />);
-    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('⎇spawned by agent · inherits Memory timing');
+    expect(screen.getByTestId('pane-spawn-banner').textContent).toBe('spawned by agent · inherits Memory timing');
     expect(screen.queryByRole('button', { name: 'Open plan' })).toBeNull();
   });
 });

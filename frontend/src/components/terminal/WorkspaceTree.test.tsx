@@ -439,6 +439,53 @@ describe('WorkspaceTree', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('moves a workspace without dragging: ⌥↓ on its row and Move up in its menu save the order a drop would', async () => {
+    renderTree();
+    const names = () => [...document.querySelectorAll('[data-testid^="workspace-row-"]')].map((row) => row.getAttribute('data-testid'));
+    const saved = () => JSON.parse(localStorage.getItem('michi:v1:prefs') ?? '{}').workspaceOrder;
+    const active = await screen.findByRole('button', { name: 'Active workspace' });
+    expect(names()).toEqual(['workspace-row-p1', 'workspace-row-p2']);
+
+    active.focus();
+    fireEvent.keyDown(active, { key: 'ArrowDown', altKey: true });
+    expect(names()).toEqual(['workspace-row-p2', 'workspace-row-p1']);
+    expect(document.activeElement).toBe(active);
+    await waitFor(() => expect(saved()).toEqual(['p2', 'p1']), { timeout: 2000 });
+
+    fireEvent.contextMenu(active);
+    const menu = await screen.findByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: /Move down/ }).getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(within(menu).getByRole('menuitem', { name: /Move up/ }));
+    await waitFor(() => expect(names()).toEqual(['workspace-row-p1', 'workspace-row-p2']));
+  });
+
+  it('makes a merged row a title button with its caret beside it, keyed like the other rows', async () => {
+    const { nodes, projects } = fixture();
+    nodes.mMerge = {
+      nodeId: 'mMerge', chatId: null, projectId: 'p1', kind: 'chat', title: 'Merged chat',
+      mergeSources: ['rootB'], messages: [], followUps: [], status: 'idle',
+    };
+    projects[0].chatIds.push('mMerge');
+    projects[0].trees.push({ id: 'tM', rootNodeId: 'mMerge', createdAt: 0, lastActiveAt: 30, kind: 'merge' });
+    renderTreeWith({ nodes, projects });
+
+    const group = await screen.findByTestId('merge-group-mMerge');
+    const title = within(group).getByRole('button', { name: 'Merged chat' });
+    const source = () => within(group).queryByRole('button', { name: 'Other thread' });
+    expect(within(group).getByRole('button', { name: 'Collapse Merged chat' }).getAttribute('aria-expanded')).toBe('true');
+    expect(source()).toBeTruthy();
+
+    fireEvent.keyDown(title, { key: 'ArrowLeft' });
+    expect(source()).toBeNull();
+    fireEvent.click(within(group).getByRole('button', { name: 'Expand Merged chat' }));
+    expect(source()).toBeTruthy();
+
+    fireEvent.keyDown(title, { key: 'Enter' });
+    await waitFor(() => expect(title.getAttribute('aria-current')).toBe('true'));
+    fireEvent.keyDown(title, { key: 'F10', shiftKey: true });
+    expect(await screen.findByRole('menu')).toBeTruthy();
+  });
+
   it('leaves merge chats in Trash or the archive out of the Merged section', async () => {
     const { nodes, projects } = fixture();
     const merge = (nodeId: string, title: string, extra: Partial<ChatNodeState> = {}): ChatNodeState => ({
@@ -507,5 +554,93 @@ describe('WorkspaceTree collapsed workspace rail', () => {
     fireEvent.click(screen.getByText('Active workspace'));
     await waitFor(() => expect(screen.queryByText('Child of A')).toBeNull());
     expect(rail('p1').style.background).toBe(background);
+  });
+});
+
+describe('WorkspaceTree in the phone drawer (ST-36)', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
+  });
+
+  const row = (nodeId: string) => document.querySelector<HTMLElement>(`[data-sidebar-row="${nodeId}"]`);
+  const chat = (nodeId: string, projectId: string, title: string): ChatNodeState => ({
+    nodeId, chatId: null, projectId, kind: 'chat', title, messages: [], followUps: [], status: 'idle',
+  });
+  /** fixture() with a branch under every thread. */
+  function branching() {
+    const { nodes, projects } = fixture();
+    nodes.childB = chat('childB', 'p1', 'Child of B');
+    nodes.childP2 = chat('childP2', 'p2', 'Child of P2');
+    projects[0].chatIds.push('childB');
+    projects[0].edges.push({ source: 'rootB', target: 'childB', kind: 'branch' });
+    projects[1].chatIds.push('childP2');
+    projects[1].edges.push({ source: 'rootP2', target: 'childP2', kind: 'branch' });
+    return { nodes, projects };
+  }
+
+  it('opens the conversation on screen by itself, and every other one only as the user set it', async () => {
+    // A was folded last time, B unfolded by hand; nobody touched P2's thread.
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({
+      sidebarExpanded: { workspaces: { p2: true }, threads: { tA: false, tB: true }, branches: {} },
+    }));
+    renderTreeWith(branching(), { phoneDrawer: true });
+    expect(await screen.findByText('Child of A')).toBeTruthy();
+    expect(row('childB')).not.toBeNull();
+    expect(screen.getByText('P2 thread')).toBeTruthy();
+    expect(row('childP2')).toBeNull();
+  });
+
+  it('opens a thread on a tap without folding it; its caret folds it until the current node moves', async () => {
+    renderTreeWith(branching(), { phoneDrawer: true });
+    await screen.findByText('Child of A');
+    expect(row('childB')).toBeNull();
+
+    // B opens itself while it is the current one; A shows what the user set.
+    fireEvent.click(screen.getByText('Other thread'));
+    expect(await screen.findByText('Child of B')).toBeTruthy();
+    expect(row('childA')).toBeNull();
+    // The tap that opened B set nothing on it.
+    fireEvent.click(screen.getByText('Active thread'));
+    expect(await screen.findByText('Child of A')).toBeTruthy();
+    expect(row('childB')).toBeNull();
+
+    fireEvent.click(row('rootA')!.querySelector('[data-card-caret]')!);
+    expect(row('childA')).toBeNull();
+    expect(row('rootA')!.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(screen.getByText('Other thread'));
+    await screen.findByText('Child of B');
+    fireEvent.click(screen.getByText('Active thread'));
+    expect(await screen.findByText('Child of A')).toBeTruthy();
+  });
+
+  it('draws every branch of a conversation one level in, oldest first, with no fold of its own', async () => {
+    const { nodes, projects } = fixture();
+    nodes.second = chat('second', 'p1', 'Second child');
+    nodes.grand = chat('grand', 'p1', 'Grandchild');
+    projects[0].chatIds.push('second', 'grand');
+    projects[0].edges = [
+      { source: 'rootA', target: 'childA', kind: 'branch', createdAt: 10 },
+      { source: 'rootA', target: 'second', kind: 'branch', createdAt: 20 },
+      { source: 'childA', target: 'grand', kind: 'branch', createdAt: 30 },
+    ];
+    renderTreeWith({ nodes, projects }, { phoneDrawer: true });
+    await screen.findByText('Grandchild');
+    const branches = [...document.querySelectorAll<HTMLElement>('[data-sidebar-row]')]
+      .filter((el) => ['childA', 'second', 'grand'].includes(el.dataset.sidebarRow!));
+    expect(branches.map((el) => el.dataset.sidebarRow)).toEqual(['childA', 'second', 'grand']);
+    expect(branches.map((el) => el.style.paddingLeft)).toEqual(['43px', '43px', '43px']);
+    expect(row('childA')!.hasAttribute('aria-expanded')).toBe(false);
+    expect(row('childA')!.querySelector('[data-card-caret]')).toBeNull();
+  });
+
+  it('marks only the current row, and its conversation while that row is folded away', async () => {
+    renderTreeWith(fixture(), { phoneDrawer: true });
+    fireEvent.click(await screen.findByText('Child of A'));
+    await waitFor(() => expect(row('childA')!.getAttribute('aria-current')).toBe('true'));
+    expect(row('rootA')!.hasAttribute('aria-current')).toBe(false);
+    fireEvent.click(row('rootA')!.querySelector('[data-card-caret]')!);
+    expect(row('childA')).toBeNull();
+    expect(row('rootA')!.getAttribute('aria-current')).toBe('true');
   });
 });

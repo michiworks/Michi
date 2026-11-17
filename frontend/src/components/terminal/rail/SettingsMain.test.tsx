@@ -146,7 +146,8 @@ describe('Settings window', () => {
       .toEqual(['Agent', 'Workspace', 'App', 'Data']);
     const pagesIn = (name: string) => within(within(sections()).getByRole('group', { name })).getAllByRole('button').map((item) => item.querySelector('span')?.textContent);
     expect(pagesIn('Agent')).toEqual(['Runtime & model', 'Michi', 'Memory', 'Skills']);
-    expect(pagesIn('Workspace')).toEqual(['Machines', 'Scheduled jobs', 'Links']);
+    // Links is the desktop app's: a browser tab has no browser pane to open them in.
+    expect(pagesIn('Workspace')).toEqual(['Machines', 'Scheduled jobs']);
     // Update is a phone's, and Account shows once someone is signed in.
     expect(pagesIn('App')).toEqual(['Appearance', 'Notifications', 'Keyboard shortcuts']);
     expect(pagesIn('Data')).toEqual(['Trash', 'Archived', 'Backup & restore']);
@@ -157,6 +158,17 @@ describe('Settings window', () => {
     expect(description(button('Archived'))).toBe('2');
     expect(button('Appearance').getAttribute('aria-current')).toBe('page');
     expect(screen.getByRole('heading', { level: 1, name: 'Appearance' })).toBeTruthy();
+  });
+
+  it('lists Links in the desktop app, which has a browser pane to open them in', () => {
+    (window as unknown as { electron?: unknown }).electron = {};
+    try {
+      render(<Host />);
+      const workspace = within(within(sections()).getByRole('group', { name: 'Workspace' })).getAllByRole('button');
+      expect(workspace.map((item) => item.querySelector('span')?.textContent)).toEqual(['Machines', 'Scheduled jobs', 'Links']);
+    } finally {
+      delete (window as unknown as { electron?: unknown }).electron;
+    }
   });
 
   it('opens a page from its group, Trash and Archived included', async () => {
@@ -217,8 +229,7 @@ describe('Settings window', () => {
     fireEvent.change(search, { target: { value: 'motion' } });
     const results = screen.getByRole('region', { name: 'Search results' });
     const names = within(results).getAllByRole('button').map((hit) => hit.querySelector('.settings-window__name')?.textContent);
-    expect(names[0]).toBe('Reduce motion');
-    expect(names).toContain('Pane animation');
+    expect(names).toEqual(['Reduce motion']);
     expect(within(results).getByText('App › Appearance › Panes')).toBeTruthy();
     // While searching, no page is the current one.
     expect(button('Notifications').hasAttribute('aria-current')).toBe(false);
@@ -353,14 +364,13 @@ describe('Settings list on a phone', () => {
     expect(description(row('Runtime & model'))).toBe('Claude · Opus 5.5');
     expect(description(row('Appearance'))).toBe('Bone · Rust');
     expect(description(row('Notifications'))).toBe('Only when something needs me');
-    expect(description(row('Links'))).toBe('Michi Browser');
     expect(description(row('Machines'))).toBe('This machine');
     expect(description(row('Trash'))).toBe('2');
     // The library's skills, not the runtimes'.
     expect(await screen.findByText('2', { selector: '[data-row="skills"] .settings-phone__value' })).toBeTruthy();
     // Phone access is part of Machines, not a row of its own.
     expect(within(within(sections()).getByRole('group', { name: 'Workspace' })).getAllByRole('button').map((item) => item.getAttribute('aria-label')))
-      .toEqual(['Machines', 'Scheduled jobs', 'Links']);
+      .toEqual(['Machines', 'Scheduled jobs']);
     expect(screen.queryByRole('button', { name: /shortcuts/i })).toBeNull();
     expect(screen.queryByRole('searchbox')).toBeNull();
     // A phone updates the machine it opened; the desktop window has no Update page.
@@ -369,7 +379,7 @@ describe('Settings list on a phone', () => {
     expect(within(within(sections()).getByRole('group', { name: 'Data' })).getAllByRole('button').map((item) => item.getAttribute('aria-label')))
       .toEqual(['Trash', 'Archived', 'Backup & restore']);
     expect(description(row('Archived'))).toBe('2');
-    expect(root().querySelectorAll('.settings-phone__chevron')).toHaveLength(13);
+    expect(root().querySelectorAll('.settings-phone__chevron')).toHaveLength(12);
   });
 
   it('names a machine with a connection issue, and the agent when its Pages upkeep needs attention', () => {

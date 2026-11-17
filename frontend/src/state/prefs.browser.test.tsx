@@ -43,10 +43,16 @@ describe('stored preferences from either copy', () => {
     { uiFont: 'IBM Plex Mono' },
     { messageFont: 'Inter' },
     { sidebarDensity: 'cozy' },
-    { terminalDensity: 'roomy' },
     { notifications: 'loud' },
     { messageFontSize: 40 },
     { codeBlockStyle: 'x' },
+    // Retired settings: an older build's values are dropped.
+    { terminalDensity: 'dense' },
+    { sidebarInset: 8 },
+    { paneSpawnAnimation: 'fission' },
+    { sidebarVibrancy: 'hud' },
+    { fontFamily: 'serif' },
+    { paneTopFadeHeight: 60 },
   ])('read %j as the default, whether this browser or the backend holds it', async (stored) => {
     let seen: Prefs | undefined;
     const mount = async () => {

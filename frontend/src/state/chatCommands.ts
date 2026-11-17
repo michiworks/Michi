@@ -11,7 +11,8 @@ export interface ChatCommand { name: string; value?: string }
  * alone: a message merged before it would bury its command, one after it
  * would become its arguments. */
 export function nextQueuedBatch(queue: readonly PendingQueuedMessage[], slashEntries: readonly SlashEntry[]): PendingQueuedMessage[] {
-  const runsAlone = (entry: PendingQueuedMessage) => !!resolveSlashRun(entry.value, slashEntries, entry.slash?.entry);
+  // A picked command or skill runs alone, and so does a block's answer, which stays one message (ChatMessage.blockAnswer).
+  const runsAlone = (entry: PendingQueuedMessage) => !!entry.blockAnswer || !!resolveSlashRun(entry.value, slashEntries, entry.slash?.entry);
   if (!queue.length) return [];
   if (runsAlone(queue[0])) return [queue[0]];
   const next = queue.findIndex(runsAlone);

@@ -1622,6 +1622,16 @@ test('a direct answer that stays invalid past its repairs skips the batch as unr
   assert.equal(getExtractionCursor('ws', OWNER)!.completionCursor, 1, 'never retried unchanged');
 
   const notes = aboutTheUser();
+  // The topic pass files them first (memoryTopics.ts), with one direct call; then the profile is rebuilt.
+  answer = (opts) => {
+    assert.match(opts.system, /You file the notes Michi keeps about the user under topics/);
+    const refs = [...opts.prompt.matchAll(/^- (m:[0-9a-z]+v\d+) · /gmu)].map((match) => match[1]!);
+    assert.equal(refs.length, notes.length);
+    return { value: { topics: refs.map((ref) => ({ ref, topic: 'Home' })) }, usage: { inputTokens: 300, outputTokens: 40 } };
+  };
+  await runDirect(sched, jobId, 'the topic pass');
+  assert.equal(lastRun(sched, jobId).summary, `Automatic memory: filed ${notes.length} memories under topics`);
+  assert.ok(notes.every((record) => getMemory({ ownerUserId: OWNER }, record.id).topic === 'Home'));
   answer = (opts) => {
     assert.equal(opts.model, 'small-1', 'MICHI_MEMORY_MODEL names the model');
     assert.match(opts.system, /Answer with the JSON object only/);

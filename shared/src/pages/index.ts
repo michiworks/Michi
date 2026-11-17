@@ -14,3 +14,6 @@ export * from './markdownSegments';
 export * from './tasks';
 export * from './viewInteractions';
 export * from './containers';
+export { formFieldSchema, type FormField, type FormFieldValue } from './richBlocks';
+export * from './chatBlocks';
+export * from './blockSubmissions';

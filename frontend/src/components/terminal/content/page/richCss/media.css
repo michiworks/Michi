@@ -13,6 +13,10 @@
 .michi-mantine .desk-embed-domain { color: var(--term-fg); font-weight: 600; flex: none; }
 .michi-mantine .desk-embed-title { color: var(--desk-meta); font-weight: 400; }
 .michi-mantine .desk-embed-placeholder { display: flex; align-items: center; justify-content: center; max-height: 60vh; background: var(--term-alt); }
-.michi-mantine .desk-embed-placeholder button { padding: 6px 14px; border: 1px solid var(--term-line-s); border-radius: var(--ui-radius); background: var(--term-surface); color: var(--term-fg); font: inherit; font-size: var(--fs-lg); cursor: pointer; }
-.michi-mantine .desk-embed-placeholder button:hover { background: var(--desk-hover); }
-.michi-mantine .desk-embed-placeholder button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.michi-mantine .desk-embed-placeholder button { padding: 6px 14px; border: 1px solid var(--term-line-s); border-radius: var(--ui-radius); background: var(--term-surface); color: var(--term-fg); font: inherit; font-size: var(--fs-lg); cursor: pointer; transition: background var(--t-soft) var(--t-ease); }
+/* Hover for a real pointer (ST-02); the press, the same fill, also answers a tap (ST-06). */
+@media (hover: hover) {
+  .michi-mantine .desk-embed-placeholder button:hover { background: var(--desk-hover); }
+}
+.michi-mantine .desk-embed-placeholder button:active { background: var(--desk-hover); }
+.michi-mantine .desk-embed-placeholder button:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }

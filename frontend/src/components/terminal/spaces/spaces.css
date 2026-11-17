@@ -13,17 +13,44 @@
 .space-doc__status { margin: 0; color: var(--term-muted); font-size: var(--fs-sm); }
 .space-doc__notice[role='alert'] { color: var(--term-danger-text); }
 
+/* The column and header of the Pages Home, workspace homes and Space pages
+   (home/home.css has the rest). They load with the shell, so the Pages Home's
+   loading fallback (SpacesPage) holds the Home's layout. The title row's rule
+   outranks .michi-doc-title-row, which a Space page's row also carries. */
+.area-settings.spaces-home .spaces-home__doc {
+  display: flex; flex-direction: column; gap: 22px;
+  width: 100%; max-width: 1552px; padding: 44px clamp(24px, 4%, 56px) 120px;
+  /* Keep select / add / drag controls inside the page, clear of the sidebar resize handle. */
+  padding-inline-start: 72px;
+}
+.spaces-home__head { display: flex; flex-direction: column; gap: 8px; }
+.spaces-home__head .area-settings__kicker { margin: 0; }
+.spaces-home__head .spaces-home__title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.spaces-home__title {
+  margin: 0;
+  color: var(--term-fg);
+  font-size: var(--fs-5xl);
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: var(--ls-tight);
+  overflow-wrap: anywhere;
+}
+.spaces-home__date { margin-left: 6px; color: var(--term-muted); font-size: var(--fs-lg); }
+@media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
+  .area-settings.spaces-home .spaces-home__doc { padding: 24px 16px 120px; }
+  .spaces-home__head .spaces-home__title-row { flex-wrap: wrap; row-gap: 4px; }
+}
+
 /* Page tree in the outline card */
 .space-outline .space-outline__row { position: relative; display: flex; align-items: center; }
 .space-outline .space-outline__item { display: flex; align-items: center; gap: 8px; padding: 6px 30px 6px 14px; font-weight: 420; }
-.space-outline .space-outline__item.is-current { font-weight: 600; }
 .space-outline .space-outline__item > svg { flex: none; color: var(--term-faint); }
 .space-outline .space-outline__item > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* On this page: headings, and the titled blocks under them one step in. */
 .space-outline .space-outline__section { display: flex; min-width: 0; }
 .space-outline .space-outline__section[data-depth='2'] { color: var(--term-mid); }
 .space-outline__section-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.space-outline__count { margin-left: auto; color: var(--term-accent); font: 500 var(--fs-xs)/1 var(--font-mono); }
+.space-outline__count { margin-left: auto; color: var(--term-accent-text); font: 500 var(--fs-xs)/1 var(--font-mono); }
 .space-outline .space-outline__add { color: var(--term-muted); }
 .space-outline__rule { margin: 10px 0; border: 0; border-top: 1px solid var(--term-line); }
 .space-outline__note { padding: 4px 16px 8px; color: var(--term-muted); font-size: var(--fs-sm); }
@@ -36,7 +63,7 @@
   background: transparent; color: var(--term-fg); font: 500 var(--fs-sm)/1 var(--ui-font); cursor: pointer;
 }
 :where(.space-panel) :where(button:not(.michi-doc-link-btn):not(.page-change-link):not(.branches-directory__item):not(.row-kebab *):not(.component-catalog__preview *)):hover:not(:disabled) { background: var(--term-alt); }
-.space-panel button:disabled { opacity: .55; cursor: default; }
+.space-panel button:disabled { opacity: .5; cursor: not-allowed; }
 .space-panel details > summary { cursor: pointer; color: var(--term-mid); font-size: var(--fs-sm); }
 
 /* ── Small icon buttons in a page pane's header ────────────────── */
@@ -45,7 +72,7 @@
   border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-mid); cursor: pointer;
 }
 .space-helper-icon:hover:not(:disabled) { background: var(--term-alt); color: var(--term-fg); }
-.space-helper-icon:disabled { opacity: .5; cursor: default; }
+.space-helper-icon:disabled { opacity: .5; cursor: not-allowed; }
 
 /* The block the assistant window targets. */
 .space-doc .michi-doc-block[data-selected='true'] {
@@ -82,7 +109,7 @@
 }
 .page-pane-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .page-pane-heading strong { color: var(--term-fg); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.page-pane-tag { flex: none; padding: 2px 5px; border-radius: 3px; background: var(--term-alt); color: var(--term-muted); font: 500 10px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.page-pane-tag { flex: none; padding: 2px 5px; border-radius: var(--ui-radius-sm); background: var(--term-alt); color: var(--term-muted); font: 500 10px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .page-pane-visibility { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-xs); }
 .page-pane-actions { display: flex; gap: 2px; margin-left: auto; flex: none; }
 .page-pane-notice { margin: 8px 16px 0; color: var(--term-muted); font-size: var(--fs-xs); }
@@ -101,7 +128,7 @@
 }
 .spaces-primary { border-color: var(--term-accent); background: var(--term-accent); color: var(--term-bg); }
 .spaces-primary:disabled,
-.spaces-secondary:disabled { opacity: .5; cursor: default; }
+.spaces-secondary:disabled { opacity: .5; cursor: not-allowed; }
 .spaces-secondary:hover:not(:disabled) { background: var(--term-alt); }
 .spaces-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .spaces-toolbar label { display: flex; align-items: center; gap: 8px; color: var(--term-muted); font-size: var(--fs-sm); }
@@ -115,13 +142,13 @@
 .spaces-table { width: 100%; border-collapse: collapse; text-align: left; font-size: var(--fs-md); }
 .spaces-table th {
   padding: 0 12px 10px; border-bottom: 1px solid var(--term-line); color: var(--term-muted);
-  font: 500 10.5px/1 var(--ui-font); letter-spacing: var(--ls-caps-wide); text-transform: uppercase; white-space: nowrap;
+  font: 500 var(--fs-xs)/1 var(--ui-font); letter-spacing: var(--ls-caps-wide); text-transform: uppercase; white-space: nowrap;
 }
 .spaces-table td { height: 54px; padding: 0 12px; border-bottom: 1px solid var(--term-line); color: var(--term-mid); vertical-align: middle; }
 .spaces-table tbody tr:hover td { background: var(--term-alt); }
 .spaces-title-link { display: flex; align-items: center; gap: 10px; padding: 0; border: 0; background: none; color: var(--term-fg); font: 500 var(--fs-lg)/1.3 var(--ui-font); text-align: left; cursor: pointer; }
 .spaces-title-link:hover { color: var(--term-accent); }
-.spaces-color-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.spaces-color-dot { flex: none; width: 8px; height: 8px; border-radius: var(--ui-radius-pill); }
 .spaces-child-titles { padding: 3px 0 0 18px; color: var(--term-muted); font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spaces-pending { color: var(--term-accent); white-space: nowrap; }
 .spaces-synced { color: var(--term-muted); }
@@ -129,9 +156,11 @@
 .spaces-error,
 .spaces-form-error { color: var(--term-danger-text); }
 .spaces-state button,
-.spaces-error button { border: 0; background: transparent; color: var(--term-accent); text-decoration: underline; cursor: pointer; }
+.spaces-error button { border: 0; background: transparent; color: var(--term-accent-text); text-decoration: underline; cursor: pointer; }
 .spaces-empty { display: flex; flex-direction: column; align-items: center; padding: clamp(50px, 10vh, 120px) 20px; text-align: center; }
-.spaces-empty-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 18px; border: 1px solid var(--term-line); border-radius: 12px; color: var(--term-mauve); font-size: 22px; }
+.spaces-empty-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 18px; border: 1px solid var(--term-line); border-radius: var(--ui-radius); color: var(--term-faint); }
+/* Its glyph: a 30px line icon (size={30}) at the empty-state stroke. */
+.spaces-empty-icon > svg { stroke-width: 1.3; }
 .spaces-empty h2 { margin: 0; font: 600 18px/1.2 var(--ui-font); }
 .spaces-empty p { max-width: 390px; margin: 10px 0 22px; color: var(--term-muted); }
 /* The Create a page form inside its ModalShell. */

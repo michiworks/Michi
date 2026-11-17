@@ -1,0 +1,6 @@
+/* A form field's control (FieldControl.tsx), wherever it is drawn: a form block or the ask card. */
+
+/* A slider shows its value (and unit) beside the track; Mantine's own label only shows while dragging. */
+.michi-field-slider-row { display: flex; align-items: center; gap: 12px; min-height: 28px; }
+.michi-field-slider-track { flex: 1; min-width: 0; }
+.michi-field-slider-value { flex: none; min-width: 4ch; text-align: right; font-variant-numeric: tabular-nums; font-size: var(--fs-lg); color: var(--term-fg); }

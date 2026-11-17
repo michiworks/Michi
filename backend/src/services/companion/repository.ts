@@ -40,17 +40,15 @@ import {
   companionChangeActionsFor,
   companionPostRunId,
   isCompanionClock,
-  isOpenCompanionItem,
   parseCompanionPostMetadata,
   type ChatPermissionChoice,
-  type CompanionBriefCard,
-  type CompanionBriefDto,
   type CompanionBucket,
   type CompanionCardDto,
   type CompanionCardKind,
   type CompanionCardStatus,
-  type CompanionCatchUpDto,
   type CompanionCheckinChangeDto,
+  companionItemRaise,
+  companionRaiseUntil,
   type CompanionCheckinKind,
   type CompanionHeadlineDto,
   type CompanionConfigurableSource,
@@ -84,8 +82,7 @@ import {
 } from 'michi-shared';
 import { LOCAL_AGENT_OWNER_ID } from '../agentOwner';
 import { getDb } from '../db';
-import { nextCompanionBriefAt } from './briefSchedule';
-import { localClockText, localDateKey, localDayStart } from './clock';
+import { localDateKey, localDayStart } from './clock';
 import { CompanionError, invalidRequest, limitReached, notFound, notesConflict } from './errors';
 import { diffObservations, type ObservationDiff } from './observations';
 import {
@@ -118,7 +115,6 @@ export const COMPANION_MAX_SNOOZE_MS = 30 * DAY_MS;
 /** A proposed card waits this long for the user's Apply or Dismiss. */
 export const COMPANION_CARD_TTL_MS = DAY_MS;
 export const COMPANION_GOAL_PROGRESS_MAX_CHARS = 200;
-export const COMPANION_BRIEF_CURATE_MAX_CHARS = 500;
 export const COMPANION_REMINDER_TEXT_MAX_CHARS = 500;
 /** How far ahead a one-off reminder can be set. */
 export const COMPANION_MAX_REMINDER_AHEAD_MS = 366 * DAY_MS;
@@ -128,18 +124,17 @@ export const COMPANION_MISSING_POLLS_TO_GONE = 2;
 export const COMPANION_SUSPECT_DROP_MIN_ROWS = 3;
 /** Objects of one subtype the user thumbed down as too noisy before the subtype is demoted to digest (R2.7). */
 export const COMPANION_TOO_NOISY_TO_DEMOTE = 2;
-/** How long text-bearing records are kept (R2.10): event summaries, runs, decided cards, briefs, closed reminders. */
+/** How long text-bearing records are kept (R2.10): event summaries, runs, decided cards, closed reminders. */
 export const COMPANION_RECORD_RETENTION_MS = 30 * DAY_MS;
 /** Email and calendar items resolved or dismissed this long ago keep only their key and version (R2.10). */
 export const COMPANION_PRIVACY_TTL_MS = COMPANION_LIMITS.privacyTtlDays * DAY_MS;
 /** Acknowledged (or expired) notices are deleted this long after (R2.10). */
 export const COMPANION_NOTICE_RETENTION_MS = 7 * DAY_MS;
 /** Runs that count against the daily turn budget (R2.8): welcome and worker reports are exempt. */
-export const COMPANION_BUDGETED_RUN_KINDS: readonly CompanionRunKind[] = Object.freeze(['heartbeat', 'wake', 'brief', 'catch_up']);
+export const COMPANION_BUDGETED_RUN_KINDS: readonly CompanionRunKind[] = Object.freeze(['heartbeat', 'wake']);
 /** Items a snapshot lists (the counts cover all of them). */
 const SNAPSHOT_ITEM_LIMIT = 200;
 const ACTIVITY_LIMIT = 20;
-const CATCH_UP_ITEM_LIMIT = 50;
 
 // ── Plumbing ────────────────────────────────────────────────────────────────
 
@@ -275,6 +270,11 @@ interface ItemRow {
   /** The version the rating was given on (conv-1): it describes that version only. */
   feedback_version: string | null;
   feedback_at: number | null;
+  /** The check-in's reason for raising this item into "Waiting on you"; null when none did. */
+  raised_reason: string | null;
+  /** The version it was raised on: a later one reads unraised, as a rating does. */
+  raised_version: string | null;
+  raised_at: number | null;
   first_seen_at: number;
   changed_at: number;
   observed_at: number;
@@ -386,6 +386,23 @@ function ratingOf(row: ItemRow): Pick<CompanionItemDto, 'feedback' | 'feedbackRe
     : { feedback: null, feedbackReason: null };
 }
 
+/**
+ * A raise describes the version it was given on, as a rating does: the next
+ * change to the object asks the agent again instead of keeping a line written
+ * about what the item used to say. It also says what waits today, so it
+ * carries its local midnight (`until`) and readers ask companionItemRaise
+ * whether it still holds.
+ */
+function raiseOf(row: ItemRow): Pick<CompanionItemDto, 'raised'> {
+  const current = row.raised_reason !== null && (row.raised_version === null || row.raised_version === row.version);
+  if (!current) return { raised: null };
+  const at = row.raised_at ?? row.updated_at;
+  return { raised: { reason: row.raised_reason!, at, until: companionRaiseUntil(at) } };
+}
+
+/** Clears the agent's raise: what the user put away (dismissed, muted) no longer waits on them. */
+const UNRAISE = 'raised_reason = NULL, raised_version = NULL, raised_at = NULL';
+
 function toItemDto(row: ItemRow): CompanionItemDto {
   return {
     id: row.id,
@@ -402,6 +419,7 @@ function toItemDto(row: ItemRow): CompanionItemDto {
     status: row.status as CompanionItemStatus,
     snoozedUntil: row.snoozed_until,
     ...ratingOf(row),
+    ...raiseOf(row),
     firstSeenAt: row.first_seen_at,
     changedAt: row.changed_at,
     observedAt: row.observed_at,
@@ -613,7 +631,7 @@ export function resolveMissing(source: CompanionSourceKind, presentItemKeys: Ite
   });
 }
 
-/** Resolves these items at once (a recovered Auth session, good news after its brief); muted and resolved ones are left alone. */
+/** Resolves these items at once (a recovered Auth session, good news a later poll confirms); muted and resolved ones are left alone. */
 export function resolveItems(ids: readonly string[], now: number): string[] {
   if (ids.length === 0) return [];
   return companionTransaction(() => {
@@ -650,9 +668,9 @@ function feedbackEffect(row: ItemRow, reason: CompanionFeedbackReason | null, no
   const db = getDb();
   const status = row.status as CompanionItemStatus;
   if (reason === 'already_handled' && (status === 'new' || status === 'seen' || status === 'snoozed')) {
-    db.prepare(`UPDATE companion_items SET status = 'dismissed', snoozed_until = NULL, updated_at = ? WHERE id = ?`).run(now, row.id);
+    db.prepare(`UPDATE companion_items SET status = 'dismissed', snoozed_until = NULL, ${UNRAISE}, updated_at = ? WHERE id = ?`).run(now, row.id);
   } else if (reason === 'not_relevant' && status !== 'muted') {
-    db.prepare(`UPDATE companion_items SET status = 'muted', snoozed_until = NULL, updated_at = ? WHERE id = ?`).run(now, row.id);
+    db.prepare(`UPDATE companion_items SET status = 'muted', snoozed_until = NULL, ${UNRAISE}, updated_at = ? WHERE id = ?`).run(now, row.id);
   } else if (reason === 'too_noisy') {
     const subtype = row.subtype as CompanionItemSubtype;
     if (tooNoisyCount(subtype) >= COMPANION_TOO_NOISY_TO_DEMOTE) demoteSubtype(subtype, now);
@@ -680,7 +698,9 @@ export function applyItemAction(id: string, action: CompanionItemAction, now: nu
     const status = row.status as CompanionItemStatus;
     const db = getDb();
     const setStatus = (next: CompanionItemStatus, snoozedUntil: number | null) => {
-      db.prepare('UPDATE companion_items SET status = ?, snoozed_until = ?, updated_at = ? WHERE id = ?').run(next, snoozedUntil, now, id);
+      // Put away (dismissed, muted), it no longer waits on the user: the agent's raise goes with it, and restoring never brings it back.
+      const unraise = next === 'dismissed' || next === 'muted' ? `, ${UNRAISE}` : '';
+      db.prepare(`UPDATE companion_items SET status = ?, snoozed_until = ?${unraise}, updated_at = ? WHERE id = ?`).run(next, snoozedUntil, now, id);
     };
     switch (action.action) {
       case 'seen':
@@ -701,6 +721,23 @@ export function applyItemAction(id: string, action: CompanionItemAction, now: nu
         break;
       case 'restore':
         if (status === 'dismissed' || status === 'muted' || status === 'snoozed') setStatus('seen', null);
+        break;
+      case 'raise': {
+        const reason = oneLine(action.reason ?? '');
+        if (!reason) throw invalidRequest('raise needs a reason (one line the user sees beside it)');
+        if (reason.length > COMPANION_LIMITS.maxChangeReasonChars) {
+          throw invalidRequest(`reason is at most ${COMPANION_LIMITS.maxChangeReasonChars} characters`);
+        }
+        // Only what is on Today now can wait on the user today: a snoozed, dismissed, muted or resolved item
+        // is theirs to bring back (or the check-in restores it first). Raising belongs to this version, as a
+        // rating does, holds until local midnight, and never changes the item's status.
+        if (status !== 'new' && status !== 'seen') throw invalidRequest(`Only an item on Today can be raised; this one is ${status}`);
+        db.prepare('UPDATE companion_items SET raised_reason = ?, raised_version = ?, raised_at = ?, updated_at = ? WHERE id = ?')
+          .run(reason, row.version, now, now, id);
+        break;
+      }
+      case 'lower':
+        if (row.raised_reason !== null) db.prepare(`UPDATE companion_items SET ${UNRAISE}, updated_at = ? WHERE id = ?`).run(now, id);
         break;
       case 'feedback': {
         const { feedback } = action;
@@ -822,7 +859,7 @@ function toEvent(row: EventRow): CompanionEventRecord {
   };
 }
 
-/** Events after the cursor `seq`, oldest first (heartbeat / brief material; `baseline` ones are never material). */
+/** Events after the cursor `seq`, oldest first (a check-in's material; `baseline` ones are never material). */
 export function listEventsAfter(seq: number, limit = 200): CompanionEventRecord[] {
   const rows = getDb().prepare(`SELECT seq, item_id, kind, version, severity, summary, created_at FROM companion_events
       WHERE owner_user_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`).all(OWNER, Math.floor(seq), Math.max(1, Math.floor(limit))) as unknown as EventRow[];
@@ -1079,6 +1116,7 @@ interface RunRow {
   native_kept_at: number | null;
 }
 
+// 'brief' and 'catch_up' no longer run (2026-11-17); the rows they left still read.
 const RUN_KINDS: readonly CompanionRunKind[] = ['poll', 'heartbeat', 'brief', 'welcome', 'catch_up', 'worker_report', 'wake', 'send'];
 const RUN_OUTCOMES: readonly CompanionRunOutcome[] = ['running', 'ok', 'spoke', 'quiet', 'skipped', 'error', 'preempted', 'superseded'];
 
@@ -1235,8 +1273,8 @@ export function listRunningRuns(): CompanionRunRecord[] {
 
 /**
  * Model turns started since `since` that count against the daily budget
- * (R2.8: heartbeat, wake, brief and catch-up; welcome and worker reports are
- * exempt), skipped ones aside.
+ * (R2.8: heartbeats and wakes; welcome and worker reports are exempt),
+ * skipped ones aside.
  */
 export function countTurnsSince(since: number, kinds: readonly CompanionRunKind[] = COMPANION_BUDGETED_RUN_KINDS): number {
   if (kinds.length === 0) return 0;
@@ -1615,12 +1653,14 @@ export function removeGoal(id: string, now: number): CompanionGoalDto {
 
 /**
  * A Today item's state as a change records it (`before`, `after`): what a
- * snooze, dismiss or restore moves, and what Undo all puts back. A whole
- * CompanionItemDto is read as one too.
+ * snooze, dismiss, restore or raise moves, and what Undo all puts back. A
+ * whole CompanionItemDto is read as one too.
  */
 export interface CompanionItemChangeState {
   status: CompanionItemStatus;
   snoozedUntil: number | null;
+  /** Why Michi raised it, or null (absent in changes written before raising existed). */
+  raised?: string | null;
 }
 
 /** A goal as a change records it: null when it did not exist (before an add, after a remove). */
@@ -1661,7 +1701,10 @@ function itemStateOf(value: unknown): CompanionItemChangeState | null {
   const until = value.snoozedUntil ?? null;
   if (typeof status !== 'string' || !['new', 'seen', 'snoozed', 'dismissed', 'muted', 'resolved'].includes(status)) return null;
   if (until !== null && (typeof until !== 'number' || !Number.isSafeInteger(until))) return null;
-  return { status: status as CompanionItemStatus, snoozedUntil: until as number | null };
+  // A CompanionItemDto is read as a state too, so `raised` arrives as the DTO's object or as the state's text.
+  const raw = value.raised;
+  const raised = typeof raw === 'string' ? raw : isRecord(raw) && typeof raw.reason === 'string' ? raw.reason : null;
+  return { status: status as CompanionItemStatus, snoozedUntil: until as number | null, raised };
 }
 
 function goalStateOf(value: unknown): CompanionGoalChangeState | null {
@@ -1781,7 +1824,8 @@ export interface CompanionRunChangesUndo {
 }
 
 const sameItemState = (a: CompanionItemChangeState | null, b: CompanionItemChangeState | null) =>
-  !!a && !!b && a.status === b.status && (a.snoozedUntil ?? null) === (b.snoozedUntil ?? null);
+  !!a && !!b && a.status === b.status && (a.snoozedUntil ?? null) === (b.snoozedUntil ?? null)
+  && (a.raised ?? null) === (b.raised ?? null);
 
 /** Puts one change back when its target is still as the change left it; a message for the user otherwise. */
 function undoOne(row: RunChangeRow, now: number): string | null {
@@ -1792,9 +1836,12 @@ function undoOne(row: RunChangeRow, now: number): string | null {
     const current = itemRow(row.target_id);
     if (!current) return 'This item is gone';
     if (!before) return 'This change cannot be undone';
-    const state = { status: current.status as CompanionItemStatus, snoozedUntil: current.snoozed_until };
+    const state = { status: current.status as CompanionItemStatus, snoozedUntil: current.snoozed_until, raised: companionItemRaise(raiseOf(current), now)?.reason ?? null };
     if (!sameItemState(state, after) && !sameItemState(state, before)) return 'This item changed since';
-    db.prepare('UPDATE companion_items SET status = ?, snoozed_until = ?, updated_at = ? WHERE id = ?').run(before.status, before.snoozedUntil, now, row.target_id);
+    const raised = before.raised ?? null;
+    db.prepare(`UPDATE companion_items SET status = ?, snoozed_until = ?, raised_reason = ?, raised_version = ?, raised_at = ?, updated_at = ?
+        WHERE id = ?`).run(before.status, before.snoozedUntil, raised, raised === null ? null : current.version,
+      raised === null ? null : current.raised_at ?? now, now, row.target_id);
     return null;
   }
   const before = goalStateOf(parseJson(row.before_json));
@@ -1977,123 +2024,6 @@ export function markCardsReported(ids: readonly string[], now: number): number {
   return Number(changed.changes);
 }
 
-// ── Briefs ──────────────────────────────────────────────────────────────────
-
-interface BriefRow {
-  id: string;
-  date: string;
-  headline: string;
-  cards_json: string;
-  closing: string;
-  origin: string;
-  card_feedback_json: string;
-  created_at: number;
-}
-
-function toBrief(row: BriefRow): CompanionBriefDto {
-  const cards = parseJson(row.cards_json);
-  const feedback = parseJson(row.card_feedback_json);
-  const cardFeedback: Record<number, CompanionFeedback> = {};
-  if (isRecord(feedback)) {
-    for (const [index, value] of Object.entries(feedback)) {
-      if (/^\d+$/.test(index) && (value === 'up' || value === 'down')) cardFeedback[Number(index)] = value;
-    }
-  }
-  return {
-    id: row.id,
-    date: row.date,
-    headline: row.headline,
-    cards: Array.isArray(cards) ? cards as CompanionBriefCard[] : [],
-    closing: row.closing,
-    origin: row.origin as CompanionBriefDto['origin'],
-    createdAt: row.created_at,
-    cardFeedback,
-  };
-}
-
-function requiredText(value: unknown, what: string, max: number): string {
-  if (typeof value !== 'string') throw invalidRequest(`${what} is text`);
-  const text = oneLine(value);
-  if (!text) throw invalidRequest(`${what} cannot be empty`);
-  if (text.length > max) throw invalidRequest(`${what} is at most ${max} characters`);
-  return text;
-}
-
-/** A brief card as stored: known fields only, each within its limit. */
-function cleanBriefCard(value: unknown, index: number): CompanionBriefCard {
-  if (!isRecord(value)) throw invalidRequest(`brief card ${index + 1} must be an object`);
-  const itemIds = value.itemIds ?? [];
-  if (!Array.isArray(itemIds) || itemIds.length > 10 || !itemIds.every(ID)) throw invalidRequest(`brief card ${index + 1}: itemIds is a list of at most 10 item ids`);
-  let action: CompanionBriefCard['action'] = null;
-  if (value.action !== null && value.action !== undefined) {
-    if (!isRecord(value.action)) throw invalidRequest(`brief card ${index + 1}: action is {label, prompt} or null`);
-    action = {
-      label: requiredText(value.action.label, `brief card ${index + 1} action label`, 40),
-      prompt: requiredText(value.action.prompt, `brief card ${index + 1} action prompt`, 1000),
-    };
-  }
-  return {
-    title: requiredText(value.title, `brief card ${index + 1} title`, 120),
-    body: requiredText(value.body, `brief card ${index + 1} body`, 800),
-    itemIds: [...new Set(itemIds as string[])],
-    action,
-  };
-}
-
-export interface CompanionBriefInsert {
-  /** Local `YYYY-MM-DD`. */
-  date: string;
-  headline: string;
-  cards: readonly CompanionBriefCard[];
-  closing: string;
-  origin: CompanionBriefDto['origin'];
-  now: number;
-}
-
-/** Stores a day's brief; null when that day already has one of this origin (one llm brief a day). */
-export function insertBrief(input: CompanionBriefInsert): CompanionBriefDto | null {
-  if (typeof input.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw invalidRequest('date must be YYYY-MM-DD');
-  if (input.origin !== 'llm' && input.origin !== 'fallback') throw invalidRequest('origin must be llm or fallback');
-  if (!Array.isArray(input.cards) || input.cards.length > COMPANION_LIMITS.maxBriefCards) {
-    throw invalidRequest(`A brief has at most ${COMPANION_LIMITS.maxBriefCards} cards`);
-  }
-  const cards = input.cards.map(cleanBriefCard);
-  const headline = requiredText(input.headline, 'headline', 200);
-  const closing = requiredText(input.closing, 'closing', 200);
-  const id = newId('cmb');
-  const inserted = getDb().prepare(`INSERT INTO companion_briefs (id, owner_user_id, date, headline, cards_json, closing, origin, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (owner_user_id, date, origin) DO NOTHING`)
-    .run(id, OWNER, input.date, headline, JSON.stringify(cards), closing, input.origin, input.now);
-  return Number(inserted.changes) > 0 ? getBrief(id) : null;
-}
-
-export function getBrief(id: string): CompanionBriefDto | null {
-  const row = getDb().prepare('SELECT * FROM companion_briefs WHERE owner_user_id = ? AND id = ?').get(OWNER, id) as BriefRow | undefined;
-  return row ? toBrief(row) : null;
-}
-
-/** A day's brief: the Companion's own when there is one, else Michi's fallback. */
-export function briefForDate(date: string): CompanionBriefDto | null {
-  const row = getDb().prepare(`SELECT * FROM companion_briefs WHERE owner_user_id = ? AND date = ?
-      ORDER BY CASE origin WHEN 'llm' THEN 0 ELSE 1 END, created_at DESC LIMIT 1`).get(OWNER, date) as BriefRow | undefined;
-  return row ? toBrief(row) : null;
-}
-
-/** 👍 / 👎 (or neither) on one brief card. */
-export function setBriefCardFeedback(id: string, index: number, feedback: CompanionFeedback | null): CompanionBriefDto {
-  return companionTransaction(() => {
-    const brief = getBrief(id);
-    if (!brief) throw notFound('Brief not found');
-    if (!Number.isInteger(index) || index < 0 || index >= brief.cards.length) throw invalidRequest(`index must be a card of this brief (0-${brief.cards.length - 1})`);
-    if (feedback !== null && feedback !== 'up' && feedback !== 'down') throw invalidRequest('feedback must be up, down or null');
-    const next: Record<string, CompanionFeedback> = Object.fromEntries(Object.entries(brief.cardFeedback).map(([key, value]) => [key, value]));
-    if (feedback === null) delete next[String(index)];
-    else next[String(index)] = feedback;
-    getDb().prepare('UPDATE companion_briefs SET card_feedback_json = ? WHERE owner_user_id = ? AND id = ?').run(JSON.stringify(next), OWNER, id);
-    return getBrief(id)!;
-  });
-}
-
 // ── Notices ─────────────────────────────────────────────────────────────────
 // The notice outbox (companion_notices) is no longer written: Michi's notices
 // go to the attention service (notices.ts). Daily cleanup still deletes the
@@ -2262,8 +2192,8 @@ export function listOpenDelegations(): CompanionDelegation[] {
  * Delegations started since `since` whose replies a worker report covers,
  * open or closed, oldest first: the Michi source leaves their finished
  * replies out of Today. One whose reply a held-back "Worker finished" notice
- * left to Today (D18) is not among them, so that reply shows in Today and
- * the brief, while the agent still follows the conversation.
+ * left to Today (D18) is not among them, so that reply shows in Today,
+ * while the agent still follows the conversation.
  */
 export function listDelegationsSince(since: number): CompanionDelegation[] {
   const rows = getDb().prepare(`${DELEGATION_SELECT} WHERE d.owner_user_id = ? AND d.created_at >= ? AND m.value IS NULL
@@ -2290,7 +2220,7 @@ export function markDelegationReported(nodeId: string, messageId: string, now: n
 /**
  * A "Worker finished" notice the gate held back (an off day, quiet hours,
  * notifications off, a cap, its pane on screen; D18): the reply `messageId`
- * is left to Today and the brief, so worker reports skip it and the Michi
+ * is left to Today, so worker reports skip it and the Michi
  * source shows it (listDelegationsSince), and the agent keeps following the
  * conversation: its next reply is reported as usual. Nothing reported it,
  * so the idle clock does not restart. False unless followed.
@@ -2613,15 +2543,12 @@ export type CompanionMetaKey =
   | 'companion:notes'
   | 'companion:notes_revision'
   | 'companion:rules'
-  | 'companion:brief_curate'
   | 'companion:heartbeat_cursor'
   | 'companion:wake_cursor'
-  | 'companion:brief_cursor'
   | 'companion:last_heartbeat_at'
   | 'companion:last_wake_at'
   | 'companion:last_viewed_at'
   | 'companion:last_purge_at'
-  | 'companion:catch_up'
   | 'companion:welcome_done'
   /** The Get started card's answer (getStarted.ts, D17). */
   | 'companion:get_started'
@@ -2881,57 +2808,19 @@ export function listDemotedSubtypes(): CompanionItemSubtype[] {
   return COMPANION_ITEM_SUBTYPES.filter((subtype) => demoted.has(subtype));
 }
 
-// ── Brief focus ─────────────────────────────────────────────────────────────
-
-/** What the user asked the next brief to focus on ("Tomorrow, focus on…"). */
-export function getBriefCurate(): string {
-  return getCompanionMeta('companion:brief_curate') ?? '';
-}
-
-export function setBriefCurate(value: unknown): string {
-  if (typeof value !== 'string') throw invalidRequest('text must be text');
-  const text = oneLine(value);
-  if (text.length > COMPANION_BRIEF_CURATE_MAX_CHARS) throw invalidRequest(`text is at most ${COMPANION_BRIEF_CURATE_MAX_CHARS} characters`);
-  if (text) setCompanionMeta('companion:brief_curate', text);
-  else deleteCompanionMeta('companion:brief_curate');
-  return text;
-}
-
-// ── Viewing and catch-up (R2.8, R2.12) ──────────────────────────────────────
-
-const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-
-/**
- * The deterministic "Since you left" (R2.8): the items still open that were
- * created, changed or reopened after `awaySince` (never baseline sightings),
- * newest first, and one line saying how many and how many need the user.
- */
-export function buildCatchUp(awaySince: number, returnedAt: number): CompanionCatchUpDto {
-  const hidden = hiddenItemsSql();
-  const rows = getDb().prepare(`SELECT * FROM companion_items i WHERE i.owner_user_id = ? AND ${OPEN_SQL} ${hidden.sql}
-      AND EXISTS (SELECT 1 FROM companion_events e WHERE e.owner_user_id = i.owner_user_id AND e.item_id = i.id
-        AND e.kind IN ('created','changed','reopened') AND e.created_at > ? AND e.created_at <= ?)
-      ORDER BY i.changed_at DESC, i.id DESC LIMIT ?`).all(OWNER, returnedAt, ...hidden.args, awaySince, returnedAt, CATCH_UP_ITEM_LIMIT) as unknown as ItemRow[];
-  const needsYou = rows.filter((row) => row.bucket === 'needs_you').length;
-  const line = rows.length === 0 ? `Nothing new since ${localClockText(awaySince)}.`
-    : needsYou === rows.length ? `${plural(needsYou, 'thing needs', 'things need')} you.`
-      : `${plural(rows.length, 'update', 'updates')}${needsYou ? `, ${needsYou} ${needsYou === 1 ? 'needs' : 'need'} you` : ''}.`;
-  return { awaySince, returnedAt, changedItemIds: rows.map((row) => row.id), line };
-}
+// ── Viewing the panel (R2.12) ──────────────────────────────────────────────
 
 export interface CompanionViewResult {
   /** When the user last looked before now; null the first time. */
   previousViewedAt: number | null;
-  /** A "Since you left" when they were away at least COMPANION_LIMITS.catchUpAfterMinutes. */
-  catchUp: CompanionCatchUpDto | null;
   /** Companion messages were unread until now (the badge changes). */
   hadUnread: boolean;
 }
 
 /**
  * The user opened (or focused) the Companion panel: from now on its messages
- * are read, and after an absence of COMPANION_LIMITS.catchUpAfterMinutes the
- * "Since you left" is built and kept for the snapshot (latestCatchUp).
+ * are read. Nothing is summarized for their return any more (the "Since you
+ * left" line went with the brief, 2026-11-17): Today itself says what waits.
  */
 export function recordCompanionView(now: number): CompanionViewResult {
   requireTime(now, 'now');
@@ -2939,27 +2828,8 @@ export function recordCompanionView(now: number): CompanionViewResult {
     const previousViewedAt = getCompanionMetaNumber('companion:last_viewed_at');
     const hadUnread = countUnreadMessages() > 0;
     setCompanionMetaNumber('companion:last_viewed_at', Math.floor(now));
-    let catchUp: CompanionCatchUpDto | null = null;
-    if (previousViewedAt !== null && now - previousViewedAt >= COMPANION_LIMITS.catchUpAfterMinutes * MINUTE_MS) {
-      catchUp = buildCatchUp(previousViewedAt, now);
-      setCompanionMeta('companion:catch_up', JSON.stringify(catchUp));
-    }
-    return { previousViewedAt, catchUp, hadUnread };
+    return { previousViewedAt, hadUnread };
   });
-}
-
-/** The latest "Since you left", while it is recent (built within COMPANION_LIMITS.catchUpAfterMinutes); null otherwise. */
-export function latestCatchUp(now: number): CompanionCatchUpDto | null {
-  const stored = parseJson(getCompanionMeta('companion:catch_up'));
-  if (!isRecord(stored) || typeof stored.awaySince !== 'number' || typeof stored.returnedAt !== 'number'
-    || typeof stored.line !== 'string' || !Array.isArray(stored.changedItemIds)) return null;
-  if (now - stored.returnedAt >= COMPANION_LIMITS.catchUpAfterMinutes * MINUTE_MS || stored.returnedAt > now) return null;
-  return {
-    awaySince: stored.awaySince,
-    returnedAt: stored.returnedAt,
-    changedItemIds: stored.changedItemIds.filter((id): id is string => typeof id === 'string'),
-    line: stored.line,
-  };
 }
 
 // ── Privacy retention (R2.10) ───────────────────────────────────────────────
@@ -2972,7 +2842,6 @@ export interface CompanionPurgeResult {
   notices: number;
   runs: number;
   cards: number;
-  briefs: number;
   reminders: number;
   /** Email and calendar snapshots not seen for privacyTtlDays. */
   snapshots: number;
@@ -2997,8 +2866,8 @@ const PURGED_TITLES: Partial<Record<CompanionSourceKind, string>> = { email: 'Em
  * (still to be discarded, or kept by its runtime: their detail and their
  * receipt's changes go, a kept one keeps the note that says so), and so are
  * the Today and goal changes of the runs
- * that went (older reasons are trimmed). Decided cards, briefs and closed
- * reminders follow the runs' 30 days.
+ * that went (older reasons are trimmed). Decided cards and closed reminders
+ * follow the runs' 30 days.
  */
 export function purgeExpired(now: number): CompanionPurgeResult {
   requireTime(now, 'now');
@@ -3038,12 +2907,11 @@ export function purgeExpired(now: number): CompanionPurgeResult {
     dropOrphanRunChanges();
     const cards = Number(db.prepare(`DELETE FROM companion_cards WHERE owner_user_id = ? AND status <> 'pending' AND COALESCE(decided_at, created_at) <= ?`)
       .run(OWNER, recordCutoff).changes);
-    const briefs = Number(db.prepare('DELETE FROM companion_briefs WHERE owner_user_id = ? AND created_at <= ?').run(OWNER, recordCutoff).changes);
     const reminders = Number(db.prepare(`DELETE FROM companion_reminders WHERE owner_user_id = ? AND status IN ('fired','cancelled')
         AND COALESCE(fired_at, created_at) <= ?`).run(OWNER, recordCutoff).changes);
     const snapshots = Number(db.prepare(`DELETE FROM companion_snapshots WHERE owner_user_id = ? AND source IN ('email','calendar')
         AND last_seen_at <= ?`).run(OWNER, privacyCutoff).changes);
-    return { items: stale.length, events, notices, runs, cards, briefs, reminders, snapshots };
+    return { items: stale.length, events, notices, runs, cards, reminders, snapshots };
   });
 }
 
@@ -3149,9 +3017,8 @@ const UNKNOWN_AUTH: CompanionStatusDto['auth'] = Object.freeze({ valid: null, ex
  * A status from settings and storage alone, for when no coordinator reports
  * a live one (and the one the coordinator's live view is built with): state
  * from Pause Michi (degraded when a given source failed or
- * Auth expired), last check and today's turns from the runs, the next
- * brief by the engine's own rule
- * (briefSchedule.ts). With every source behind the Auth check off, the
+ * Auth expired), last check and today's turns from the runs. With every
+ * source behind the Auth check off, the
  * session is nobody's business: Auth reads as unknown (B2), as its item is
  * out of sight then.
  */
@@ -3175,7 +3042,6 @@ export function defaultCompanionStatus(input: CompanionStatusInput): CompanionSt
   // No quiet hours any more (D5): nothing holds a check-in by the clock.
   const state: CompanionStatusDto['state'] = settings.paused ? 'paused' : failing ? 'degraded' : 'ok';
   const nextPolls = sources.map((source) => source.nextPollAt).filter((at): at is number => at !== null);
-  const today = localDateKey(now);
   // A poll that ran fine and changed nothing records no run (coordinator.ts keeps only failures, changes and
   // baselines, or each source's latest quiet look), so the live engine's last good poll of each source counts too.
   const checks = [latestFinishedRun('poll')?.finishedAt ?? null,
@@ -3188,7 +3054,6 @@ export function defaultCompanionStatus(input: CompanionStatusInput): CompanionSt
     nextCheckAt: nextPolls.length > 0 ? Math.min(...nextPolls) : null,
     // There is no heartbeat any more (unification D3); the field stays for readers from before.
     nextHeartbeatAt: null,
-    nextBriefAt: nextCompanionBriefAt({ settings, now, welcomeAt: companionWelcomeDoneAt(), briefToday: briefForDate(today) !== null }),
     turnsToday: countTurnsSince(localDayStart(now)),
     working: input.working,
   };
@@ -3202,8 +3067,6 @@ export interface CompanionSnapshotOptions {
   status?: CompanionStatusDto;
   /** For the built status: a model turn runs. */
   working?: boolean;
-  /** The live "Since you left"; the latest stored one (latestCatchUp) when undefined. */
-  catchUp?: CompanionCatchUpDto | null;
 }
 
 /** Everything the Companion window shows (GET /api/companion). */
@@ -3218,7 +3081,6 @@ export function snapshotDto(options: CompanionSnapshotOptions): CompanionSnapsho
     status: options.status ?? defaultCompanionStatus({ settings, now, working: options.working ?? false }),
     conversation: options.conversation,
     items: listOpenItems(now, { limit: SNAPSHOT_ITEM_LIMIT }),
-    brief: briefForDate(localDateKey(now)),
     cards: listPendingCards(now).map(cardDto),
     goals: listGoals(),
     notes: notes.notes,
@@ -3226,7 +3088,6 @@ export function snapshotDto(options: CompanionSnapshotOptions): CompanionSnapsho
     rules: getCompanionRules(),
     reminders: listReminders().map(reminderDto),
     demotedSubtypes: listDemotedSubtypes(),
-    catchUp: options.catchUp !== undefined ? options.catchUp : latestCatchUp(now),
     activity: listRuns(ACTIVITY_LIMIT).map(runDto),
     counts: { ...countOpenItems(now), unreadMessages: countUnreadMessages() },
     revision,

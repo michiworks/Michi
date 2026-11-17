@@ -36,6 +36,14 @@ export interface CrossTreeGroup {
   nodes: ChatNodeState[];
 }
 
+/** The conversations an @ menu lists: nodes of the thread it writes in, then other threads'. */
+export interface MentionCandidates {
+  sameTree: readonly ChatNodeState[];
+  crossTree: readonly CrossTreeGroup[];
+}
+
+export const NO_MENTION_CANDIDATES: MentionCandidates = { sameTree: [], crossTree: [] };
+
 /**
  * Build the list of mentionable items from same-tree nodes + artifacts +
  * optional cross-tree nodes from other threads in the same workspace.
@@ -50,9 +58,9 @@ export interface CrossTreeGroup {
 export function buildAtMentionItems(
   query: string,
   artifacts: ArtifactEntry[],
-  sameTreeNodes: ChatNodeState[],
+  sameTreeNodes: readonly ChatNodeState[],
   currentNodeId: string,
-  crossTreeNodes?: CrossTreeGroup[],
+  crossTreeNodes?: readonly CrossTreeGroup[],
 ): AtMentionItem[] {
   const q = query.toLowerCase();
   const items: AtMentionItem[] = [];

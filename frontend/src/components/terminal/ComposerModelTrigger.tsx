@@ -1,11 +1,10 @@
-import { Cpu, Workflow } from 'lucide-react';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import type { AgentCapabilities, AgentModelInfo, AgentProviderInfo, AgentStatus } from '../../services/api';
 import type { ResolvedNodeBinding } from '../../state/nodeBindingResolution';
-import { ChevronRightIcon } from './icons';
-import { COMPOSER_ICON_STROKE, REASONING_LABELS, composerIconSize, composerMenuBelowEdge, composerMenusOpenBelow, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
+import { ChevronRightIcon, CpuIcon, GaugeIcon, WorkflowIcon } from './icons';
+import { REASONING_LABELS, composerIconSize, composerMenuBelowEdge, composerMenusOpenBelow, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import './ComposerModelPicker.css';
-import { resolveComposerReasoning } from './composerReasoning';
+import { resolveComposerModel, resolveComposerReasoning } from './composerReasoning';
 import { modelDisplayLabel } from '../../lib/modelLabel';
 import type { ComposerUltracode } from './ComposerModelPicker';
 
@@ -27,12 +26,16 @@ interface ComposerModelTriggerProps {
   switchHint?: string;
   /** The chat's Ultracode choice: an indicator while it is on. */
   ultracode?: ComposerUltracode;
+  /** The chat's speed tier: an indicator while its model runs it. */
+  serviceTier?: string | null;
 }
 
-export function ComposerModelTrigger({ toolbarTier, agentStatus, resolvedBinding, catalogCapabilities, providerModels, providers, isStreaming, locked = false, modelMenuOpen = false, onOpenModelMenu, switchHint, ultracode }: ComposerModelTriggerProps) {
+export function ComposerModelTrigger({ toolbarTier, agentStatus, resolvedBinding, catalogCapabilities, providerModels, providers, isStreaming, locked = false, modelMenuOpen = false, onOpenModelMenu, switchHint, ultracode, serviceTier }: ComposerModelTriggerProps) {
   const caps = catalogCapabilities ?? (resolvedBinding.runtime === agentStatus?.runtime ? agentStatus.capabilities : undefined);
   const ultracodeOn = caps?.ultracode === true && ultracode?.enabled === true;
   const ultracodeLabel = ultracodeOn ? ultracode?.available === false ? 'Ultracode on, but unavailable' : 'Ultracode on' : undefined;
+  const tier = serviceTier ? resolveComposerModel(resolvedBinding, agentStatus, providerModels, providers)?.serviceTiers?.find((entry) => entry.id === serviceTier) : undefined;
+  const tierLabel = tier ? `${tier.name} on` : undefined;
   const runtimeLabel = agentStatus?.availableRuntimes?.find((runtime) => runtime.id === resolvedBinding.runtime)?.label || resolvedBinding.runtime;
   const hasModel = caps?.providerModels || caps?.models || resolvedBinding.model;
   const modelLabel = modelDisplayLabel(resolvedBinding.runtime, resolvedBinding.model, providerModels);
@@ -44,8 +47,8 @@ export function ComposerModelTrigger({ toolbarTier, agentStatus, resolvedBinding
 
   return (
     <button type="button" className={`t-toolbar-chip composer-model-trigger${phone ? ' is-icon' : ''}`} data-compact={toolbarTier > 0 || undefined}
-      aria-label={`${locked ? 'Model' : 'Model settings'}: ${runtimeLabel}, ${modelLabel}${effortLabel ? `, ${effortLabel} effort` : ''}${ultracodeLabel ? `, ${ultracodeLabel}` : ''}${hint ? `. ${hint}` : ''}`}
-      title={[[runtimeLabel, modelLabel, effortLabel, ultracodeLabel].filter(Boolean).join(' · '), hint].filter(Boolean).join('. ')}
+      aria-label={`${locked ? 'Model' : 'Model settings'}: ${runtimeLabel}, ${modelLabel}${effortLabel ? `, ${effortLabel} effort` : ''}${tierLabel ? `, ${tierLabel}` : ''}${ultracodeLabel ? `, ${ultracodeLabel}` : ''}${hint ? `. ${hint}` : ''}`}
+      title={[[runtimeLabel, modelLabel, effortLabel, tierLabel, ultracodeLabel].filter(Boolean).join(' · '), hint].filter(Boolean).join('. ')}
       aria-haspopup={locked ? undefined : 'dialog'} aria-expanded={locked ? undefined : modelMenuOpen} disabled={isStreaming || locked}
       onClick={(event) => {
         event.stopPropagation();
@@ -60,16 +63,27 @@ export function ComposerModelTrigger({ toolbarTier, agentStatus, resolvedBinding
         if (!modelMenuOpen) event.currentTarget.click();
       }}>
       {phone ? <>
-        <Cpu size={composerIconSize(true)} strokeWidth={COMPOSER_ICON_STROKE} absoluteStrokeWidth aria-hidden="true" />
+        <CpuIcon size={composerIconSize(true)} />
         {effortLabel && <span className="composer-model-trigger-effort" aria-hidden="true">{EFFORT_INITIALS[effort.value ?? ''] ?? effortLabel.charAt(0)}</span>}
+        {tier && <ServiceTierMark phone />}
         {ultracodeOn && <UltracodeMark unavailable={ultracode?.available === false} phone />}
       </> : <>
         <span className="t-chip-label">{hasModel ? modelLabel : runtimeLabel}</span>
         {effortLabel && <span className="composer-model-trigger-effort">{effortLabel}</span>}
+        {tier && <ServiceTierMark />}
         {ultracodeOn && <UltracodeMark unavailable={ultracode?.available === false} />}
-        {!locked && <ChevronRightIcon size={12} className="composer-model-chevron" />}
+        {!locked && <ChevronRightIcon className="composer-model-chevron" />}
       </>}
     </button>
+  );
+}
+
+/** A speed tier is on: the label (aria-label and title) names it. */
+function ServiceTierMark({ phone = false }: { phone?: boolean }) {
+  return (
+    <span className="composer-model-trigger-tier" aria-hidden="true">
+      <GaugeIcon size={phone ? composerIconSize(true) - 4 : 'md'} />
+    </span>
   );
 }
 
@@ -77,7 +91,7 @@ export function ComposerModelTrigger({ toolbarTier, agentStatus, resolvedBinding
 function UltracodeMark({ unavailable, phone = false }: { unavailable: boolean; phone?: boolean }) {
   return (
     <span className="composer-model-trigger-ultracode" data-ultracode="on" data-unavailable={unavailable || undefined} aria-hidden="true">
-      <Workflow size={phone ? composerIconSize(true) - 4 : 12} strokeWidth={COMPOSER_ICON_STROKE} absoluteStrokeWidth />
+      <WorkflowIcon size={phone ? composerIconSize(true) - 4 : 'md'} />
     </span>
   );
 }

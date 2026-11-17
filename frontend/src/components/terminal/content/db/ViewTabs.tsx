@@ -1,7 +1,11 @@
 import React, { useRef, useState } from 'react';
-import { Calendar, ChartGantt, Code, Copy, Ellipsis, Kanban, LayoutGrid, List, Pencil, Plus, Table2, Trash2, type LucideIcon } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import {
+  CalendarIcon, CodeIcon, CopyIcon, EditIcon, GanttIcon, GridIcon, KanbanIcon, ListIcon, MoreIcon, PlusIcon, TableIcon, TrashIcon,
+  type IconComponent,
+} from '../../icons';
 import type { MichiDatabase, MichiDbView, MichiDbViewType } from 'michi-shared';
-import ContextMenu, { type MenuItem } from '../../../ContextMenu';
+import ContextMenu, { menuOpenKey, type MenuItem } from '../../../ContextMenu';
 import { usePhoneLayout } from '../../../../hooks/usePhoneLayout';
 import { DbMenuItem, DbPopover } from './DbPopover';
 import { VIEW_TYPE_LABEL, viewName } from './dbLabels';
@@ -9,14 +13,14 @@ import { addViewOp, duplicateViewOp, renameViewOp } from './dbOps';
 import type { DbEdit } from './views/viewTypes';
 import { isImeComposing } from '../../../../lib/ime';
 
-export const VIEW_ICON: Record<MichiDbViewType, LucideIcon> = {
-  table: Table2,
-  board: Kanban,
-  list: List,
-  calendar: Calendar,
-  gallery: LayoutGrid,
-  timeline: ChartGantt,
-  custom: Code,
+export const VIEW_ICON: Record<MichiDbViewType, IconComponent> = {
+  table: TableIcon,
+  board: KanbanIcon,
+  list: ListIcon,
+  calendar: CalendarIcon,
+  gallery: GridIcon,
+  timeline: GanttIcon,
+  custom: CodeIcon,
 };
 
 /** What `+` offers. A custom view needs widgets, which are off. */
@@ -117,7 +121,7 @@ export function ViewTabs({
                 setMenu({ kind: 'view', view: v, anchor: { x: event.clientX, y: event.clientY } });
               }}
             >
-              <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
+              <Icon aria-hidden="true" />
               <span>{viewName(db, v)}</span>
             </button>
           );
@@ -130,7 +134,7 @@ export function ViewTabs({
         aria-haspopup="menu"
         onClick={(event) => { const anchor = event.currentTarget; setMenu({ kind: 'view', view, anchor }); }}
       >
-        <Ellipsis size={14} strokeWidth={1.7} aria-hidden="true" />
+        <MoreIcon aria-hidden="true" />
       </button>
       <button
         type="button"
@@ -139,18 +143,18 @@ export function ViewTabs({
         aria-haspopup="menu"
         onClick={(event) => { const anchor = event.currentTarget; setMenu({ kind: 'add', anchor }); }}
       >
-        <Plus size={14} strokeWidth={1.7} aria-hidden="true" />
+        <PlusIcon aria-hidden="true" />
       </button>
 
-      {menu?.kind === 'add' && (
-        <DbPopover anchor={menu.anchor} label="Add view" role="menu" width={180} onClose={() => setMenu(null)}>
+      <AnimatePresence>{menu?.kind === 'add' && (
+        <DbPopover key={menuOpenKey(menu)} anchor={menu.anchor} label="Add view" role="menu" width={180} onClose={() => setMenu(null)}>
           {NEW_VIEW_TYPES.map((t) => {
             const Icon = VIEW_ICON[t];
-            return <DbMenuItem key={t} icon={<Icon size={14} strokeWidth={1.7} />} label={VIEW_TYPE_LABEL[t]} onSelect={() => add(t)} />;
+            return <DbMenuItem key={t} icon={<Icon />} label={VIEW_TYPE_LABEL[t]} onSelect={() => add(t)} />;
           })}
           {onAddCustomView && (
             <DbMenuItem
-              icon={<Code size={14} strokeWidth={1.7} />}
+              icon={<CodeIcon />}
               label={`${VIEW_TYPE_LABEL.custom}…`}
               onSelect={() => { setMenu(null); onAddCustomView(); }}
             />
@@ -158,9 +162,9 @@ export function ViewTabs({
         </DbPopover>
       )}
       {menu?.kind === 'view' && !phone && (
-        <DbPopover anchor={menu.anchor} label={`${viewName(db, menu.view)} view`} role="menu" width={180} onClose={() => setMenu(null)}>
+        <DbPopover key={menuOpenKey(menu)} anchor={menu.anchor} label={`${viewName(db, menu.view)} view`} role="menu" width={180} onClose={() => setMenu(null)}>
           <DbMenuItem
-            icon={<Pencil size={14} strokeWidth={1.7} />}
+            icon={<EditIcon />}
             label="Rename"
             onSelect={() => {
               const v = menu.view;
@@ -170,10 +174,10 @@ export function ViewTabs({
               if (anchor) setRenaming({ view: v, anchor });
             }}
           />
-          <DbMenuItem icon={<Copy size={14} strokeWidth={1.7} />} label="Duplicate" onSelect={() => duplicate(menu.view)} />
-          <DbMenuItem icon={<Trash2 size={14} strokeWidth={1.7} />} label="Delete" danger disabled={views.length < 2} onSelect={() => remove(menu.view)} />
+          <DbMenuItem icon={<CopyIcon />} label="Duplicate" onSelect={() => duplicate(menu.view)} />
+          <DbMenuItem icon={<TrashIcon />} label="Delete" danger disabled={views.length < 2} onSelect={() => remove(menu.view)} />
         </DbPopover>
-      )}
+      )}</AnimatePresence>
       {menu?.kind === 'view' && phone && (() => {
         const v = menu.view;
         const tab = tabOf(v);
@@ -201,8 +205,9 @@ export function ViewTabs({
           />
         );
       })()}
-      {renaming && (
+      <AnimatePresence>{renaming && (
         <RenameView
+          key={menuOpenKey(renaming)}
           db={db}
           view={renaming.view}
           anchor={renaming.anchor}
@@ -212,7 +217,7 @@ export function ViewTabs({
             if (name && name !== viewName(db, v)) void edit([renameViewOp(v, name)], 'Renamed the view');
           }}
         />
-      )}
+      )}</AnimatePresence>
     </div>
   );
 }

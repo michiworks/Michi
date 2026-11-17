@@ -208,7 +208,7 @@
 /* While a batch bar is up the toast sits above it: MichiUndoToast measures the
    bars (each page places its own) and sets the region's bottom; this is the
    first frame's guess. */
-body:has(.michi-batch, .michi-doc-batch) .michi-toast-region {
+body:has(.michi-batch) .michi-toast-region {
   bottom: 72px;
 }
 .michi-toast-live {

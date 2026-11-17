@@ -12,6 +12,20 @@ vi.mock('../MarkdownContent', () => ({
   default: ({ text }: { text: string }) => <span>{text}</span>,
 }));
 
+// A run card renders its status through FadeOnChange once per render; nothing
+// else in these transcripts does.
+const { cardRenders } = vi.hoisted(() => ({ cardRenders: { count: 0 } }));
+vi.mock('./agentBlockMotion', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./agentBlockMotion')>();
+  return {
+    ...actual,
+    FadeOnChange: (props: Parameters<typeof actual.FadeOnChange>[0]) => {
+      cardRenders.count += 1;
+      return actual.FadeOnChange(props);
+    },
+  };
+});
+
 const run: LocatedAgentResource<AgentRunDtoV1> = {
   backendConnectionId: 'local',
   value: {
@@ -29,9 +43,9 @@ const node: ChatNodeState = {
 };
 const noop = () => {};
 
-function list() {
+function list(value = node) {
   return <PaneMessageList
-    node={node} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={false}
+    node={value} prefs={DEFAULT_PREFS} contentStyle={{}} streaming={value.status === 'streaming'}
     onRetryTurn={noop} onEditUserMessage={noop} onContinueFollowUp={noop} onBranchFollowUp={noop}
   />;
 }
@@ -69,6 +83,22 @@ describe('PaneMessageList optional Agent Run contexts', () => {
     expect(screen.queryByTestId('agent-run-card')).toBeNull();
     expect(domainHook).toHaveBeenCalled();
     expect(actionsHook).toHaveBeenCalled();
+  });
+
+  it('leaves an earlier message\'s run card alone while a later reply streams', () => {
+    const { domain, actions } = runUi();
+    vi.spyOn(agentDomain, 'useOptionalAgentDomain').mockReturnValue(domain);
+    vi.spyOn(chatStore, 'useOptionalChatActions').mockReturnValue(actions);
+    const streaming = (text: string): ChatNodeState => ({
+      ...node,
+      status: 'streaming',
+      messages: [...node.messages, { id: 'u2', role: 'user', text: 'And now?', toolCalls: [] }, { id: 'tail', role: 'assistant', text, toolCalls: [], streaming: true }],
+    });
+    const { rerender } = render(list(streaming('Look')));
+    const rendered = cardRenders.count;
+    expect(rendered).toBeGreaterThan(0);
+    rerender(list(streaming('Looking')));
+    expect(cardRenders.count).toBe(rendered);
   });
 
   it('opens the matching parent run when both contexts are available', () => {

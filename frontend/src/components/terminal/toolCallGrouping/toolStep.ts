@@ -32,9 +32,14 @@ const shortPath = (p: string) => {
   return parts.length > 3 ? `…/${parts.slice(-3).join('/')}` : p;
 };
 
-/** What a step touched, muted beside its name: a command's gist, a path (an edit with its lines), where a search ran. */
+/**
+ * What a step touched, muted beside its name: a command's gist, a path (an edit with its lines), where a search ran.
+ * A step named in the agent's words has none: they say what it was for, and its payload has the command.
+ * An edit keeps its changed lines.
+ */
 export function stepDetail(tool: ToolCallState): string | undefined {
   const kind = toolKind(tool);
+  if (kind !== 'edit' && kind !== 'write' && intentText(tool)) return undefined;
   if (kind === 'bash') { const c = toolCommand(tool); return c ? commandGist(c) : undefined; }
   if (kind === 'edit' || kind === 'write') {
     const path = toolPath(tool);

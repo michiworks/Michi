@@ -17,6 +17,7 @@ import { useNow } from '../../../hooks/useNow';
 import { BAND_ROW, ToolLine } from './WorkflowWorkCard';
 import type { CardLeafState } from './workflowCardModel';
 import { SegmentStrip, StateGlyph, WORK_CARD, useFinishedFold } from './workCardParts';
+import { DisclosureChevron } from '../primitives';
 import './WorkflowWorkCard.css';
 
 /**
@@ -83,7 +84,7 @@ function Band({ title, items, count, label, open, controls, onClick, testId, sta
         {count.text}
         {count.failed > 0 && <span style={{ color: 'var(--term-danger-text)' }}> · {count.failed} failed</span>}
       </span>
-      <span aria-hidden style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-faint)', textAlign: 'right' }}>{open ? '▾' : '▸'}</span>
+      <DisclosureChevron open={open} style={{ justifySelf: 'end', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
     </button>
   );
 }
@@ -169,12 +170,12 @@ const SubagentWorkRow = React.memo(function SubagentWorkRow({ subagent, active, 
         aria-controls={expanded ? subagentDetailDomId(subagent) : undefined}
         aria-label={`${title}, ${SUBAGENT_TONE_LABEL[tone]}${summary ? `: ${summary.text}` : ''}`}
         onClick={() => onToggle(rowKey)}
-        className="t-hover-bg-alt"
+        className="t-hover-bg-alt background-work-row"
         style={{
           display: 'flex', flexDirection: stacked ? 'column' : 'row', alignItems: stacked ? 'stretch' : 'center', gap: stacked ? 3 : BAND_ROW.gap,
-          width: '100%', minWidth: 0, boxSizing: 'border-box', margin: 0, border: 0, borderRadius: 'var(--ui-radius)',
+          width: '100%', minWidth: 0, boxSizing: 'border-box', margin: 0,
           padding: stacked ? `8px ${BAND_ROW.padRight}px 8px 8px` : `6px ${BAND_ROW.padRight}px 6px 8px`,
-          background: 'transparent', color: 'var(--term-fg)', font: 'inherit', fontFamily: 'var(--ui-font)', textAlign: 'left', cursor: 'pointer',
+          fontFamily: 'var(--ui-font)',
         }}
       >
         {stacked ? (

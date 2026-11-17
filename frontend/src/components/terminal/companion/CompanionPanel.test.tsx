@@ -39,7 +39,10 @@ vi.mock('../../../state/companion/companionPresence', () => ({ preemptCompanionT
 
 const snapshot = companionSnapshot({
   settings: { ...companionSnapshot().settings, displayName: 'Sidekick' },
-  items: [companionItem('a', { title: 'CR-1 needs attention' }), companionItem('b', { title: 'Seen already', status: 'seen' })],
+  items: [
+    companionItem('a', { title: 'CR-1 needs attention', facts: { cr: 'CR-1' } }),
+    companionItem('b', { source: 'michi', subtype: 'michi_waiting', title: 'Seen already', status: 'seen', facts: { wait: 'question' } }),
+  ],
   counts: { needsYou: 2, newItems: 1, unreadMessages: 2 },
 });
 const ready = { status: 'ready' as const, info: assistantInfo() as never, error: null };
@@ -92,16 +95,23 @@ describe('the panel (DESIGN-v2 §1)', () => {
     render(<CompanionPanelHost narrow={false} />);
     await open({ tab: 'today' });
     expect(screen.getByText('Sidekick')).toBeTruthy();
-    expect(screen.getByText('Watching · not checked yet')).toBeTruthy();
+    const status = document.querySelector<HTMLElement>('.companion-head__status')!;
+    expect(status.textContent).toBe('Watching · not checked yet');
+    // Only the state words are live; the clock beside them changes every minute.
+    expect(within(status).getByRole('status').textContent).toBe('Watching');
     expect(screen.getByRole('tab', { name: /Today/ }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByLabelText('1 need you')).toBeTruthy();
     act(() => updateCompanionSnapshot((current) => ({ ...current, counts: { ...current.counts, unreadMessages: 1 } })));
     expect(screen.getByLabelText('1 new')).toBeTruthy();
-    expect(screen.getByRole('tabpanel', { name: 'Today' }).textContent).toContain('CR-1 needs attention');
+    expect(screen.getByRole('tabpanel', { name: 'Today' }).textContent).toContain('CR-1 has 1 comment waiting for your reply');
   });
 
   it('puts Needs you beside the tabs on the Chat, not in a row above it, and it opens Today', async () => {
-    act(() => updateCompanionSnapshot((current) => ({ ...current, items: [...current.items, companionItem('c', { bucket: 'update' })] })));
+    // The pill counts what Today's header counts, whatever source it came from, and nothing Michi only read.
+    act(() => updateCompanionSnapshot((current) => ({
+      ...current,
+      items: [...current.items, companionItem('c', { source: 'email', subtype: 'email_unread', bucket: 'update', title: 'Email from Yuka' })],
+    })));
     render(<CompanionPanelHost narrow />);
     await open({ tab: 'chat' });
     const pill = screen.getByRole('button', { name: 'Needs you (2)' });
@@ -112,7 +122,7 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(screen.queryByRole('button', { name: 'Needs you (2)' })).toBeNull();
   });
 
-  it('on a phone keeps the name and tabs in one row, with the status in words only for a check-in or a warning', async () => {
+  it('on a phone keeps the name and tabs in one row, with the status in words only for a check-in or Auth expired', async () => {
     const view = render(<CompanionPanelHost narrow />);
     await open({ tab: 'chat' });
     const head = document.querySelector<HTMLElement>('.companion-head')!;
@@ -120,9 +130,18 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(head.querySelector('.companion-head__top [role="tablist"]')).toBeTruthy();
     // The routine line is for a screen reader only.
     expect(head.querySelector('.companion-head__status')).toBeNull();
-    expect(screen.getByRole('status').className).toBe('sr-only');
-    expect(screen.getByRole('status').textContent).toBe('Watching · not checked yet');
+    expect(screen.getByRole('status').closest('.sr-only')!.textContent).toBe('Watching · not checked yet');
+    expect(screen.getByRole('status').textContent).toBe('Watching');
     view.unmount();
+    resetCompanionStoreForTests({ assistant: ready, snapshot: { ...snapshot, status: { ...snapshot.status, state: 'degraded' } } });
+    const degraded = render(<CompanionPanelHost narrow />);
+    expect(document.querySelector('.companion-head__status')).toBeNull();
+    expect(document.querySelector('.companion-avatar')!.getAttribute('data-tone')).toBe('warn');
+    degraded.unmount();
+    resetCompanionStoreForTests({ assistant: ready, snapshot: { ...snapshot, status: { ...snapshot.status, auth: { ...snapshot.status.auth, valid: false } } } });
+    const auth = render(<CompanionPanelHost narrow />);
+    expect(document.querySelector('.companion-head__status')!.textContent).toBe('Auth expired — refresh your credentials');
+    auth.unmount();
     resetCompanionStoreForTests({ assistant: ready, snapshot: { ...snapshot, status: { ...snapshot.status, working: true }, activity: [running('heartbeat')] } });
     render(<CompanionPanelHost narrow />);
     expect(screen.getByRole('status').textContent).toContain('Checking in…');
@@ -135,7 +154,8 @@ describe('the panel (DESIGN-v2 §1)', () => {
     resetCompanionStoreForTests({ assistant: ready, snapshot: companionSnapshot({ status: { ...snapshot.status, working: true }, activity: [running('heartbeat')] }) });
     const view = render(<CompanionPanelHost narrow={false} />);
     await open();
-    expect(screen.getByRole('status').textContent).toContain('Checking in…');
+    // Stop sits beside the live region, not inside it.
+    expect(screen.getByRole('status').textContent).toBe('Checking in…');
     fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
     expect(mocks.preempt).toHaveBeenCalled();
     view.unmount();
@@ -153,9 +173,14 @@ describe('the panel (DESIGN-v2 §1)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sidekick menu' }));
     await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'New conversation' })); });
     await waitFor(() => expect(getCompanionAssistant().info?.nodeId).toBe('v-next'));
-    fireEvent.click(screen.getByRole('button', { name: 'Sidekick menu' }));
+    const more = screen.getByRole('button', { name: 'Sidekick menu' });
+    fireEvent.click(more);
     fireEvent.click(screen.getByRole('menuitem', { name: 'History…' }));
     expect(screen.getByRole('dialog', { name: 'History' }).textContent).toContain('Recent conversations');
+    // Focus goes to the block's × and comes back to More when it closes.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close history' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close history' }));
+    expect(document.activeElement).toBe(more);
   });
 
   it('counts V as in view only while the panel shows its Chat', async () => {
@@ -167,21 +192,24 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(isCompanionPanelShowing('companion-node')).toBe(false);
   });
 
-  it('closes on Escape and gives focus back to where it was before it opened', async () => {
+  it('closes on Escape and gives focus back to where it was before it opened, sinking out as an inert ghost', async () => {
     render(<><button type="button">On the page</button><button type="button" data-companion-button="">Michi</button><CompanionPanelHost narrow={false} /></>);
     screen.getByRole('button', { name: 'On the page' }).focus();
     await open();
     const tab = screen.getByRole('tab', { name: /Today/ });
     tab.focus();
     fireEvent.keyDown(tab, { key: 'Escape' });
-    expect(panel()).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'On the page' }));
+    const leaving = panel()!;
+    expect(leaving.hasAttribute('inert')).toBe(true);
+    expect(leaving.getAttribute('aria-hidden')).toBe('true');
+    await waitFor(() => expect(panel()).toBeNull());
   });
 
   it('Today’s Ask attaches the item and drafts only “Tell me more about this.”', async () => {
     render(<CompanionPanelHost narrow={false} />);
     await open({ tab: 'today' });
-    fireEvent.click(screen.getAllByRole('button', { name: 'Ask about: CR-1 needs attention' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Ask about: CR-1 has 1 comment waiting for your reply' })[0]);
     expect(getCompanionPanelState().tab).toBe('chat');
     // The Chat tab takes the request; it is queued with the item as a chip and the bare prompt.
     const { takeCompanionRequests } = await import('../../../state/companion/companionPanel');
@@ -219,6 +247,42 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(localStorage.getItem(COMPANION_PANEL_WIDTH_KEY)).toBeNull();
   });
 
+  it('switches between its narrowest and widest widths on a click on its edge, with no drag', async () => {
+    localStorage.setItem(COMPANION_PANEL_WIDTH_KEY, '600');
+    render(<CompanionPanelHost narrow={false} />);
+    await open();
+    const handle = screen.getByRole('button', { name: 'Resize the Sidekick panel' });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(handle, { detail: 1 });
+      act(() => { vi.advanceTimersByTime(300); });
+      expect(panel()!.style.getPropertyValue('--companion-panel-width')).toBe('720px');
+      fireEvent.click(handle, { detail: 1 });
+      act(() => { vi.advanceTimersByTime(300); });
+      expect(panel()!.style.getPropertyValue('--companion-panel-width')).toBe('360px');
+      expect(localStorage.getItem(COMPANION_PANEL_WIDTH_KEY)).toBe('360');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('follows a drag on its edge each frame, and keeps and saves the width it is released at', async () => {
+    render(<CompanionPanelHost narrow={false} />);
+    await open();
+    const pointer = (type: string, clientX: number) => new MouseEvent(type, { bubbles: true, clientX });
+    fireEvent(screen.getByRole('button', { name: 'Resize the Sidekick panel' }), pointer('pointerdown', 1000));
+    fireEvent(window, pointer('pointermove', 900));
+    fireEvent(window, pointer('pointermove', 880));
+    await act(() => new Promise((resolve) => requestAnimationFrame(resolve)));
+    expect(panel()!.style.getPropertyValue('--companion-panel-width')).toBe('540px');
+    expect(localStorage.getItem(COMPANION_PANEL_WIDTH_KEY)).toBeNull();
+    // Released where it started, before another frame: it shows and keeps that width.
+    fireEvent(window, pointer('pointermove', 1000));
+    fireEvent(window, pointer('pointerup', 1000));
+    expect(panel()!.style.getPropertyValue('--companion-panel-width')).toBe('420px');
+    expect(localStorage.getItem(COMPANION_PANEL_WIDTH_KEY)).toBe('420');
+  });
+
   it('shows over the page in a narrow window, without a resize handle', async () => {
     render(<CompanionPanelHost narrow />);
     await open();
@@ -237,9 +301,9 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(screen.queryByRole('dialog', { name: 'History' })).toBeNull();
     expect(panel()).not.toBeNull();
     act(() => backTarget()?.back());
-    expect(panel()).toBeNull();
     expect(getCompanionPanelState().open).toBe(false);
     expect(hasBackLayer()).toBe(false);
+    await waitFor(() => expect(panel()).toBeNull());
   });
 
   it('closes over a narrow window when something in it opens a page; docked, it stays (F1a-review #6)', async () => {
@@ -248,7 +312,7 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(screen.queryByRole('button', { name: 'View page' })).toBeNull();
     view.rerender(<CompanionPanelHost narrow />);
     fireEvent.click(screen.getByRole('button', { name: 'View page' }));
-    expect(panel()).toBeNull();
+    await waitFor(() => expect(panel()).toBeNull());
   });
 
   it('moves focus into its menu, and closes it on Escape or a press outside (F1a-review #15)', async () => {
@@ -283,8 +347,8 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(panel()).toBeTruthy();
     const off = { ...snapshot, settings: { ...snapshot.settings, paused: true } };
     act(() => adoptCompanionSnapshot({ ...off, revision: snapshot.revision + 1 }));
-    expect(panel()).toBeNull();
     expect(getCompanionPanelState().open).toBe(false);
+    await waitFor(() => expect(panel()).toBeNull());
     // Off: an entry that still opens it (Pages' Ask) shows it, and a later snapshot leaves it open.
     await open({ tab: 'chat', draft: 'Tell me about this page' });
     expect(panel()).toBeTruthy();
@@ -309,12 +373,15 @@ describe('the panel (DESIGN-v2 §1)', () => {
     ] } });
     render(<CompanionPanelHost narrow={false} />);
     await open();
-    fireEvent.click(screen.getByRole('button', { name: 'Sidekick menu' }));
+    const more = screen.getByRole('button', { name: 'Sidekick menu' });
+    fireEvent.click(more);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Activity…' }));
     const activity = screen.getByRole('dialog', { name: 'Activity' });
     expect(within(activity).getByRole('list', { name: 'Recent activity' }).textContent).toContain('Check-in · nothing to say');
-    fireEvent.keyDown(activity, { key: 'Escape' });
+    expect(document.activeElement).toBe(within(activity).getByRole('button', { name: 'Close activity' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     expect(screen.queryByRole('dialog', { name: 'Activity' })).toBeNull();
+    expect(document.activeElement).toBe(more);
     expect(screen.getByRole('complementary')).toBeTruthy();
   });
 
@@ -326,33 +393,11 @@ describe('the panel (DESIGN-v2 §1)', () => {
     expect(screen.queryByRole('dialog', { name: 'History' })).toBeNull();
   });
 
-  it('drafts a brief card’s action as a reply to the post of the run that wrote the brief (D9)', async () => {
-    resetCompanionStoreForTests({
-      assistant: ready,
-      snapshot: {
-        ...snapshot,
-        brief: {
-          id: 'brief-1', date: '2026-11-06', headline: 'A quiet day', closing: 'That’s all.', origin: 'llm', createdAt: 150, cardFeedback: {},
-          cards: [{ title: 'Launch', body: 'Due Friday', itemIds: [], action: { label: 'Draft the note', prompt: 'Draft the launch note' } }],
-        },
-        activity: [
-          { id: 'r-old', kind: 'heartbeat', trigger: 't', outcome: 'quiet', detail: null, startedAt: 10, finishedAt: 20 },
-          { id: 'r-brief', kind: 'brief', trigger: 't', outcome: 'spoke', detail: null, startedAt: 100, finishedAt: 200, postedMessageId: 'cmp-post-r-brief' },
-        ],
-      },
-    });
-    render(<CompanionPanelHost narrow={false} />);
-    await open({ tab: 'today' });
-    fireEvent.click(screen.getByRole('button', { name: 'Draft the note' }));
-    const { takeCompanionRequests } = await import('../../../state/companion/companionPanel');
-    expect(takeCompanionRequests()).toEqual([{ draft: 'Draft the launch note', replyToPost: 'cmp-post-r-brief' }]);
-  });
-
   it('keeps what it last showed when the backend cannot be reached', async () => {
     resetCompanionStoreForTests({ snapshot, stale: true, assistant: ready });
     render(<CompanionPanelHost narrow={false} />);
     await open({ tab: 'today' });
     expect(screen.getByText('Can’t reach Sidekick right now — this is what it last showed.')).toBeTruthy();
-    expect(screen.getByText('CR-1 needs attention')).toBeTruthy();
+    expect(screen.getByText('CR-1 has 1 comment waiting for your reply')).toBeTruthy();
   });
 });

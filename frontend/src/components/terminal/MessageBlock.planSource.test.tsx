@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, within } from '@testing-library/react';
+import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ThreadMessageSource } from 'michi-shared';
 import type { ChatMessage } from '../../state/chatTypes';
@@ -19,7 +19,6 @@ function renderMessage(m: Partial<ChatMessage>, props: Partial<React.ComponentPr
       isDark={false}
       copyText={() => ''}
       showThoughts={false}
-      fontFamily="inherit"
       density="comfortable"
       {...props}
     />,
@@ -69,31 +68,39 @@ describe('MessageBlock: messages a multi-model plan relayed', () => {
     expect(container.querySelector('.terminal-message-thread-source')?.textContent).toBe('From Claude Code · Plan step 1 · Fresh');
   });
 
-  it('shows a review prompt\'s instruction, and the peers\' answers behind Show all', () => {
+  it('shows a review prompt\'s instruction, and the peers\' answers behind Show all, opening and shutting as a height tween', async () => {
     const { container, getByRole } = renderMessage({ text: REVIEW, threadMessage: from({ runId: 'wfr_1', step: 'review', round: 1, rounds: 1 }) });
     const bubble = container.querySelector('.terminal-message-user')!;
+    const body = bubble.querySelector('.t-user-text-toggle')!.previousElementSibling as HTMLElement;
     expect(bubble.textContent).toContain('Evaluate their arguments');
     expect(bubble.textContent).not.toContain('Batch when idle.');
     fireEvent.click(getByRole('button', { name: 'Show all' }));
     expect(bubble.textContent).toContain('Batch when idle.');
+    // Its first frame lands in the click's own commit, 1px past the paragraph.
+    expect(body.style.height).toBe('1px');
+    await waitFor(() => expect(body.style.height).toBe(''));
     fireEvent.click(getByRole('button', { name: 'Show less' }));
-    expect(bubble.textContent).not.toContain('Batch when idle.');
+    // The whole text stays until the height has come down to the paragraph's.
+    expect(bubble.textContent).toContain('Batch when idle.');
+    await waitFor(() => expect(bubble.textContent).not.toContain('Batch when idle.'));
   });
 
   it.each([
     [{ runId: 'wfr_1', step: 'synthesis', branches: 3 } as const, 'Results from 3 branches'],
     [{ runId: 'wfr_1', step: 'addendum', branches: 1 } as const, 'Late result from 1 branch'],
     [{ runId: 'wfr_1', step: 'addendum', branches: 2 } as const, 'Late results from 2 branches'],
-  ])('shows a %s wake as one line that opens its body', (plan, caption) => {
+  ])('shows a %s wake as one line that opens its body', async (plan, caption) => {
     const { container, getByRole } = renderMessage({ text: '### Codex · GPT-6.1 Sol (Fork)\nEnqueue each turn.', threadMessage: from(plan, { hop: 2 }) });
     const row = container.querySelector('.mm-plan-result')!;
     expect(row.getAttribute('title')).toBe('Sent by the multi-model plan you started');
     expect(row.textContent).toBe(`${caption}Show`);
     expect(container.querySelector('.terminal-message-thread-source')).toBeNull();
     fireEvent.click(getByRole('button', { name: 'Show' }));
-    expect(within(row as HTMLElement).getByText('Enqueue each turn.')).toBeTruthy();
+    // A disclosure that opens from 1px in the click's own commit.
+    const body = within(row as HTMLElement).getByText('Enqueue each turn.').closest('[data-reveal="disclosure"]') as HTMLElement;
+    expect(body.style.height).toBe('1px');
     fireEvent.click(getByRole('button', { name: 'Hide' }));
-    expect(row.textContent).toBe(`${caption}Show`);
+    await waitFor(() => expect(row.textContent).toBe(`${caption}Show`));
   });
 
   it('keeps an ordinary relayed message as it was', () => {
@@ -106,7 +113,7 @@ describe('MessageBlock: messages a multi-model plan relayed', () => {
   it('passes read-only to the plan receipt under a reply, also when only read-only changes', () => {
     const reply = { id: 'm1', role: 'assistant', text: 'Proposed.', toolCalls: [], streaming: false } as ChatMessage;
     const block = (readOnly: boolean) => (
-      <MessageBlock m={reply} index={0} isDark={false} copyText={() => ''} showThoughts={false} fontFamily="inherit" density="comfortable" readOnly={readOnly} />
+      <MessageBlock m={reply} index={0} isDark={false} copyText={() => ''} showThoughts={false} density="comfortable" readOnly={readOnly} />
     );
     const { getByTestId, rerender } = render(block(true));
     expect(getByTestId('mm-receipt').getAttribute('data-read-only')).toBe('true');
@@ -133,7 +140,7 @@ describe('MessageBlock: a failed plan step\'s error tail', () => {
   it('waits while a command runs, says when the step runs again, and why a Retry was refused', () => {
     const busy = renderMessage(reply, { isErrorTail: true, planStep: controls({ retry: vi.fn(), busy: true, error: 'The run is settling' }) });
     expect((busy.getByTestId('error-tail-retry') as HTMLButtonElement).disabled).toBe(true);
-    expect(busy.getByRole('status').textContent).toBe('Retry failed: The run is settling');
+    expect(busy.getByRole('alert').textContent).toBe('Retry failed: The run is settling');
     busy.unmount();
     const retrying = renderMessage(reply, { isErrorTail: true, planStep: controls({ retrying: true }) });
     const button = retrying.getByTestId('error-tail-retry') as HTMLButtonElement;

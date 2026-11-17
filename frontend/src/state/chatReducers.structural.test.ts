@@ -17,6 +17,7 @@ const STRUCTURAL_FIELDS = [
   'status', 'kind', 'title', 'deletedAt', 'pinnedAt',
   'markedReadAt', 'seenMessageIds', 'paneWidth', 'digest',
   'lastAssistantAt', 'viewedAt', 'deletionGroupId',
+  'completionSeq', 'seenCompletionSeq', 'temporary',
 ] as const;
 
 function pickStructural(n: ChatNodeState | undefined) {
@@ -38,7 +39,10 @@ function makeNode(id: string): ChatNodeState {
     projectId: 'p1',
     title: 'old',
     status: 'streaming',
-    messages: [{ id: `${id}-a0`, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: 0 }],
+    messages: [
+      { id: `${id}-u0`, role: 'user', text: 'first question', toolCalls: [], createdAt: 0 },
+      { id: `${id}-a0`, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: 1 },
+    ],
     followUps: [],
     seenMessageIds: [],
     markedReadAt: 0,
@@ -71,6 +75,8 @@ const SAMPLE_ACTIONS: Record<string, ChatAction> = {
   'subagent-list-update': { type: 'subagent-list-update', nodeId: 'n1', subagents: [] } as ChatAction,
   'subagent-tool-activity': { type: 'subagent-tool-activity', nodeId: 'n1', subagentSessionId: 's1', title: 'read file', status: 'running' },
   'apply-seq': { type: 'apply-seq', nodeId: 'n1', turnId: 'T1', seq: 1 },
+  'apply-background-seq': { type: 'apply-background-seq', nodeId: 'n1', turnId: 'T1', seq: 1 },
+  'context-usage': { type: 'context-usage', nodeId: 'n1', contextUsagePercentage: 42 },
   'set-composer-draft': {
     type: 'set-composer-draft',
     nodeId: 'n1',
@@ -101,6 +107,16 @@ describe('HIGH_FREQ_ACTIONS structural invariant', () => {
 
       // Per-node structural fields unchanged.
       expect(pickStructural(after.n1)).toEqual(pickStructural(before.n1));
+
+      // Sidebar rows read the first user message (a provisional label) and the
+      // last message's createdAt (a branch's timestamp) structurally too.
+      const userMessages = (n: ChatNodeState) => n.messages.filter((m) => m.role === 'user');
+      expect(after.n1.messages).toHaveLength(before.n1.messages.length);
+      expect(userMessages(after.n1)).toEqual(userMessages(before.n1));
+      expect(after.n1.messages.at(-1)?.createdAt).toBe(before.n1.messages.at(-1)?.createdAt);
+      // User messages keep their identity: TPane selects them structurally for the phone scrubber.
+      expect(userMessages(after.n1)).toHaveLength(1);
+      expect(userMessages(after.n1)[0]).toBe(userMessages(before.n1)[0]);
     },
   );
 });

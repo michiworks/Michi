@@ -137,6 +137,7 @@ export function Bars({lanes,zoom,range,today=todayNum(),label=L('时间线','Tim
   </div>;
 }
 
+export const Overrun=({actual,overrun}:{actual:Box;overrun:Box})=><span className="desk-bar-over" style={{left:overrun.left-actual.left,width:overrun.width}}/>;
 /** A row's bars, not to be dragged. The overrun is drawn inside the actual bar, so it goes wherever the bar goes. With `done` the bar is pale and
  * that share of it filled in, green once it is all done. */
 export function StaticBar({boxes:{actual,plan,overrun},title,done,children}:{boxes:BarBoxes;title?:string;done?:number;children?:ReactNode}){
@@ -148,4 +149,3 @@ export function StaticBar({boxes:{actual,plan,overrun},title,done,children}:{box
     </span>}
   </>;
 }
-export const Overrun=({actual,overrun}:{actual:Box;overrun:Box})=><span className="desk-bar-over" style={{left:overrun.left-actual.left,width:overrun.width}}/>;

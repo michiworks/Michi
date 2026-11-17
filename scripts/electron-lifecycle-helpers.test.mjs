@@ -234,9 +234,9 @@ test('a claim posts the encoded record id and reads the answer; without a backen
   const backend = await feedServer(t);
   let port = null;
   const feed = new AttentionDesktopFeed({ port: () => port, ...noop });
-  assert.equal(await feed.claim('attn-0'), false);
+  assert.deepEqual(await feed.claim('attn-0'), { claimed: false, silent: false });
   port = backend.port;
-  assert.equal(await feed.claim('attn/1 x'), false, 'the test server answers {} : not claimed');
+  assert.deepEqual(await feed.claim('attn/1 x'), { claimed: false, silent: false }, 'the test server answers {} : not claimed');
   assert.deepEqual(backend.requests, ['POST /api/attention/desktop/notifications/attn%2F1%20x/claim']);
 });
 

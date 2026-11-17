@@ -8,6 +8,7 @@ import { clearRemoteRecoveryIssue, getRemoteRecoveryIssues, reportRemoteRecovery
 import { closeRemoteAuthentication, completeRemoteAuthentication, requestRemoteAuthentication } from '../../state/remoteAuthentication';
 import { remoteSignInLabel } from 'michi-shared';
 import { openBackgroundWork } from './backgroundWork/backgroundWorkEvents';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 
 function renderShell() {
   return render(<PrefsProvider><AgentDomainProvider><TerminalShell /></AgentDomainProvider></PrefsProvider>);
@@ -239,6 +240,17 @@ describe('TerminalShell background work drawer', () => {
     // A request for a conversation this workspace does not own never opens.
     act(() => openBackgroundWork({ nodeId: 'n9' }));
     expect(screen.queryByRole('dialog', { name: 'Background work' })).toBeNull();
+  });
+
+  it('closes, with Artifacts, when a notification opens its target', async () => {
+    renderShell();
+    act(() => openBackgroundWork({ nodeId: 'n1', focus: { kind: 'workflow', runKey: 'r1' } }));
+    act(() => { window.dispatchEvent(new CustomEvent('michi:toggle-artifacts', { detail: null })); });
+    expect(await screen.findByRole('dialog', { name: 'Background work' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: 'Artifacts' })).toBeTruthy();
+    act(() => leaveOverlaysEvent.dispatch({}));
+    expect(screen.queryByRole('dialog', { name: 'Background work' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Artifacts' })).toBeNull();
   });
 
   it('ignores malformed requests', () => {

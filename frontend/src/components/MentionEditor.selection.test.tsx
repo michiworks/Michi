@@ -12,7 +12,7 @@ describe('MentionEditor with a selection ProseMirror has not read yet', () => {
     const ref = createRef<MentionEditorHandle>();
     const onChange = vi.fn();
     const view = render(<MentionEditor ref={ref} value="A real question" mentions={[]} onChange={onChange} currentNodeId="current"
-      sameTreeNodes={[]} artifacts={[]} onSubmit={() => {}} />);
+      artifacts={[]} onSubmit={() => {}} />);
     await waitFor(() => expect(view.container.querySelector('.ProseMirror')?.textContent).toBe('A real question'));
     const editor = ref.current!.editor!;
     // ProseMirror reads selections only while it has focus; jsdom focuses

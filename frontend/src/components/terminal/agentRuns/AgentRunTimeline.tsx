@@ -1,5 +1,6 @@
 import { AgentRunEventType } from 'michi-shared';
 import type { AgentRunEventV1 } from 'michi-shared';
+import { WarningIcon } from '../icons';
 
 function payloadText(event: AgentRunEventV1): string {
   if (typeof event.payload === 'string') return event.payload;
@@ -69,7 +70,7 @@ export function AgentRunTimeline({ events }: { events: readonly AgentRunEventV1[
           // Runtime fallback is an inline system event, not a kv row.
           return (
             <li key={event.seq} style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
-              <span aria-hidden style={{ color: 'var(--term-select)' }}>⚠</span>
+              <WarningIcon size="sm" style={{ color: 'var(--term-select)', flexShrink: 0 }} />
               <span>{payloadText(event)}</span>
               <span style={{ color: 'var(--term-muted)' }}>· recovering</span>
             </li>

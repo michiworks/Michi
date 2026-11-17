@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { AnimatePresence } from 'motion/react';
+import type { WorkflowRunDtoV1 } from 'michi-shared';
 import { ActionMenu } from '../../ui/ActionMenu';
 import { DrawerShell, type DrawerShellProps } from '../../ui/DrawerShell';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
+import { useSeenOnScreen } from '../../../hooks/useSeenOnScreen';
 import {
   chatLabel,
   shallowArrayEqual,
@@ -25,7 +28,12 @@ import type { BackgroundWorkFocus, OpenBackgroundWorkDetail } from './background
 import { MultiModelWorkCard } from './MultiModelWorkCard';
 import { SubagentCard } from './SubagentCard';
 import { WorkflowWorkCard } from './WorkflowWorkCard';
-import { GLYPH_BOX, useFinishedFold } from './workCardParts';
+import { GLYPH_BOX, useFinishedFold, WORK_CARD } from './workCardParts';
+import { workflowDisplayName } from './workflowCardModel';
+import { RUNTIME_LABEL } from '../workflows/workflowPresentation';
+import { CheckIcon } from '../icons';
+import { DisclosureChevron } from '../primitives';
+import './WorkflowWorkCard.css';
 
 /**
  * Background work: what a conversation's subagents and workflows are doing,
@@ -143,15 +151,8 @@ const rowButton: React.CSSProperties = {
   minWidth: 0,
   boxSizing: 'border-box',
   padding: '6px 8px',
-  border: 0,
-  borderRadius: 'var(--ui-radius)',
   margin: 0,
-  background: 'transparent',
-  color: 'var(--term-fg)',
-  font: 'inherit',
   fontFamily: 'var(--ui-font)',
-  textAlign: 'left',
-  cursor: 'pointer',
 };
 
 function FoldLine({ count, failed, noun, open, controls, onClick }: {
@@ -171,11 +172,11 @@ function FoldLine({ count, failed, noun, open, controls, onClick }: {
       aria-controls={open ? controls : undefined}
       aria-label={`${count} finished ${noun}${failed > 0 ? `, ${failed} failed` : ''}`}
       onClick={onClick}
-      className="t-hover-bg-alt"
+      className="t-hover-bg-alt background-work-row"
       // A finger-sized target on a phone.
       style={stacked ? { ...rowButton, padding: 8 } : rowButton}
     >
-      <span aria-hidden style={{ ...GLYPH_BOX, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>
+      <DisclosureChevron open={open} style={{ ...GLYPH_BOX, fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
       <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{count} finished</span>
       {failed > 0 && <span style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>· {failed} failed</span>}
     </button>
@@ -188,13 +189,37 @@ function FoldLine({ count, failed, noun, open, controls, onClick }: {
  * cards say what they are, so their section has no label. The subagents
  * fold the same way, behind their card's Finished band.
  */
-function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFailed, renderItem, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle, gap = 0 }: {
+/** Workflow cards mounted at once from the one the drawer opens on (or the top): about a screenful. */
+const EAGER_CARDS = 4;
+
+/**
+ * A workflow card past the first screen shows its name until it scrolls
+ * into view, then mounts for good. Cards above the one the drawer opens on
+ * mount at once, so scrolling up never meets one growing (WebKit does not
+ * anchor the scroll).
+ */
+function LazyCard({ eager, run, children }: { eager: boolean; run: WorkflowRunDtoV1; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [mounted, setMounted] = useState(eager);
+  const seen = useSeenOnScreen(ref, !mounted);
+  if ((eager || seen) && !mounted) setMounted(true);
+  if (mounted || eager || seen) return <>{children}</>;
+  return (
+    <div ref={ref} data-testid="background-workflow-placeholder" style={{ ...WORK_CARD, minHeight: 132, padding: '14px 16px' }}>
+      <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>Workflow · {RUNTIME_LABEL[run.runtime]}</div>
+      <div style={{ marginTop: 7, fontSize: 'calc(var(--fs-xl) + 1px)', fontWeight: 600, lineHeight: 1.3, color: 'var(--term-fg)', overflowWrap: 'anywhere' }}>{workflowDisplayName(run.name)}</div>
+    </div>
+  );
+}
+
+function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFailed, renderItem, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle, gap = 0, focusKey = null, eagerAll = true }: {
   /** The fold line's noun: "workflows". */
   noun: string;
   items: readonly T[];
   keyOf: (item: T) => string;
   isFailed: (item: T) => boolean;
-  renderItem: (item: T, key: string) => React.ReactNode;
+  /** `eager`: mount it now, not once it scrolls into view. */
+  renderItem: (item: T, key: string, eager: boolean) => React.ReactNode;
   folded: ReadonlySet<string>;
   foldKey: string;
   foldOpen: boolean;
@@ -203,13 +228,19 @@ function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFail
   onToggle: (key: string) => void;
   /** Space between items (cards). */
   gap?: number;
+  /** The item the drawer opens on, when it is in this section. */
+  focusKey?: string | null;
+  /** Mount every item now: the section is above the item the drawer opens on. */
+  eagerAll?: boolean;
 }) {
   const listId = useId();
   const { inline, tucked, folds, open, toggle } = useFinishedFold({ items, keyOf, folded, foldKey, foldOpen, onSetFold, expandedKey, onToggle });
   const list: React.CSSProperties | undefined = gap ? { display: 'flex', flexDirection: 'column', gap } : undefined;
+  const focusAt = focusKey ? inline.findIndex(({ key }) => key === focusKey) : -1;
+  const eagerThrough = eagerAll ? Infinity : Math.max(focusAt, 0) + EAGER_CARDS - 1;
   return (
     <>
-      <div style={list}>{inline.map(({ item, key }) => renderItem(item, key))}</div>
+      <div style={list}>{inline.map(({ item, key }, index) => renderItem(item, key, index <= eagerThrough))}</div>
       {folds && (
         <>
           <div style={gap ? { marginTop: gap / 2 } : undefined}>
@@ -222,7 +253,7 @@ function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFail
               onClick={toggle}
             />
           </div>
-          {open && <div id={listId} style={list}>{tucked.map(({ item, key }) => renderItem(item, key))}</div>}
+          {open && <div id={listId} style={list}>{tucked.map(({ item, key }, index) => renderItem(item, key, inline.length + index <= eagerThrough))}</div>}
         </>
       )}
     </>
@@ -232,21 +263,29 @@ function WorkSection<T extends { active: boolean }>({ noun, items, keyOf, isFail
 /** The row of a multi-model run the open request names (a click on a row of its in-chat card), with the request's requestSeq. */
 type RowFocus = { key: string; threadKey: string; step?: number; seq: number };
 
-function WorkGroup({ group, showHeader, expandedKey, onToggle, openFolds, onSetFold, rowFocus, onClose, onMenuOpenChange }: {
+function WorkGroup({ group, showHeader, expandedKey, onToggle, openFolds, onSetFold, rowFocus, onClose, onMenuOpenChange, focusKey, aboveFocus }: {
   group: WorkGroupValue;
   showHeader: boolean;
   expandedKey: string | null;
+  /** The item the drawer opens on. */
+  focusKey: string | null;
+  /** The group comes before the one holding that item. */
+  aboveFocus: boolean;
   onToggle: (key: string) => void;
   openFolds: ReadonlySet<string>;
   onSetFold: (key: string, open: boolean) => void;
   rowFocus: RowFocus | null;
-  /** Closes the drawer: it is modal, so a pane an item opens stays hidden behind it otherwise. */
+  /** Closes the drawer in one frame (TR-39): it is modal, so a pane an item opens stays hidden behind it otherwise. */
   onClose: () => void;
   /** An item's own menu opened or closed (Escape closes that menu first). */
   onMenuOpenChange: (open: boolean) => void;
 }) {
   const { node, work, loading, folded } = group;
   const empty = work.subagents.length === 0 && work.workflows.length === 0;
+  const focus = focusKey ? parseItemKey(focusKey) : null;
+  // Its workflows mount at once when the item opened on is below them: in a
+  // later group, or one of this group's subagents.
+  const workflowsAboveFocus = aboveFocus || (focus?.nodeId === node.nodeId && focus.focus.kind === 'subagent');
   const subagentsFold = JSON.stringify([node.nodeId, 'subagents']);
   // The subagents' list band is open unless closed: what it records is the closing.
   const subagentsClosed = JSON.stringify([node.nodeId, 'subagents', 'closed']);
@@ -268,10 +307,16 @@ function WorkGroup({ group, showHeader, expandedKey, onToggle, openFolds, onSetF
           items={work.workflows}
           keyOf={(item) => itemKey(node.nodeId, { kind: 'workflow', runKey: item.runKey })}
           isFailed={(item) => item.run.value.status === 'failed'}
-          renderItem={(item, key) => (item.run.value.runtime === 'michi'
+          renderItem={(item, key, eager) => (item.run.value.runtime === 'michi'
             ? <MultiModelWorkCard key={key} runKey={item.runKey} rowKey={key} expanded={expandedKey === key}
               focus={rowFocus?.key === key ? rowFocus : undefined} onClose={onClose} onMenuOpenChange={onMenuOpenChange} />
-            : <WorkflowWorkCard key={key} runKey={item.runKey} rowKey={key} expanded={expandedKey === key} onToggle={onToggle} />)}
+            : (
+              <LazyCard key={key} eager={eager || expandedKey === key} run={item.run.value}>
+                <WorkflowWorkCard runKey={item.runKey} rowKey={key} expanded={expandedKey === key} onToggle={onToggle} />
+              </LazyCard>
+            ))}
+          focusKey={focusKey}
+          eagerAll={workflowsAboveFocus}
           folded={folded}
           foldKey={workflowsFold}
           foldOpen={openFolds.has(workflowsFold)}
@@ -326,22 +371,19 @@ function ScopeMenu({ scope, onChange, open, onOpenChange, phone }: {
         aria-expanded={open}
         aria-label={`Show background work for: ${label}`}
         onClick={() => onOpenChange(!open)}
-        className="t-hover-bg-alt"
+        className="t-hover-bg-alt background-work-scope"
         style={{
           display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0,
-          border: 0, borderRadius: 'var(--ui-radius)',
           // A finger-sized target on a phone.
           padding: phone ? '8px 10px' : '4px 7px',
-          background: open ? 'var(--term-alt)' : 'transparent',
-          color: open ? 'var(--term-fg)' : 'var(--term-muted)',
-          fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', whiteSpace: 'nowrap', cursor: 'pointer',
         }}
       >
         {label}
         <span aria-hidden style={{ fontSize: 'var(--fs-2xs)' }}>▾</span>
       </button>
-      {open && anchor.current && (
+      <AnimatePresence>{open && anchor.current && (
         <ActionMenu
+          key="scope"
           anchor={anchor.current}
           onClose={() => onOpenChange(false)}
           label="Show background work for"
@@ -350,22 +392,24 @@ function ScopeMenu({ scope, onChange, open, onOpenChange, phone }: {
             id: value,
             label: text,
             checked: value === scope,
-            icon: <span aria-hidden style={{ width: 14, flexShrink: 0, display: 'inline-flex', justifyContent: 'center', color: 'var(--term-accent)' }}>{value === scope ? '✓' : ''}</span>,
+            icon: <span aria-hidden style={{ width: 14, flexShrink: 0, display: 'inline-flex', justifyContent: 'center', color: 'var(--term-accent)' }}>{value === scope && <CheckIcon size="sm" />}</span>,
             onSelect: () => onChange(value),
           }))}
         />
-      )}
+      )}</AnimatePresence>
     </>
   );
 }
 
 export interface BackgroundWorkDrawerProps extends Pick<DrawerShellProps, 'open' | 'onClose' | 'motion' | 'onPresenceChange'> {
+  /** Closes the drawer in one frame, once a chat or pane opened from it shows (TR-39). */
+  closeAtOnce?: () => void;
   request: OpenBackgroundWorkDetail;
   /** Bumps on every open request, so opening again re-applies its focus. */
   requestSeq: number;
 }
 
-export default function BackgroundWorkDrawer({ open, onClose, motion, onPresenceChange, request, requestSeq }: BackgroundWorkDrawerProps) {
+export default function BackgroundWorkDrawer({ open, onClose, closeAtOnce = onClose, motion, onPresenceChange, request, requestSeq }: BackgroundWorkDrawerProps) {
   const { activeProject } = useChatProjects();
   const focusKey = request.focus ? itemKey(request.nodeId, request.focus) : null;
   const [scope, setScope] = useState<Scope>('conversation');
@@ -435,6 +479,7 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
   }, [open, workspaceId, subscribeWorkspace]);
 
   const requestFocus = request.focus;
+  const requestSubagentIds = request.subagentIds;
   const rowFocus = useMemo<RowFocus | null>(() => (
     focusKey && requestFocus?.kind === 'workflow' && requestFocus.threadKey !== undefined
       ? { key: focusKey, threadKey: requestFocus.threadKey, step: requestFocus.step, seq: requestSeq }
@@ -444,6 +489,7 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
     const listed = sticky.current.token === stickyToken ? sticky.current : undefined;
     const kept: ListedItem[] = listed ? [...listed.items.values()] : [];
     if (requestFocus) kept.push({ nodeId: requestNodeId, focus: requestFocus });
+    for (const sessionId of requestSubagentIds ?? []) kept.push({ nodeId: requestNodeId, focus: { kind: 'subagent', sessionId } });
     const expanded = expandedKey ? parseItemKey(expandedKey) : null;
     if (expanded) kept.push(expanded);
     const keep = keepByNode(kept);
@@ -458,7 +504,7 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
         folded: foldedItems(node.nodeId, work, listed),
       };
     });
-  }, [nodes, runs, liveness, requestFocus, requestNodeId, expandedKey, stickyToken]);
+  }, [nodes, runs, liveness, requestFocus, requestSubagentIds, requestNodeId, expandedKey, stickyToken]);
   useEffect(() => {
     const current = sticky.current;
     if (current.token !== stickyToken) return;
@@ -476,6 +522,8 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
   const shown = scope === 'thread'
     ? groups.filter((group) => group.loading || group.work.subagents.length > 0 || group.work.workflows.length > 0)
     : groups;
+  const focusNodeId = focusKey ? parseItemKey(focusKey)?.nodeId : undefined;
+  const focusGroup = focusNodeId ? shown.findIndex((group) => group.node.nodeId === focusNodeId) : -1;
   const running = groups.reduce((sum, group) => sum + runningCount(group.work), 0);
   // Runs that wait on an approval: the header says these first.
   const waiting = groups.reduce((sum, group) => sum + group.work.workflows.filter((item) => (item.run.value.approvals?.length ?? 0) > 0).length, 0);
@@ -513,7 +561,7 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
       titleBadge={running > 0 || waiting > 0 ? (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 'var(--fs-sm)', fontFamily: 'var(--ui-font)', whiteSpace: 'nowrap' }}>
           {waiting > 0 && (
-            <span data-testid="background-work-waiting" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--term-select)' }}>
+            <span data-testid="background-work-waiting" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: 'var(--term-waiting-text)' }}>
               <span aria-hidden className="term-dot-i" style={{ background: 'var(--term-select)', opacity: 1 }} />{waiting} needs you
             </span>
           )}
@@ -537,9 +585,9 @@ export default function BackgroundWorkDrawer({ open, onClose, motion, onPresence
                 Subagents and workflows an agent starts show up here while they run, along with everything from its latest reply.
               </span>
             </div>
-          ) : shown.map((group) => (
+          ) : shown.map((group, index) => (
             <WorkGroup key={group.node.nodeId} group={group} showHeader={scope === 'thread'} expandedKey={expandedKey} onToggle={onToggle} openFolds={openFolds} onSetFold={onSetFold}
-              rowFocus={rowFocus} onClose={onClose} onMenuOpenChange={onItemMenuOpenChange} />
+              rowFocus={rowFocus} onClose={closeAtOnce} onMenuOpenChange={onItemMenuOpenChange} focusKey={focusKey} aboveFocus={index < focusGroup} />
           ))}
         </div>
       </div>

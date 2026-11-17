@@ -49,8 +49,4 @@
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   .temporary-chat-note { padding-top: 8px; }
   .temporary-chat-note__body { padding: 8px 10px; font-size: var(--fs-lg); }
-  /* Home's switch in a phone's topbar: the bar's glyph size (mobile.css) and a 40px
-     square, so its on state reads as a chip inside the 44px bar. */
-  .terminal-topbar .topbar-temporary-chat { min-width: 40px !important; height: 40px !important; }
-  .terminal-topbar .topbar-temporary-chat svg { width: var(--pt-icon); height: var(--pt-icon); }
 }

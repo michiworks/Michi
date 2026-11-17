@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-// Michi's mirror of Agent Desk's block code (see its README.md): native content, kept under Desk's own paths.
+// Michi's block renderers that started as Agent Desk's (see its README.md): native content, under Desk's paths.
 const vendorBlocks = join(root, 'frontend/src/components/terminal/content/page/vendor-blocks');
 
 function productionSources(directory) {

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import type { CardLeafState } from './workflowCardModel';
+import { CheckIcon, CloseIcon } from '../icons';
 
 /**
  * What the Background work drawer's cards share. Not in
@@ -64,12 +65,12 @@ export const GLYPH_BOX: React.CSSProperties = { width: 10, flexShrink: 0, displa
 
 /** A row's state mark. Running is a card's default: the chip carries the one running light, and the column stays empty. */
 export function StateGlyph({ state }: { state: CardLeafState }) {
-  if (state === 'failed') return <span aria-hidden style={{ ...GLYPH_BOX, color: 'var(--term-danger)', fontWeight: 600, fontSize: 'var(--fs-md)' }}>×</span>;
-  if (state === 'completed') return <span aria-hidden style={{ ...GLYPH_BOX, color: 'var(--term-digest)', fontSize: 'var(--fs-xs)' }}>✓</span>;
+  if (state === 'failed') return <span aria-hidden style={{ ...GLYPH_BOX, color: 'var(--term-danger)' }}><CloseIcon size="sm" /></span>;
+  if (state === 'completed') return <span aria-hidden style={{ ...GLYPH_BOX, color: 'var(--term-digest)' }}><CheckIcon size="sm" /></span>;
   if (state === 'cancelled') return <span aria-hidden style={GLYPH_BOX}><span style={{ width: 6, height: 6, background: 'var(--term-faint)' }} /></span>;
-  if (state === 'queued' || state === 'skipped') return <span aria-hidden style={GLYPH_BOX}><span style={{ width: 6, height: 6, boxSizing: 'border-box', borderRadius: '50%', border: '1px solid var(--term-faint)' }} /></span>;
+  if (state === 'queued' || state === 'skipped') return <span aria-hidden style={GLYPH_BOX}><span style={{ width: 6, height: 6, boxSizing: 'border-box', borderRadius: 'var(--ui-radius-pill)', border: '1px solid var(--term-faint)' }} /></span>;
   if (state === 'running') return <span aria-hidden style={GLYPH_BOX} />;
-  return <span aria-hidden style={GLYPH_BOX}><span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--term-select)' }} /></span>;
+  return <span aria-hidden style={GLYPH_BOX}><span style={{ width: 6, height: 6, borderRadius: 'var(--ui-radius-pill)', background: 'var(--term-select)' }} /></span>;
 }
 
 /** Finished work is green, the Done chip's colour; running work is neutral, the chip carries the run colour. */

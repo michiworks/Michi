@@ -1,5 +1,5 @@
 import express from 'express';
-import { boundWorkflowRun, isWorkflowAction, isWorkflowRunOpen, SSE_HEARTBEAT_MS, WORKFLOW_ACTIONS, type SubagentEnd, type WorkflowRunDtoV1, type WorkflowRunSseEnvelopeV1 } from 'michi-shared';
+import { boundWorkflowRun, diffWorkflowRun, isWorkflowAction, isWorkflowRunOpen, SSE_HEARTBEAT_MS, summarizeWorkflowRun, WORKFLOW_ACTIONS, type SubagentEnd, type WorkflowRunDtoV1, type WorkflowRunSseEnvelopeV1 } from 'michi-shared';
 import { beginSse, SSE_REPLAY_BYTES } from '../services/httpSse';
 import type { BackgroundSubagentRegistry } from '../services/backgroundSubagentRegistry';
 import { WorkflowActionError, type WorkflowRunHub } from '../services/workflowRunHub';
@@ -26,20 +26,35 @@ const SNAPSHOT_LIMIT = 50;
  * the loopback hop of an upgraded gateway's WebSocket.
  */
 const SNAPSHOT_TOTAL_BYTES = SSE_REPLAY_BYTES;
+/**
+ * A finished run larger than this goes out as its summary
+ * (summarizeWorkflowRun, marked `partial`): a card reads the whole run
+ * when it is shown. Open runs change live and go whole; so do multi-model
+ * runs, whose chat card would read them whole at once.
+ */
+const SUMMARY_FROM_BYTES = 8_000;
 
 const runBytes = (run: WorkflowRunDtoV1): number => Buffer.byteLength(JSON.stringify(run), 'utf8');
 
 /**
  * Fit the snapshot (open runs first, then newest first, as `hub.list`
- * returns them) in its byte budget. Runs that fit their share are sent whole
+ * returns them) in its byte budget, large finished runs as their summaries
+ * (SUMMARY_FROM_BYTES). Runs that fit their share are sent whole
  * and leave the rest to larger ones; trimmed runs are marked `partial`
  * (clients fetch them whole on demand). If even the trimmed runs do not fit,
  * finished runs are left out from the first one that no longer fits, so the
  * kept ones are the newest; `GET /workflow-runs/:id` still serves the rest.
  * Open runs are kept whenever they fit.
  */
-export function snapshotRuns(runs: WorkflowRunDtoV1[], totalBytes = SNAPSHOT_TOTAL_BYTES): WorkflowRunDtoV1[] {
-  const sizes = runs.map(runBytes);
+export function snapshotRuns(listed: WorkflowRunDtoV1[], totalBytes = SNAPSHOT_TOTAL_BYTES): WorkflowRunDtoV1[] {
+  const runs: WorkflowRunDtoV1[] = [];
+  const sizes: number[] = [];
+  for (const run of listed) {
+    const bytes = runBytes(run);
+    const summary = isWorkflowRunOpen(run) || run.multiModel || bytes <= SUMMARY_FROM_BYTES ? undefined : summarizeWorkflowRun(run);
+    runs.push(summary ?? run);
+    sizes.push(summary ? runBytes(summary) : bytes);
+  }
   if (sizes.reduce((sum, size) => sum + size, 0) <= totalBytes) return runs;
   const out = [...runs];
   const outSizes = [...sizes];
@@ -106,13 +121,27 @@ export function setupWorkflowRunRoutes(deps: WorkflowRunRouteDeps): express.Rout
     if (!scope) return;
     const observer = beginSse(res);
     const send = (envelope: WorkflowRunSseEnvelopeV1): void => { observer.write(frame(envelope)); };
-    const sendRun = (run: WorkflowRunDtoV1) => send({ version: 1, event: 'workflow_run', run, emittedAt: now() });
+    // A subscriber that asks for patches gets each run once, then what
+    // changed against the revision this feed sent it last; any other run
+    // (one it has not got, or got at another revision) goes whole.
+    const patches = req.query.patches === '1';
+    const sent = new Map<string, number>();
+    const sendRun = (run: WorkflowRunDtoV1) => {
+      if ((sent.get(run.id) ?? -1) > run.revision) return;
+      sent.set(run.id, run.revision);
+      send({ version: 1, event: 'workflow_run', run, emittedAt: now() });
+    };
+    const sendChange = (run: WorkflowRunDtoV1, previous: WorkflowRunDtoV1) => {
+      if (!patches || sent.get(run.id) !== previous.revision) { sendRun(run); return; }
+      sent.set(run.id, run.revision);
+      send({ version: 1, event: 'workflow_run_patch', run: null, patch: diffWorkflowRun(previous, run), emittedAt: now() });
+    };
     const sendBackground = (snapshot: boolean, nodes: Record<string, string[]>) =>
       send({ version: 1, event: 'background_subagents', run: null, backgroundSubagents: { snapshot, nodes }, emittedAt: now() });
     // Subscribe before the snapshot so nothing between the two is missed;
     // clients keep the highest revision, so a duplicate is harmless.
-    observer.addCleanup(deps.hub.subscribe((ownerUserId, run) => {
-      if (ownerUserId === scope.ownerUserId && run.workspaceId === scope.workspaceId) sendRun(run);
+    observer.addCleanup(deps.hub.subscribe((ownerUserId, run, previous) => {
+      if (ownerUserId === scope.ownerUserId && run.workspaceId === scope.workspaceId) sendChange(run, previous);
     }));
     const sendEnded = (nodeId: string, subagents: SubagentEnd[]) => send({
       version: 1,

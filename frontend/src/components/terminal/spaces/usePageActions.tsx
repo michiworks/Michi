@@ -1,5 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
+import { toast } from 'sonner';
 import type { PageSummaryDto } from 'michi-shared';
 import { createPage, deletePage, fetchPage, patchPage, restorePage, type PageApiIdentity } from '../../../services/api/pages';
 import { notifyPageChanged } from '../../../state/pages/pageEvents';
@@ -58,8 +59,8 @@ export function pageSpaceSubtree(pages: readonly PageSummaryDto[], pageId: strin
   return rootId ? pages.filter(page => pageIsWithin(pages, page.id, rootId)) : [];
 }
 
-type Action = { kind: PageActionKind; page: PageSummaryDto };
-const TITLES = { create: 'New page', rename: 'Rename page', move: 'Move page', trash: 'Move to trash' };
+type Action = { kind: Exclude<PageActionKind, 'trash'>; page: PageSummaryDto };
+const TITLES = { create: 'New page', rename: 'Rename page', move: 'Move page' };
 
 /** The sidebar and document outline share the same page operations and dialogs. */
 export function usePageActions(options: {
@@ -106,8 +107,6 @@ export function usePageActions(options: {
       if (kind === 'create') {
         const created = await createPage({ workspaceId: identity.workspaceId, parentId: page.id, title }, identity);
         changedId = created.id;
-      } else if (kind === 'trash') {
-        await deletePage(page.id, identity);
       } else {
         const current = await fetchPage(page.id, identity);
         if (!current) throw new Error('This page is no longer available.');
@@ -119,7 +118,6 @@ export function usePageActions(options: {
       if (callbacks.identity.workspaceId === identity.workspaceId && callbacks.identity.backendConnectionId === identity.backendConnectionId) {
         callbacks.onChanged(changedId);
         if (kind === 'create') callbacks.onOpen(changedId);
-        if (kind === 'trash') callbacks.onTrashed(page);
       }
       setAction(null);
     } catch (cause) {
@@ -129,29 +127,48 @@ export function usePageActions(options: {
       setBusy(false);
     }
   };
+  // Trash can be undone, so the move runs at once with Undo in its toast; with
+  // no dialog to show a failure, a failure is a toast too (ST-35, ST-17).
+  const moveToTrash = async (page: PageSummaryDto) => {
+    if (options.readOnly || running.current) return;
+    running.current = true;
+    const identity = options.identity;
+    try {
+      await deletePage(page.id, identity);
+      notifyPageChanged({ ...identity, pageId: page.id });
+      recordPageUndo('trash', page, page.id, page.title, identity);
+      const callbacks = latest.current;
+      if (callbacks.identity.workspaceId === identity.workspaceId && callbacks.identity.backendConnectionId === identity.backendConnectionId) {
+        callbacks.onChanged(page.id);
+        callbacks.onTrashed(page);
+      }
+    } catch (cause) {
+      toast.error(`Couldn’t move ${named(page.title)} to Trash: ${cause instanceof Error ? cause.message : 'unknown error'}`);
+    } finally {
+      running.current = false;
+    }
+  };
 
   return {
     createChild: (parentId: string) => { const parent = options.pages.find(page => page.id === parentId); if (parent) open('create', parent); },
     rename: (page: PageSummaryDto) => open('rename', page),
     move: (page: PageSummaryDto) => open('move', page),
-    trash: (page: PageSummaryDto) => open('trash', page),
+    trash: (page: PageSummaryDto) => { void moveToTrash(page); },
     // Closing fades the dialog out with the action it last showed.
     dialog: <AnimatePresence>{action && <ModalShell key="page-action" open onClose={close} title={TITLES[action.kind]} width={420} dismissible={!busy} captureEscape>
       <form className="page-action-form" onSubmit={event => void submit(event)}>
-        {action.kind === 'trash'
-          ? <p>Move “{action.page.title}” and its child pages to trash?</p>
-          : action.kind === 'move'
-            ? <label>Move under<select className="ui-input" value={value} disabled={busy || options.readOnly} onChange={event => setValue(event.target.value)}>
-              <option value="">Top level (new page)</option>
-              {destinations.map(page => <option key={page.id} value={page.id}>{page.title || 'Untitled page'}</option>)}
-            </select></label>
-            : <label>Name<input className="ui-input" value={value} disabled={busy || options.readOnly} autoFocus onFocus={event => event.target.select()} onChange={event => setValue(event.target.value)} /></label>}
+        {action.kind === 'move'
+          ? <label>Move under<select className="ui-input" value={value} disabled={busy || options.readOnly} onChange={event => setValue(event.target.value)}>
+            <option value="">Top level (new page)</option>
+            {destinations.map(page => <option key={page.id} value={page.id}>{page.title || 'Untitled page'}</option>)}
+          </select></label>
+          : <label>Name<input className="ui-input" value={value} disabled={busy || options.readOnly} autoFocus onFocus={event => event.target.select()} onChange={event => setValue(event.target.value)} /></label>}
         {error && <p role="alert">{error}</p>}
         {options.readOnly && <p role="status">Page changes are unavailable. Reconnect before editing.</p>}
         <footer>
           <Button variant="ghost" onClick={close} disabled={busy}>Cancel</Button>
-          <Button type="submit" variant="primary" danger={action.kind === 'trash'} disabled={busy || options.readOnly || ((action.kind === 'create' || action.kind === 'rename') && !value.trim())}>
-            {busy ? 'Saving…' : action.kind === 'create' ? 'Create page' : action.kind === 'move' ? 'Move' : action.kind === 'trash' ? 'Move to trash' : 'Save'}
+          <Button type="submit" variant="primary" disabled={busy || options.readOnly || ((action.kind === 'create' || action.kind === 'rename') && !value.trim())}>
+            {busy ? 'Saving…' : action.kind === 'create' ? 'Create page' : action.kind === 'move' ? 'Move' : 'Save'}
           </Button>
         </footer>
       </form>

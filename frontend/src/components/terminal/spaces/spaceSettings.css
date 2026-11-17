@@ -1,14 +1,15 @@
 .space-settings { display: flex; flex-direction: column; gap: 30px; min-width: 0; color: var(--term-fg); }
-.space-settings__back { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--term-muted); font: inherit; cursor: pointer; }
+/* A ghost Button whose label lines up with the title below. */
+.space-settings__back { align-self: flex-start; margin-left: -8px; }
 .space-settings__section { display: flex; flex-direction: column; gap: 12px; padding-top: 20px; border-top: 1px solid var(--term-line); }
 .space-settings__section h2 { margin: 0; font-size: var(--fs-xl); font-weight: 600; }
 .space-settings__section p { margin: 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.6; }
 .space-settings__form { display: flex; gap: 10px; }
 .space-settings__form input { flex: 1; min-width: 0; padding: 9px 12px; border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; }
 .space-settings__section button { align-self: flex-start; flex: none; padding: 8px 12px; border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); cursor: pointer; }
-.space-settings__section button:hover:not(:disabled) { background: var(--term-hover); }
-.space-settings__section button:disabled { opacity: .45; cursor: default; }
-.space-settings :is(button, input):focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.space-settings__section button:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); }
+.space-settings__section button:disabled { opacity: .5; cursor: not-allowed; }
+.space-settings :is(button, input):focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .space-settings__suggestions { display: flex; flex-wrap: wrap; gap: 6px; }
 .space-settings__suggestions button { padding: 4px 8px; color: var(--term-muted); font-size: var(--fs-sm); }
 .space-settings__rules { margin: 0; padding: 0; list-style: none; }

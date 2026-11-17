@@ -86,7 +86,7 @@ describe('NewWorkspaceDialog multi-folder', () => {
       fireEvent.click(addBtn);
     });
 
-    expect(screen.getByText(/overlaps with an existing folder/i)).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toMatch(/overlaps with an existing folder/i);
     // Second folder should NOT be added
     expect(screen.queryByText('sub')).toBeNull();
   });
@@ -143,10 +143,13 @@ describe('NewWorkspaceDialog multi-folder', () => {
 
     // Both folders have a × remove button
     const removeButtons = screen.getAllByTitle('Remove folder');
+    removeButtons[1].focus();
     fireEvent.click(removeButtons[1]);
 
     expect(screen.queryByText('second')).toBeNull();
     expect(screen.getByText('first')).toBeTruthy();
+    // The pressed × left with its row; the one before it takes the focus.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Remove folder' }));
   });
 
   it('lets the keyboard reach a folder\'s Make primary and remove, with no pointer over the row', async () => {

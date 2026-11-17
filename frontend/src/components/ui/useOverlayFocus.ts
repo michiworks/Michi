@@ -1,6 +1,6 @@
 import React from 'react';
 
-const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const FOCUSABLE = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), details > summary, [tabindex]:not([tabindex="-1"])';
 
 function focusableElements(panel: HTMLElement): HTMLElement[] {
   const elements = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((element) => {
@@ -20,6 +20,10 @@ function focusableElements(panel: HTMLElement): HTMLElement[] {
     return element === (group.find((radio) => radio.checked) ?? group[0]);
   });
 }
+
+/** Open trapping overlays, newest last. Focus left on <body> by a control
+ *  that unmounted belongs to the newest one. */
+const openTraps: React.RefObject<HTMLElement | null>[] = [];
 
 /** Focus lifecycle shared by overlays without prescribing their layout or dismissal. */
 export function useOverlayFocus({
@@ -81,22 +85,32 @@ export function useOverlayFocus({
 
   React.useEffect(() => {
     if (!open || !trap) return;
+    openTraps.push(panelRef);
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Tab' || event.defaultPrevented) return;
       const panel = panelRef.current;
+      const active = document.activeElement;
+      // A control that unmounted while focused (a Remove, a Connect) leaves
+      // focus on <body>, from where Tab would reach the page behind the scrim.
+      const fromBody = !active || active === document.body;
       // A nested portaled overlay owns its own focus. Do not pull it back into
       // this panel, or interfere with the deliberately non-modal page beside it.
-      if (!panel?.contains(document.activeElement)) return;
+      if (fromBody ? openTraps[openTraps.length - 1] !== panelRef : !panel?.contains(active)) return;
+      if (!panel) return;
       const elements = focusableElements(panel);
       const first = elements[0];
       const last = elements[elements.length - 1];
-      if (!first || document.activeElement === panel || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+      if (fromBody || !first || active === panel || (event.shiftKey ? active === first : active === last)) {
         event.preventDefault();
         (event.shiftKey ? last ?? panel : first ?? panel).focus({ preventScroll: true });
       }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      const index = openTraps.lastIndexOf(panelRef);
+      if (index >= 0) openTraps.splice(index, 1);
+    };
   }, [open, trap, panelRef]);
 
   React.useEffect(() => () => {

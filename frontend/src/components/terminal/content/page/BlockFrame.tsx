@@ -1,22 +1,16 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import {
-  ArrowDown,
-  ArrowUp,
-  CornerUpLeft,
-  GripVertical,
-  Hash,
-  Link2,
-  MessageSquare,
-  SquareCheck,
-  TriangleAlert,
-  Type,
-} from 'lucide-react';
 import type { MichiPageBlock } from 'michi-shared';
 import type { PageApplyResult } from '../../../../state/pages/usePage';
 import type { MichiPageEditOp } from './editorTypes';
 import type { MichiNoticeTone } from './editorTypes';
-import { BranchIcon, CopyIcon, DocIcon, EditIcon, PlusIcon, TrashIcon } from '../../icons';
+import {
+  ArrowDownIcon, ArrowUpIcon, BranchIcon, ChatIcon, CopyIcon, CornerUpLeftIcon, DocIcon, EditIcon, GripIcon, HashIcon, LinkIcon, MoreIcon, PlusIcon,
+  SquareCheckIcon, TrashIcon, TypeIcon, WarningIcon,
+} from '../../icons';
 import { HoverTip } from '../../../ui/Popover';
+import { MenuPresence } from '../../../ContextMenu';
+import { lastInputWasTouch } from '../../../../lib/inputModality';
+import { escapeIsForPage } from '../../escapeLayers';
 import { AskPopover, BLOCK_SUGGESTIONS } from './AskPopover';
 import { useCompanionName } from '../../../../state/companion/companionName';
 import { BlockRewrittenNote, ChecklistEditor, PageChangedNote, TextBlockEditor } from './BlockEditor';
@@ -82,8 +76,8 @@ export interface PageChrome {
    * says itself that the page changed, so only edits without one get a notice.
    */
   apply(ops: MichiPageEditOp[], label: string, at?: number): Promise<ApplyResult>;
-  /** `tone` defaults to plain information. */
-  notice(text: string, tone?: MichiNoticeTone): void;
+  /** `tone` defaults to plain information; `blockId` names the block it is about, where it shows. */
+  notice(text: string, tone?: MichiNoticeTone, blockId?: string): void;
   /** The blocks' whole text to the clipboard. */
   copy(blocks: MichiPageBlock[]): void;
   /** Words to the clipboard; `what` names them in the notice ("Copied your text"). */
@@ -109,8 +103,10 @@ export interface PageChrome {
   findBlock(fingerprint: string): string | null;
   /** More kinds of block the Add menu offers below `afterId` (databases). `anchor`: the Other blocks button the menu hangs from, for a picker that follows it. */
   addEntries?(afterId: string, anchor: HTMLElement | null): MichiMenuEntry[];
-  /** Native hosts supply the actions their persisted content supports. */
-  menuEntries?(block: MichiPageBlock, actions: { ask(): void; sources(): void }): MichiMenuEntry[];
+  /** Native hosts supply the actions their persisted content supports.
+   *  `focusNeighbor` moves focus on the block to the next one (or the one
+   *  before), for an action about to remove it. */
+  menuEntries?(block: MichiPageBlock, actions: { ask(): void; sources(): void; focusNeighbor(): void }): MichiMenuEntry[];
 }
 
 /**
@@ -138,10 +134,10 @@ type Popup = 'ask' | 'sources' | 'menu' | 'add' | null;
 
 /** What the Add menu adds below a block; each is written as Markdown (Michi adds nothing else by hand). */
 export const ADD_ITEMS: ReadonlyArray<{ kind: InsertKind; label: string; glyph: React.ReactNode }> = [
-  { kind: 'text', label: 'Text', glyph: <Type size={14} strokeWidth={1.7} /> },
-  { kind: 'heading', label: 'Heading', glyph: <Hash size={14} strokeWidth={1.7} /> },
-  { kind: 'todo', label: 'To-do', glyph: <SquareCheck size={14} strokeWidth={1.7} /> },
-  { kind: 'callout', label: 'Callout', glyph: <TriangleAlert size={14} strokeWidth={1.7} /> },
+  { kind: 'text', label: 'Text', glyph: <TypeIcon /> },
+  { kind: 'heading', label: 'Heading', glyph: <HashIcon /> },
+  { kind: 'todo', label: 'To-do', glyph: <SquareCheckIcon /> },
+  { kind: 'callout', label: 'Callout', glyph: <WarningIcon /> },
 ];
 
 const INSERT_EDITOR: Record<InsertKind, { label: string; placeholder: string; multiline: boolean }> = {
@@ -163,7 +159,8 @@ const TOOLBAR_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'Home', 'End']);
  * One page block with its chrome: in the left margin a checkbox (top-level
  * blocks), + (add below) and ⋮⋮ (the block menu; drag it to reorder), and on
  * hover or focus a toolbar with Ask, Branch, Sources, Edit and ⋯ (one tab
- * stop; arrow keys move along it). Edit turns the block into its editor in
+ * stop; arrow keys move along it). A touch screen shows them once a tap has
+ * selected the block. Edit turns the block into its editor in
  * place. Without `chrome` the block is drawn bare. Memoized: with stable
  * props a Michi poll does not redraw the page.
  */
@@ -252,6 +249,28 @@ export const BlockFrame = memo(function BlockFrame({
 
   // Out of reach for pointer and keyboard while it goes.
   useEffect(() => { frameRef.current?.toggleAttribute('inert', removed); }, [removed]);
+
+  // On a touch screen a tap selects the block, which brings out its chrome (michiPage.css); a tap
+  // anywhere else, on another block too, or Esc puts it away again.
+  const [tapped, setTapped] = useState(false);
+  useEffect(() => {
+    if (!tapped) return;
+    const frame = frameRef.current;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || event.target.closest('.michi-doc-block') !== frame) setTapped(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!escapeIsForPage(event)) return;
+      event.preventDefault();
+      setTapped(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [tapped]);
 
   const sourceCount = chrome?.capabilities?.sources === false ? 0 : chrome?.capabilities?.sources === true ? chrome.sources(block).length : objects(block.sources).filter((s) => str(s.nodeId).trim()).length;
   const canAsk = chrome?.capabilities?.ask !== false;
@@ -356,7 +375,7 @@ export const BlockFrame = memo(function BlockFrame({
     if (!replace && !stillSays(mode.opened)) return;
     const changes = draft.kind === 'checklist' ? checklistChanges(block, draft.title, draft.items) : textChanges(block, draft.text, draft.title);
     if (changes === 'empty') {
-      chrome?.notice('A checklist needs at least one item', 'info');
+      chrome?.notice('A checklist needs at least one item', 'info', blockId ?? undefined);
       return;
     }
     if (!changes) {
@@ -382,7 +401,7 @@ export const BlockFrame = memo(function BlockFrame({
     if (!after) {
       chrome.orphan({ label: INSERT_EDITOR[insert].label, markdown, text });
       closeEditor(viaKeyboard);
-      chrome.notice('The block it went under is no longer on the page; your text is kept at the top', 'info');
+      chrome.notice('The block it went under is no longer on the page; your text is kept at the top', 'info', blockId);
       return;
     }
     settle(await run([insertOp(after, markdown)], 'Block added', at), viaKeyboard);
@@ -446,29 +465,34 @@ export const BlockFrame = memo(function BlockFrame({
     if (viaKeyboard && frameRef.current?.contains(document.activeElement)) focusNeighbor();
     setRemoved(true);
   };
+  const hostActions = {
+    ask: openAsk,
+    sources: () => setPopup('sources'),
+    focusNeighbor: () => { if (frameRef.current?.contains(document.activeElement)) focusNeighbor(); },
+  };
 
   const moveBusy = busy || !!chrome?.moving();
   const menuEntries = (): MichiMenuEntry[] => {
     if (!chrome) return [];
-    if (chrome.menuEntries) return chrome.menuEntries(block, { ask: openAsk, sources: () => setPopup('sources') });
+    if (chrome.menuEntries) return chrome.menuEntries(block, hostActions);
     const entries: MichiMenuEntry[] = [];
-    if (canAsk) entries.push({ id: 'ask', label: askLabel, keys: '/', glyph: <MessageSquare size={14} strokeWidth={1.7} />, onSelect: openAsk });
-    if (canBranch) entries.push({ id: 'branch', label: 'Branch from here', glyph: <BranchIcon size={14} />, onSelect: () => chrome.branch(block) });
+    if (canAsk) entries.push({ id: 'ask', label: askLabel, keys: '/', glyph: <ChatIcon />, onSelect: openAsk });
+    if (canBranch) entries.push({ id: 'branch', label: 'Branch from here', glyph: <BranchIcon />, onSelect: () => chrome.branch(block) });
     if (canAsk || canBranch) entries.push({ divider: true, id: 'd0' });
     if (sourceCount > 0) {
-      entries.push({ id: 'sources', label: 'Sources', count: sourceCount, glyph: <DocIcon size={14} />, onSelect: () => setPopup('sources') });
+      entries.push({ id: 'sources', label: 'Sources', count: sourceCount, glyph: <DocIcon />, onSelect: () => setPopup('sources') });
     }
     entries.push({ divider: true, id: 'd1' });
-    entries.push({ id: 'copy', label: 'Copy text', glyph: <CopyIcon size={14} />, onSelect: () => chrome.copy([block]) });
+    entries.push({ id: 'copy', label: 'Copy text', glyph: <CopyIcon />, onSelect: () => chrome.copy([block]) });
     if (blockId && canCopyLink) {
-      entries.push({ id: 'link', label: 'Copy link', glyph: <Link2 size={14} strokeWidth={1.7} />, onSelect: () => chrome.copyLink(blockId) });
+      entries.push({ id: 'link', label: 'Copy link', glyph: <LinkIcon />, onSelect: () => chrome.copyLink(blockId) });
     }
     if (edited && blockId) {
       entries.push({
         id: 'release',
         label: 'Hand back to agent',
         sub: 'The agent may rewrite it next time',
-        glyph: <CornerUpLeft size={14} strokeWidth={1.7} />,
+        glyph: <CornerUpLeftIcon />,
         onSelect: () => { void run([releaseOp(blockId)], 'Handed back to the agent'); },
       });
     }
@@ -477,14 +501,14 @@ export const BlockFrame = memo(function BlockFrame({
         {
           id: 'up',
           label: 'Move up',
-          glyph: <ArrowUp size={14} strokeWidth={1.7} />,
+          glyph: <ArrowUpIcon />,
           disabled: index === 0 || moveBusy,
           onSelect: () => chrome.move(blockId, -1),
         },
         {
           id: 'down',
           label: 'Move down',
-          glyph: <ArrowDown size={14} strokeWidth={1.7} />,
+          glyph: <ArrowDownIcon />,
           disabled: index >= count - 1 || moveBusy,
           onSelect: () => chrome.move(blockId, 1),
         },
@@ -492,7 +516,7 @@ export const BlockFrame = memo(function BlockFrame({
     }
     if (blockId) {
       entries.push({ divider: true, id: 'd2' });
-      entries.push({ id: 'delete', label: 'Delete', keys: '⌫', danger: true, disabled: busy, glyph: <TrashIcon size={14} />, onSelect: () => { void remove(false); } });
+      entries.push({ id: 'delete', label: 'Delete', keys: '⌫', danger: true, disabled: busy, glyph: <TrashIcon />, onSelect: () => { void remove(false); } });
     }
     return entries;
   };
@@ -616,14 +640,14 @@ export const BlockFrame = memo(function BlockFrame({
       tabIndex={tabIndex}
       onClick={() => openInsert('text')}
     >
-      <PlusIcon size={top ? 13 : 11} />
+      <PlusIcon size={top ? 'md' : 'sm'} />
     </button>
   );
 
   const toolbar = () => {
     if (!chrome) return null;
     if (chrome.menuEntries) {
-      const entries = chrome.menuEntries(block, { ask: openAsk, sources: () => setPopup('sources') })
+      const entries = chrome.menuEntries(block, hostActions)
         .filter((entry): entry is MichiMenuItem => 'onSelect' in entry && ['select', 'ask', 'sources', 'ignore', 'archive'].includes(entry.id));
       const enabled = entries.filter(entry => !entry.disabled);
       return <div className="michi-doc-toolbar michi-doc-toolbar--icons" role="toolbar" aria-label={`Actions for ${label}`} onKeyDown={onToolbarKey} onFocus={event => {
@@ -644,7 +668,7 @@ export const BlockFrame = memo(function BlockFrame({
           tabIndex={!entry.disabled && enabled.indexOf(entry) === Math.min(rove, enabled.length - (editable ? 0 : 1)) ? 0 : -1}
           onClick={entry.onSelect}
         >{entry.glyph}</button></HoverTip>)}
-        {editable && <><span className="michi-doc-toolbar__sep" aria-hidden="true" /><HoverTip label="Edit" delayMs={250}><button type="button" className="michi-doc-toolbar__btn" aria-label="Edit" tabIndex={rove >= enabled.length ? 0 : -1} onClick={openEdit}><EditIcon size={16} /></button></HoverTip></>}
+        {editable && <><span className="michi-doc-toolbar__sep" aria-hidden="true" /><HoverTip label="Edit" delayMs={250}><button type="button" className="michi-doc-toolbar__btn" aria-label="Edit" tabIndex={rove >= enabled.length ? 0 : -1} onClick={openEdit}><EditIcon size="lg" /></button></HoverTip></>}
       </div>;
     }
     // Counted first so the tab stop lands on a button that is there.
@@ -673,7 +697,7 @@ export const BlockFrame = memo(function BlockFrame({
     );
     if (canBranch) tools.push(
       <button key="branch" type="button" className="michi-doc-toolbar__btn" tabIndex={tab()} onClick={() => chrome.branch(block)}>
-        <span className="michi-doc-toolbar__glyph" aria-hidden="true"><BranchIcon size={11} /></span>
+        <span className="michi-doc-toolbar__glyph" aria-hidden="true"><BranchIcon size="sm" /></span>
         Branch
       </button>,
     );
@@ -696,7 +720,7 @@ export const BlockFrame = memo(function BlockFrame({
     if (editable) {
       tools.push(
         <button key="edit" type="button" className="michi-doc-toolbar__btn" tabIndex={tab()} onClick={openEdit}>
-          <EditIcon size={11} />
+          <EditIcon size="sm" />
           Edit
         </button>,
       );
@@ -719,7 +743,7 @@ export const BlockFrame = memo(function BlockFrame({
           else openMenu('more');
         }}
       >
-        ⋯
+        <MoreIcon />
       </button>,
     );
     return (
@@ -754,7 +778,7 @@ export const BlockFrame = memo(function BlockFrame({
       data-selected={selected || undefined}
       data-dragging={dragging || undefined}
       data-removing={removed || undefined}
-      data-active={popup ? 'true' : undefined}
+      data-active={popup || tapped ? 'true' : undefined}
       data-editing={editing || undefined}
       data-edited={edited || undefined}
       data-note={note || undefined}
@@ -762,6 +786,10 @@ export const BlockFrame = memo(function BlockFrame({
       data-nested={!top || undefined}
       onKeyDown={onKeyDown}
       onClickCapture={onClickCapture}
+      onClick={(event) => {
+        // The innermost block a tap lands on takes it; a mouse or a key leaves the chrome to hover and focus.
+        if (chrome && lastInputWasTouch() && event.target instanceof Element && event.target.closest('.michi-doc-block') === event.currentTarget) setTapped(true);
+      }}
       onPointerDownCapture={() => {
         pressedRef.current = true;
         keyFocusRef.current = false;
@@ -793,7 +821,7 @@ export const BlockFrame = memo(function BlockFrame({
               className="michi-doc-block__check"
               onClick={(event) => chrome.select(blockId, event.shiftKey ? 'extend' : 'toggle')}
             >
-              {selected && <SquareCheck size={14} strokeWidth={1.8} aria-hidden="true" />}
+              {selected && <SquareCheckIcon aria-hidden="true" />}
             </button>
           )}
           {blockId && addButton()}
@@ -817,7 +845,7 @@ export const BlockFrame = memo(function BlockFrame({
               else openMenu('handle');
             }}
           >
-            <GripVertical size={14} strokeWidth={1.8} aria-hidden="true" />
+            <GripIcon aria-hidden="true" />
           </button>
         </div>
       )}
@@ -855,8 +883,9 @@ export const BlockFrame = memo(function BlockFrame({
         </div>
       )}
 
-      {chrome && popup === 'ask' && askRef.current && (
+      <MenuPresence>{chrome && popup === 'ask' && askRef.current && (
         <AskPopover
+          key="ask"
           anchor={askRef.current}
           label={label}
           suggestions={BLOCK_SUGGESTIONS}
@@ -866,9 +895,10 @@ export const BlockFrame = memo(function BlockFrame({
             chrome.ask(block, question);
           }}
         />
-      )}
-      {chrome && popup === 'sources' && sourcesRef.current && (
+      )}</MenuPresence>
+      <MenuPresence>{chrome && popup === 'sources' && sourcesRef.current && (
         <SourcesPopover
+          key="sources"
           anchor={sourcesRef.current}
           label={label}
           count={sourceCount}
@@ -876,9 +906,10 @@ export const BlockFrame = memo(function BlockFrame({
           onOpenThread={chrome.openThread}
           onClose={close}
         />
-      )}
-      {chrome && popup === 'menu' && menuAnchor && (
+      )}</MenuPresence>
+      <MenuPresence>{chrome && popup === 'menu' && menuAnchor && (
         <MichiMenu
+          key="menu"
           anchor={menuAnchor}
           label={`Block menu for ${label}`}
           entries={menuEntries()}
@@ -888,9 +919,10 @@ export const BlockFrame = memo(function BlockFrame({
             if (restore) menuAnchor.focus({ preventScroll: true });
           }}
         />
-      )}
-      {chrome && popup === 'add' && insertTypeRef.current && (
+      )}</MenuPresence>
+      <MenuPresence>{chrome && popup === 'add' && insertTypeRef.current && (
         <MichiMenu
+          key="add"
           anchor={insertTypeRef.current}
           label="Add below"
           width={200}
@@ -900,7 +932,7 @@ export const BlockFrame = memo(function BlockFrame({
             if (restore) insertTypeRef.current?.focus({ preventScroll: true });
           }}
         />
-      )}
+      )}</MenuPresence>
     </div>
   );
 });

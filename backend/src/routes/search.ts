@@ -1,6 +1,9 @@
 import express from 'express';
+import type { DatabaseSync } from 'node:sqlite';
 import { getDb } from '../services/db';
+import { log } from '../services/logger';
 import { notTemporaryChatSql } from '../services/memory/temporaryChat';
+import { runSearch, SearchLimitError } from '../services/searchReader';
 
 export interface SearchResult {
   id: string;
@@ -42,7 +45,7 @@ export interface NodeGroupedResult {
 export function setupSearchRoutes(): express.Router {
   const router = express.Router();
 
-  router.get('/search', (req, res) => {
+  router.get('/search', async (req, res) => {
     const { q, workspaceId, mode = 'keyword', limit = '20' } = req.query;
     if (!q || typeof q !== 'string' || q.trim().length === 0) {
       return res.status(400).json({ error: 'Query parameter "q" is required' });
@@ -54,25 +57,47 @@ export function setupSearchRoutes(): express.Router {
     const userId: string | undefined = process.env.MICHI_CLOUD === '1'
       ? (req.user?.id as string | undefined)
       : undefined;
+    // Default: keyword search — userId scopes results to caller's workspaces in cloud mode.
+    const kind = mode === 'grouped' || mode === 'semantic' ? mode : 'keyword';
+    const request = { query: q.trim(), workspaceId: workspaceId as string | undefined, limit: limitNum, userId };
+    // The search box asks again as the query changes and drops its previous
+    // request: a search still waiting for the worker then need not run at all.
+    const abandoned = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) abandoned.abort(); });
 
     try {
-      if (mode === 'grouped') {
-        const results = nodeGroupedSearch(q.trim(), workspaceId as string | undefined, limitNum, userId);
+      if (kind === 'grouped') {
+        const results = await runSearch({ kind, ...request }, abandoned.signal);
         return res.json({ results, totalNodes: results.length });
       }
-      if (mode === 'semantic') {
-        const results = semanticSearch(q.trim(), workspaceId as string | undefined, limitNum, userId);
-        return res.json({ results, total: results.length });
-      }
-      // Default: keyword search — userId scopes results to caller's workspaces in cloud mode.
-      const results = keywordSearch(q.trim(), workspaceId as string | undefined, limitNum, userId);
+      const results = await runSearch({ kind, ...request }, abandoned.signal);
       res.json({ results, total: results.length });
-    } catch {
+    } catch (error) {
+      if (abandoned.signal.aborted) return;
+      if (error instanceof SearchLimitError) {
+        return res.status(error.code === 'search_too_broad' ? 422 : 503).json({ error: error.message, code: error.code });
+      }
+      // Every search fails while an index it names (INDEXED BY) is missing; the log says why.
+      log.warn('http', 'search failed', { mode: kind, err: error instanceof Error ? error.message : String(error) });
       res.status(400).json({ error: 'Invalid search query' });
     }
   });
 
   return router;
+}
+
+/** One search, as the route and the agents' tools hand it to the search worker (services/searchReader.ts). */
+export type SearchRequest =
+  | { kind: 'keyword'; query: string; workspaceId?: string; limit: number; userId?: string; options?: KeywordSearchOptions }
+  | { kind: 'grouped' | 'semantic'; query: string; workspaceId?: string; limit: number; userId?: string };
+
+/** Runs `request` on `db`: the search worker's read-only connection. */
+export function runSearchRequest(request: SearchRequest, db: DatabaseSync): SearchResult[] | NodeGroupedResult[] {
+  const { query, workspaceId, limit, userId } = request;
+  if (request.kind === 'keyword') return keywordSearch(query, workspaceId, limit, userId, request.options, db);
+  return request.kind === 'grouped'
+    ? nodeGroupedSearch(query, workspaceId, limit, userId, db)
+    : semanticSearch(query, workspaceId, limit, userId, db);
 }
 
 function sanitizeFtsQuery(raw: string): string {
@@ -166,8 +191,7 @@ export interface KeywordSearchOptions {
 
 const NAVIGATION_ALLOWED = "(CASE WHEN json_valid(w.settings) THEN json_type(w.settings, '$.aiGlobalContext') END) IS NOT 'false'";
 
-export function keywordSearch(query: string, workspaceId?: string, limit = 20, userId?: string, opts: KeywordSearchOptions = {}): SearchResult[] {
-  const db = getDb();
+export function keywordSearch(query: string, workspaceId?: string, limit = 20, userId?: string, opts: KeywordSearchOptions = {}, db: DatabaseSync = getDb()): SearchResult[] {
   const substring = usesSubstringMatch(query);
   const terms = queryTerms(query);
   const params: (string | number)[] = [];
@@ -238,8 +262,8 @@ export function nodeGroupedSearch(
   workspaceId?: string,
   limit = 20,
   userId?: string,
+  db: DatabaseSync = getDb(),
 ): NodeGroupedResult[] {
-  const db = getDb();
   const rows = usesSubstringMatch(query)
     ? substringGroupedRows(db, queryTerms(query), workspaceId, limit, userId)
     : ftsGroupedRows(db, query, workspaceId, limit, userId);
@@ -362,13 +386,17 @@ function ftsGroupedRows(
   // Two-layer CTE:
   //   1. node_matches — one row per matching node, sorted by most-recent message
   //   2. ranked_snippets — up to 3 best snippets (by FTS rank) per node
+  // created_at is stored after tool_calls, so m.created_at would walk every
+  // hit's overflow chain; x reads it from idx_messages_node_role_created
+  // (migration 0095). Without INDEXED BY the planner looks the row up by rowid.
   let sql = `
     WITH node_matches AS (
       SELECT m.node_id,
-             MAX(m.created_at) AS last_message_at,
+             MAX(x.created_at) AS last_message_at,
              COUNT(*) AS total_matches
       FROM messages_fts
       JOIN messages m ON messages_fts.rowid = m.rowid
+      JOIN messages x INDEXED BY idx_messages_node_role_created ON x.node_id = m.node_id AND x.rowid = m.rowid
       JOIN nodes n ON m.node_id = n.id
       JOIN workspaces w ON n.workspace_id = w.id
       WHERE messages_fts MATCH ?
@@ -382,7 +410,7 @@ function ftsGroupedRows(
   }
   sql += `
       GROUP BY m.node_id
-      ORDER BY last_message_at DESC
+      ORDER BY last_message_at DESC, m.node_id
       LIMIT ?
     ),
     ranked_msgs AS (
@@ -666,10 +694,9 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function semanticSearch(query: string, workspaceId?: string, limit = 20, userId?: string): SearchResult[] {
-  const db = getDb();
+function semanticSearch(query: string, workspaceId: string | undefined, limit: number, userId: string | undefined, db: DatabaseSync): SearchResult[] {
   const tokens = query.split(/\s+/).filter(t => t.length > 1);
-  if (tokens.length === 0 || usesSubstringMatch(query)) return keywordSearch(query, workspaceId, limit, userId);
+  if (tokens.length === 0 || usesSubstringMatch(query)) return keywordSearch(query, workspaceId, limit, userId, {}, db);
 
   const ftsQuery = tokens.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
   const candidateLimit = limit * 3;

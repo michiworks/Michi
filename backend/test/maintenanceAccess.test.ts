@@ -1,8 +1,17 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test, before, after } from 'node:test';
 import { initDb, closeDb } from '../src/services/db';
-before(() => { initDb(); });
-after(() => { closeDb(); });
+// Its own data directory: run without the test runner's preload, initDb would open the user's ~/.michi/data.db.
+let dataDir = '';
+before(() => {
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'michi-maintenance-access-'));
+  process.env.MICHI_DATA_DIR = dataDir;
+  initDb();
+});
+after(() => { closeDb(); fs.rmSync(dataDir, { recursive: true, force: true }); });
 import { createMaintenanceAccessTools, isExternalReadOnlyTool, isMaintenanceInternalTool } from '../src/services/metaAgent/maintenanceAccess';
 import type { MaintenanceExecutionContext } from '../src/services/pages/maintenanceWriter';
 import type { McpToolInfo } from '../src/services/mcpClientManager';
@@ -12,13 +21,14 @@ const context = { workspaceId: 'w', ownerUserId: 'u', jobId: 'j', runId: 'r', cl
 const schema = { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false };
 const read: McpToolInfo = { name: 'search', inputSchema: schema, annotations: { readOnlyHint: true } };
 const json = (result: any) => JSON.parse(result.content[0].text);
-function setup() {
+function setup(overrides: Record<string, 'read-only' | 'deny'> = {}) {
   let current: MaintenanceExecutionContext | null = context;
   let tools = [read];
   let calls = 0, closed = 0, checked = 0, internalCalls = 0;
   let onConnect = () => {};
   const access = createMaintenanceAccessTools(() => current, {
     assertAuthority: () => { checked++; }, servers: () => [{ serverName: 'external', command: 'unused' }],
+    overrides: () => new Map(Object.entries(overrides)),
     manager: () => ({
       connect: async () => { onConnect(); return { tools }; },
       callTool: async () => { calls++; return { content: [{ type: 'text' as const, text: 'read result' }] }; },
@@ -35,10 +45,10 @@ function setup() {
 }
 
 test('read-only means explicit metadata, never a read-sounding name', () => {
-  assert.equal(isExternalReadOnlyTool(read), true);
+  assert.equal(isExternalReadOnlyTool('external', read, new Map()), true);
   for (const tool of [{ ...read, annotations: undefined }, { ...read, annotations: { readOnlyHint: false } },
     { ...read, annotations: { readOnlyHint: true, destructiveHint: true } }, { ...read, execution: { taskSupport: 'required' as const } }]) {
-    assert.equal(isExternalReadOnlyTool(tool), false);
+    assert.equal(isExternalReadOnlyTool('external', tool, new Map()), false);
   }
   for (const name of ['edit_page', 'create_database', 'save_page_component', 'layout_rules']) assert.equal(isMaintenanceInternalTool(name), true);
   for (const name of ['bash', 'write', 'open_url', 'spawn_agent', 'send_to_thread', 'create_scheduled_job']) assert.equal(isMaintenanceInternalTool(name), false);
@@ -94,4 +104,15 @@ test('a tool that is not read-only is never listed or run, and asks nobody for a
     assert.deepEqual([answer.status, answer.alternatives], ['unavailable', ['search']], name);
   }
   assert.equal(s.counters().calls, 0);
+});
+
+test('an override makes an undeclared tool read-only or denies a declared one, never a write-capable one', async () => {
+  const s = setup({ 'external/plain': 'read-only', 'external/search': 'deny', 'external/send': 'read-only' });
+  s.setTools([read, { ...read, name: 'plain', annotations: undefined }, { ...read, name: 'send', annotations: { readOnlyHint: false } }]);
+  assert.deepEqual(json(await s.list({ server: 'external' })).tools.map((t: any) => t.name), ['plain']);
+  assert.equal((await s.call({ server: 'external', tool: 'plain', arguments: { query: 'x' } })).isError, undefined);
+  for (const name of ['search', 'send']) {
+    assert.equal(json(await s.call({ server: 'external', tool: name, arguments: { query: 'x' } })).status, 'unavailable', name);
+  }
+  assert.equal(s.counters().calls, 1);
 });

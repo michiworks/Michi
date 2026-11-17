@@ -1,6 +1,7 @@
 // First: the background service reads ~/.michi/.env before any module reads its settings.
 import './bootEnv';
 import { startMetaAgentMetrics, stopMetaAgentMetrics } from './services/metaAgentMetrics';
+import { stopSearchReader } from './services/searchReader';
 import { nextPerformanceContext, startEventLoopDiagnostics, withPerformanceContext } from './services/performanceDiagnostics';
 import { jsonConfigErrorResponse } from "./routes/jsonConfigErrorResponse";
 import { persistSessionState } from './services/sessionStatePersistence';
@@ -9,7 +10,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'node:crypto';
-import { createSpawnChild } from './services/spawnChild';
+import { createSpawnChild, spawnRefusal } from './services/spawnChild';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import { setupSpaFallback } from './routes/spaFallback';
 import { setupMobileAccessRoutes } from './routes/mobileAccess';
@@ -41,6 +42,7 @@ import { setupMetaAgentRoutes } from './routes/metaAgent';
 import { setupMetaAgentOverviewRoutes } from './routes/metaAgentOverview';
 import { setupMetaAgentRunNowRoutes } from './routes/metaAgentRunNow';
 import { log } from './services/logger';
+import { applyOutboundProxyFromEnv } from './services/outboundProxy';
 import { observeAccess } from './services/accessLog';
 import { setupMichiRoutes } from './routes/michi';
 import { setupDigestRoutes } from './routes/digests';
@@ -57,6 +59,7 @@ import { chatHubLiveTurn, configureProgressCardLiveTurns } from './services/page
 import { configurePagePreview, createPagePreviewMiddleware } from './services/pages/pagePreview';
 import { setupPageHelperRoutes } from './routes/pageHelpers';
 import { setupPageComponentRoutes } from './routes/pageComponents';
+import { setupBlockSubmissionRoutes } from './routes/blockSubmissions';
 import { setupPageMaintenanceRoutes } from './routes/pageMaintenance';
 import { configurePaneInspectionEventBus } from './services/paneInspectionSubscribe';
 import { setupBackupRoutes } from './routes/backup';
@@ -97,6 +100,7 @@ import { initDb, getDb, getDbPath, closeDb, closeAuditDb, openExistingAuditDb } 
 import { initDbWorker, shutdownDbWorker } from './services/dbWorkerClient';
 import { auditLogHealth, recordAudit } from './services/audit';
 import { installStartupSignalHandlers } from './services/startupSignals';
+import { shutdownWhenParentDisconnects } from './services/parentDisconnect';
 import { scanGraphIntegrity } from './services/graphIntegrity';
 import { getAgentConfig, loadAgentConfig, updateAgentConfig, reconcileRuntimeWithRegistered, resolveModel, resolveReasoning } from './services/agentConfig';
 import { setProviderEnvBindings, getProviderApiKey } from './services/secrets';
@@ -137,8 +141,10 @@ import { chatHub } from './agents/chatHub';
 import { configureThreadMessaging, recoverThreadMessageWakes } from './agents/threadMessageTool';
 import { isRegisteredLiveSession } from './agents/requestedTurnStart';
 import { chatHubAwaitingUser } from './services/chatAwaitingUser';
-import { settleStoppedThreadWakes } from './agents/threadMessageWakes';
+import { settleRetiredSenderWakes, settleStoppedThreadWakes } from './agents/threadMessageWakes';
 import { acquireSessionRestoreLock } from './services/nativeResume';
+import { AutoContinue } from './services/autoContinue';
+import { michiPause } from './services/michiPause';
 import { AgentRunAdministrativeLifecycle } from './services/agentRunAdministrativeLifecycle';
 import { createStreamTransport } from './services/streamTransport';
 import { setupScheduledJobRoutes } from './routes/scheduledJobs';
@@ -182,6 +188,7 @@ import { AgentRunsRepository } from './services/agentRunsRepository';
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 // The background service has read ~/.michi/.env already (./bootEnv).
 const SERVICE_MODE = process.env.MICHI_SERVICE_MODE === '1';
+if (applyOutboundProxyFromEnv()) log.info('boot', 'outbound requests use HTTP(S)_PROXY');
 // Reject unsupported combinations before opening databases or starting runtimes.
 const accessPolicy = resolveAccessPolicy();
 const REQUIRE_AUTH = accessPolicy.requireAuth;
@@ -364,6 +371,7 @@ for (const factory of getEnabledFactories()) {
             startTurn: (turn) => chatHub.startRequestedSelfTurn(turn),
             isLiveSession: isRegisteredLiveSession,
         }),
+        spawnRefusal,
         persistContext: ({ chatId, ownerUserId, name, filePath, size }) => {
             const userId = ownerUserId ?? undefined;
             const binding = getNodeSessionBinding(chatId, userId);
@@ -451,6 +459,24 @@ configureThreadMessaging({
 });
 // A Stop ends the send_to_thread wake chain the stopped turn is part of.
 chatHub.onCancel(({ turnId }) => settleStoppedThreadWakes(turnId));
+// An archived or deleted chat (with its thread or workspace) takes no more
+// turns: its wakes settle and its live session goes (ChatManager.releaseRetiredSessions).
+structureEvents.subscribe({
+  send: (frame) => {
+    settleRetiredSenderWakes(frame);
+    void chatManager.releaseRetiredSessions(frame)
+      .catch((error) => log.warn('chat', 'retired chat session sweep failed', { error: error instanceof Error ? error.message : String(error) }));
+  },
+});
+// A turn that stopped at a limit or failed on an error that clears up is carried on (services/autoContinue.ts).
+new AutoContinue({
+  hub: chatHub,
+  ensureSession: (input) => chatManager.ensureParentSession(input),
+  acquireRestoreLock: acquireSessionRestoreLock,
+  isLiveSession: isRegisteredLiveSession,
+  userChatsOn: () => getCompanionSettings().autoContinueChats,
+  michiPaused: (ownerUserId) => michiPause(ownerUserId).paused,
+}).start();
 // Multi-model plans (services/multiModel/): proposed by a chat agent, run by
 // the backend once the user presses Start.
 const multiModelStore = new SqliteMultiModelStore();
@@ -518,7 +544,7 @@ retryAgentRunCleanup();
 const agentRunCleanupTimer = setInterval(retryAgentRunCleanup, 60_000);
 agentRunCleanupTimer.unref();
 
-// Idle Kiro chats give their live session back (ChatManager.releaseIdleSessions);
+// Idle Kiro and Claude chats give their live session back (ChatManager.releaseIdleSessions);
 // the next message resumes it. One pass at a time.
 let idleSessionPass: Promise<unknown> | null = null;
 const idleSessionTimer = setInterval(() => {
@@ -1040,6 +1066,7 @@ app.use('/api', setupSpacesHomeRoutes({ liveWait: (nodeId) => chatHubLiveWait(ch
 app.use('/api', setupHomeCardsRoutes());
 app.use('/api', setupPageHelperRoutes());
 app.use('/api', setupPageComponentRoutes());
+app.use('/api', setupBlockSubmissionRoutes());
 configureProgressCardLiveTurns((nodeId) => chatHubLiveTurn(chatHub, nodeId));
 configureHomeLiveWait((nodeId) => chatHubLiveWait(chatHub, nodeId));
 // Opening Spaces no longer starts a first run that Get started's Start is to start (D17); cloud has no card.
@@ -1218,6 +1245,7 @@ const gracefulShutdown = async (): Promise<void> => {
   // Coalesced workflow snapshots would otherwise lose their last revisions.
   workflowRunHub.flush();
   await stopMetaAgentMetrics();
+  stopSearchReader();
   await companionStopped;
   closeDb();
   closeAuditDb();
@@ -1246,6 +1274,8 @@ const shutdownAndExit = () => {
 };
 process.on('SIGINT', shutdownAndExit);
 process.on('SIGTERM', shutdownAndExit);
+// The desktop app's crash closes the IPC channel it forked us with and sends no signal.
+shutdownWhenParentDisconnects(shutdownAndExit, () => shuttingDown);
 // After the listeners above, so a signal that arrived during startup reaches them.
 releaseStartupSignals();
 

@@ -1,7 +1,7 @@
 import type { MenuItem, MenuSection } from '../components/ContextMenu';
-import { confirmDialog } from '../components/ui/ConfirmDialog';
 import type { Tree } from '../state/chatStore';
 import type { MoveTargetWorkspace } from '../state/moveTargets';
+import { recordUndoGroup } from '../state/undoStack';
 
 export interface ThreadRowActions {
   activateTree: (id: string) => void;
@@ -22,15 +22,6 @@ export interface ThreadRowActions {
   /** Open the move-to-workspace picker dialog. When omitted (or no targets
    *  are available) the menu item is dropped. */
   openMoveDialog?: () => void;
-}
-
-/** The one way to ask before moving threads to trash, from a row menu or a selection bar. */
-export function confirmMoveThreadsToTrash(count: number): Promise<boolean> {
-  return confirmDialog({
-    title: 'Move to trash',
-    message: count === 1 ? 'Move this thread to trash?' : `Move ${count} threads to trash?`,
-    confirmLabel: 'Move',
-  });
 }
 
 export interface BuildThreadRowArgs {
@@ -91,16 +82,14 @@ export function buildThreadRowContextMenu(args: BuildThreadRowArgs): MenuSection
             run: () => clearTreeSelection?.(),
           },
           {
+            // Trash can be undone, so the move runs at once: one Undo toast for them all (ST-35).
             id: 'delete',
-            label: `Delete ${count} threads…`,
+            label: `Delete ${count} threads`,
             danger: true,
             keys: 'D',
             run: () => {
-              void confirmMoveThreadsToTrash(count).then((ok) => {
-                if (!ok) return;
-                for (const id of scope) actions.deleteTree(id);
-                clearTreeSelection?.();
-              });
+              recordUndoGroup(() => { for (const id of scope) actions.deleteTree(id); }, (n) => `Moved ${n} threads to Trash`, { toast: true });
+              clearTreeSelection?.();
             },
           },
         ],
@@ -143,12 +132,10 @@ export function buildThreadRowContextMenu(args: BuildThreadRowArgs): MenuSection
     items: [
       {
         id: 'delete',
-        label: 'Delete thread…',
+        label: 'Delete thread',
         danger: true,
         keys: 'D',
-        run: () => {
-          void confirmMoveThreadsToTrash(1).then((ok) => { if (ok) actions.deleteTree(treeId); });
-        },
+        run: () => actions.deleteTree(treeId),
       },
     ],
   });

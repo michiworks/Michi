@@ -1,4 +1,5 @@
 import type { MichiContextItem } from 'michi-shared';
+import { namesRemoteEntity } from '../../config/backendIdentity';
 import type { MichiAssistantPage } from '../content/assistantBridge';
 import { ATTACHED_QUOTE_SOURCE, type AnyQuoteSource } from '../../lib/quoteFormat';
 
@@ -51,6 +52,9 @@ export function assistantPageKey(page: AssistantPageView | null | undefined): st
   return [page.kind, page.projectId ?? '', page.nodeId ?? ''].join(':');
 }
 
+/** What stands in for the link of a remote machine's thread or page: the assistant's tools read only this machine. */
+const ON_REMOTE = "on a remote machine, which your tools can't read";
+
 function pageLine(page: AssistantPageView): string | null {
   const title = page.title ? oneLine(page.title) : '';
   switch (page.kind) {
@@ -58,10 +62,12 @@ function pageLine(page: AssistantPageView): string | null {
     case 'threads': return 'On screen: All threads';
     case 'page': {
       const name = title ? `Workspace document “${title}”` : 'Workspace document';
+      if (page.projectId && namesRemoteEntity(page.projectId)) return `On screen: ${name}, ${ON_REMOTE}`;
       return `On screen: ${name}${page.projectId ? ` (michi://page/${page.projectId})` : ''}`;
     }
     case 'pane': {
       const name = title ? `Michi thread “${title}”` : 'Michi thread';
+      if (page.nodeId && namesRemoteEntity(page.nodeId)) return `On screen: ${name}, ${ON_REMOTE}`;
       return `On screen: ${name}${page.nodeId ? ` (michi://node/${page.nodeId})` : ''}`;
     }
     default: return null;
@@ -70,6 +76,7 @@ function pageLine(page: AssistantPageView): string | null {
 
 /** A link the assistant can act on for each kind of item. */
 function itemRef(item: MichiContextItem): string {
+  if (namesRemoteEntity(item.id) || (item.projectId && namesRemoteEntity(item.projectId))) return ON_REMOTE;
   switch (item.kind) {
     case 'thread': return `michi://node/${item.id}`;
     case 'node': return `michi://node/${item.id}`;

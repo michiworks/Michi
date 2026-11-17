@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 import type { WorkflowRunStatus } from 'michi-shared';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
 import {
@@ -8,33 +8,40 @@ import {
   workflowRunKey,
   type WorkflowPlacement,
 } from '../../../state/workflowDomain';
-import { FadeOnChange, Reveal, RevealList, type RevealRow } from '../agentBlockMotion';
-import { ChevronRightIcon } from '../icons';
+import { FadeOnChange, Reveal, RevealList, RevealOnShow, type RevealRow } from '../agentBlockMotion';
+import { CheckIcon, ChevronRightIcon, WorkflowIcon } from '../icons';
 import { WORKFLOW_CHIP, WORKFLOW_STATUS_LABEL, workflowElapsedLabel } from './workflowPresentation';
 import { WorkflowRunCard } from './WorkflowRunCard';
 
 type OpenRun = (identity: AgentResourceIdentity, name: string) => void;
 
-/** One card, subscribed to its own run so other runs' progress skips it. */
-const ConnectedWorkflowRunCard = React.memo(function ConnectedWorkflowRunCard({ identity, onOpen }: {
+/**
+ * One card, subscribed to its own run so other runs' progress skips it. A run
+ * read after the card mounted grows in under a message made on screen (`enter`).
+ */
+const ConnectedWorkflowRunCard = React.memo(function ConnectedWorkflowRunCard({ identity, onOpen, enter }: {
   identity: AgentResourceIdentity;
   onOpen?: OpenRun;
+  enter: boolean;
 }) {
   const domain = useOptionalWorkflowDomain();
   const { resource, pending, error } = useWorkflowRun(workflowRunKey(identity));
-  if (!resource) return null;
   return (
-    <WorkflowRunCard
-      run={resource.value}
-      pending={pending}
-      error={error}
-      onAnswer={domain ? (approvalId, optionId) => { void domain.answer(identity, approvalId, optionId); } : undefined}
-      onOpen={onOpen ? () => onOpen(identity, resource.value.name) : undefined}
-    />
+    <RevealOnShow show={!!resource} enter={enter}>
+      {resource && (
+        <WorkflowRunCard
+          run={resource.value}
+          pending={pending}
+          error={error}
+          onAnswer={domain ? (approvalId, optionId) => { void domain.answer(identity, approvalId, optionId); } : undefined}
+          onOpen={onOpen ? () => onOpen(identity, resource.value.name) : undefined}
+        />
+      )}
+    </RevealOnShow>
   );
 });
 
-/** A message's finished runs fold into one line once it has this many. */
+/** A message's finished runs fold into one line once it has this many, or at once when one failed. */
 const FOLD_AT = 2;
 
 /** The fold line's counts, in this order, each named for how its runs ended. */
@@ -86,6 +93,7 @@ function FinishedWorkflowRuns({ runs, finished, onOpen }: {
   onOpen?: OpenRun;
 }) {
   const [open, setOpen] = useState(false);
+  const openedByClickRef = useRef(false);
   const listId = useId();
   const ended = [...finished.values()];
   const parts = FOLD_COUNTS
@@ -99,10 +107,10 @@ function FinishedWorkflowRuns({ runs, finished, onOpen }: {
         aria-expanded={open}
         aria-controls={listId}
         aria-label={`Workflows: ${parts.map((part) => `${part.count} ${part.label}`).join(', ')}`}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => { openedByClickRef.current = !open; setOpen(!open); }}
       >
         <span className="workflow-run-card__eyebrow">
-          <span aria-hidden className="workflow-run-card__icon">⧉</span>
+          <WorkflowIcon size="sm" className="workflow-run-card__icon" />
           Workflows
         </span>
         <span className="workflow-fold__counts">
@@ -111,16 +119,16 @@ function FinishedWorkflowRuns({ runs, finished, onOpen }: {
               {index > 0 && <span aria-hidden className="workflow-fold__sep">·</span>}
               {/* A count that changes fades to its new value. */}
               <FadeOnChange k={`${part.status}:${part.count}`} style={{ color: part.color }}>
-                {part.status === 'completed' && <span aria-hidden className="workflow-fold__check">✓</span>}
+                {part.status === 'completed' && <CheckIcon size="sm" className="workflow-fold__check" />}
                 <span className="workflow-fold__count">{part.count}</span> {part.label}
               </FadeOnChange>
             </React.Fragment>
           ))}
         </span>
-        <span aria-hidden className="workflow-fold__chevron"><ChevronRightIcon size={12} /></span>
+        <span aria-hidden className="workflow-fold__chevron"><ChevronRightIcon size="sm" /></span>
       </button>
       <div id={listId}>
-        <Reveal show={open} preset="group">
+        <Reveal show={open} preset="group" scrollOnOpen={openedByClickRef}>
           <ul className="workflow-fold__list">
             {runs.map((placement) => (
               <FoldedRunRow key={workflowRunKey(placement.identity)} identity={placement.identity} onOpen={onOpen} />
@@ -134,17 +142,20 @@ function FinishedWorkflowRuns({ runs, finished, onOpen }: {
 
 /**
  * Workflow runs a message launched, under its body and above its action row.
- * Live runs keep their cards. Once FOLD_AT have finished, the finished ones
- * fold into one line above the cards: a card that finishes collapses out as
- * the line grows in or recounts.
+ * Live runs keep their cards. Once FOLD_AT have finished, or one failed, the
+ * finished ones fold into one line above the cards: a card that finishes
+ * collapses out as the line grows in or recounts. The line's red count keeps
+ * a failure in view, and the message's text says what went wrong.
  */
-export function MessageWorkflowRuns({ runs, onOpen }: {
+export function MessageWorkflowRuns({ runs, onOpen, enter = false }: {
   runs: readonly WorkflowPlacement[];
   onOpen?: OpenRun;
+  /** The message was made on screen: a card whose run is read later grows in. */
+  enter?: boolean;
 }) {
   const keys = useMemo(() => runs.map((placement) => workflowRunKey(placement.identity)), [runs]);
   const finished = useFinishedWorkflowRuns(keys);
-  const fold = finished.size >= FOLD_AT;
+  const fold = finished.size >= FOLD_AT || [...finished.values()].includes('failed');
   const rows: RevealRow[] = [];
   if (fold) {
     const folded = runs.filter((_, index) => finished.has(keys[index]));
@@ -152,7 +163,7 @@ export function MessageWorkflowRuns({ runs, onOpen }: {
   }
   runs.forEach((placement, index) => {
     if (fold && finished.has(keys[index])) return;
-    rows.push({ key: keys[index], node: <ConnectedWorkflowRunCard identity={placement.identity} onOpen={onOpen} /> });
+    rows.push({ key: keys[index], node: <ConnectedWorkflowRunCard identity={placement.identity} onOpen={onOpen} enter={enter} /> });
   });
   return (
     <div style={{ margin: '10px 0 6px' }}>

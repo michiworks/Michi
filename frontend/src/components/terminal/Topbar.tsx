@@ -19,12 +19,14 @@ import type { AppUpdateState } from '../../lib/electronBridge';
 import SidebarToggleButton from './SidebarToggleButton';
 import { AREA_RAIL_WIDTH } from './rail/AreaRail';
 import PaneCaption from './PaneCaption';
+import type { ZoomHiddenPane } from './PaneZoomExit';
 import PaneLauncher from './PaneLauncher';
 import PaneTabStrip from './PaneTabStrip';
 import { MobilePaneSwitcher } from './MobilePaneSwitcher';
 import { ResponsiveToolbar } from './ResponsiveToolbar';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { useThemeColorSync } from '../../hooks/useThemeColorSync';
+import { paneRecedeOpacity } from '../../hooks/usePaneShellStyle';
 import BrowserLauncher from './BrowserLauncher';
 import { TOPBAR_BUTTON_W, TOPBAR_TIP_DELAY_MS, TopbarIconButton } from './TopbarIconButton';
 import { confirmDialog } from '../ui/ConfirmDialog';
@@ -39,12 +41,12 @@ import { usePresentedPanes, usePresentedPaneFocus } from './PanePresentation';
 import type { PageId } from '../../state/commands';
 import { kbd } from '../../lib/platform';
 import { pageBackground } from '../../lib/pageBackground';
-import { ArtifactsIcon, ChevronLeftIcon, ChevronRightIcon, DigestIcon, MapIcon } from './icons';
-import { Columns2, Plus } from 'lucide-react';
+import { ArtifactsIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, ColumnsIcon, DigestIcon, MapIcon, PlusIcon, SearchIcon } from './icons';
 import { useSpaceTopbar } from '../../state/pages/spaceTopbar';
 import { openNewChatSheet, useCurrentSpaceScope } from '../../state/spaceConversations/store';
 import { Button } from '../ui/controls';
 import { HoverTip } from '../ui/Popover';
+import { toast } from 'sonner';
 import './spaces/conversation/conversation.css';
 import { usePaneBackgroundWorkCounts } from './backgroundWork/usePaneBackgroundWork';
 import BackgroundWorkButton from './backgroundWork/BackgroundWorkButton';
@@ -240,6 +242,11 @@ export default function TerminalTopbar({
   });
   const zoomedCaption = paneLayout.zoomed ? zoomedPane ?? null : null;
   const zoomablePanes = openPanes.length - exitingIds.size;
+  const zoomHiddenPanes = useMemo<ZoomHiddenPane[]>(() => zoomedCaption
+    ? openPanes.flatMap((id, i) => paneLayout.zoomHiddenIds.has(id) && !exitingIds.has(id)
+      ? [{ id, title: paneTitles[i] || 'thread', status: paneStatuses[i] === 'streaming' || paneStatuses[i] === 'error' ? paneStatuses[i] as 'streaming' | 'error' : 'idle' }]
+      : [])
+    : [], [zoomedCaption, openPanes, paneLayout.zoomHiddenIds, exitingIds, paneTitles, paneStatuses]);
 
   // Mirror Sidebar's isResizing so Zone 1's width transition can be suppressed
   // during drag-resize — otherwise the topbar lags the sidebar by 200ms.
@@ -336,7 +343,7 @@ export default function TerminalTopbar({
       }
       await api.installUpdate();
     } catch (err) {
-      alert(`Update failed: ${err}`);
+      toast.error(`Couldn’t update Michi: ${err instanceof Error ? err.message : 'unknown error'}`);
       setUpdating(false);
     }
   };
@@ -591,11 +598,11 @@ export default function TerminalTopbar({
           <BrandHomeButton onClick={() => _onNav('home')} />
         )}
         {page !== 'profile' && (
-          <SidebarToggleButton collapsed={sidebarCollapsed} onToggle={onToggleSidebar} />
+          <SidebarToggleButton collapsed={sidebarCollapsed} onToggle={onToggleSidebar} filled={phone} />
         )}
         {showPhoneBack && (
           <TopbarIconButton onClick={phoneBack} tooltip="Back" label="Go back">
-            <ChevronLeftIcon strokeWidth={1.8} />
+            <ChevronLeftIcon />
           </TopbarIconButton>
         )}
         <TopbarIconButton
@@ -605,7 +612,7 @@ export default function TerminalTopbar({
           tooltipKbd={kbd('mod', '[')}
           label="Navigate back"
         >
-          <ChevronLeftIcon strokeWidth={1.8} />
+          <ChevronLeftIcon />
         </TopbarIconButton>
         <TopbarIconButton
           onClick={navigation.onForward}
@@ -614,17 +621,17 @@ export default function TerminalTopbar({
           tooltipKbd={kbd('mod', ']')}
           label="Navigate forward"
         >
-          <ChevronRightIcon strokeWidth={1.8} />
+          <ChevronRightIcon />
         </TopbarIconButton>
         {/* After back/forward, in the same place with the sidebar open or closed. */}
         {showNewChat && (
-          <TopbarIconButton onClick={onNewThread!} tooltip="new chat" tooltipKbd={kbd('mod', 'T')} label="New chat">
-            <PlusIcon />
+          <TopbarIconButton onClick={onNewThread!} tooltip="new chat" tooltipKbd={kbd('mod', 'T')} label="New chat" className="topbar-new-chat">
+            <PlusIcon bold={phone} />
           </TopbarIconButton>
         )}
         {showSearch && (
           <TopbarIconButton onClick={onOpenPalette!} disabled={!workspaceReady} tooltip="search" tooltipKbd={kbd('mod', 'K')} label="Search" className="t-search-trigger">
-            <SearchGlyph />
+            <SearchIcon />
           </TopbarIconButton>
         )}
       </div>
@@ -635,7 +642,7 @@ export default function TerminalTopbar({
         className="terminal-topbar-main"
         data-pane-caption-viewport={showPaneCells ? '' : undefined}
         style={{
-          marginRight: page === 'dashboard' ? 'var(--browser-dock-width, 0px)' : 0,
+          marginRight: page === 'dashboard' ? 'calc(var(--browser-dock-width, 0px) + var(--companion-dock-width, 0px))' : 0,
           flex: 1,
           // Docked layouts share one chrome surface across the entire topbar.
           // Narrow/profile layouts retain the page's own background.
@@ -744,27 +751,18 @@ export default function TerminalTopbar({
                     // Without a matching transition, padding flips instantly
                     // while spacer eases, so the title snaps to ~12px and then
                     // slides right — visible as a flicker on toggle.
-                    // Dim/bright transition must match TPane's pane body
-                    // (same --t-soft + --t-ease) so the caption cell fades in
-                    // lockstep with the pane below — otherwise the title
-                    // strip snaps while the pane crossfades, which reads as
-                    // jank on focus changes. First cell additionally eases
-                    // its left-pad to match the sidebar spacer animation.
-                    transition: [
-                      (isFirst && !sidebarResizing)
-                        ? sidebarCollapsed
-                          ? 'padding-left var(--t-enter) cubic-bezier(.4,0,1,1)'
-                          : 'padding-left var(--t-enter) cubic-bezier(0,0,.2,1)'
-                        : null,
-                      'filter var(--t-soft) var(--t-ease)',
-                    ].filter(Boolean).join(', '),
+                    transition: isFirst && !sidebarResizing
+                      ? sidebarCollapsed
+                        ? 'padding-left var(--t-enter) cubic-bezier(.4,0,1,1)'
+                        : 'padding-left var(--t-enter) cubic-bezier(0,0,.2,1)'
+                      : undefined,
                     borderRight: !prefs.paneRules ? 'none' : '1px solid var(--term-line)',
                     // Docked captions leave the frame visible; narrow layouts
                     // retain the pane's surface behind the title.
                     background: 'var(--term-topbar-zone-bg, var(--term-pane-bg, var(--term-surface)))',
-                    // Match the pane's focus dimming without changing opacity
-                    // or adding another tint layer to the shared frame.
-                    filter: cellFocus == null || isCellFocused ? 'none' : `brightness(${1 - prefs.focusDim / 100 * 0.6})`,
+                    // The cell's own recede layer (index.css) sinks its
+                    // background with the pane below, leaving its title alone.
+                    ['--caption-recede' as string]: cellFocus == null || isCellFocused ? 0 : paneRecedeOpacity(prefs.focusDim),
                     // Layer 1: entrance animation — accent bg highlight fade-out.
                     ...(isCellNew ? { animation: 'pane-entrance-bg var(--t-slow) ease-out forwards' } : {}),
                     ...paneLayout.paneStyles[i],
@@ -788,7 +786,7 @@ export default function TerminalTopbar({
                     onReorder={reorderPane}
                     zoomed={zoomedCaption === id}
                     canZoom={zoomablePanes > 1}
-                    hiddenPaneCount={zoomablePanes - 1}
+                    hiddenPanes={zoomedCaption === id ? zoomHiddenPanes : undefined}
                     onZoom={zoomPane}
                   />
                 </div>
@@ -885,7 +883,7 @@ export default function TerminalTopbar({
       </div>
 
       {page === 'dashboard' && <div data-browser-caption-host style={{
-        position: 'absolute', right: 0, top: 0, bottom: 0,
+        position: 'absolute', right: 'var(--companion-dock-width, 0px)', top: 0, bottom: 0,
         width: 'var(--browser-dock-width, 0px)', overflow: 'hidden',
         display: 'flex', alignItems: 'stretch', background: 'var(--term-pane-bg)',
       }} />}
@@ -924,7 +922,7 @@ export default function TerminalTopbar({
               // backdrop filter removes their text so the icons stay legible,
               // while keeping the cell's *composited* color — an opaque
               // backdrop can't work here because the cell bg dims with pane
-              // focus (brightness filter) and which cell sits under the
+              // focus (its veil) and which cell sits under the
               // cluster changes with scroll, so any painted color is wrong
               // some of the time. Requires opaque content beneath (cells +
               // Zone 2's topbarBg — guaranteed on Dashboard even under
@@ -954,19 +952,18 @@ export default function TerminalTopbar({
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: 6,
-                padding: '3px 10px',
-                background: 'var(--term-accent)',
-                color: 'var(--term-bg)',
-                fontWeight: 700,
-                borderRadius: 'var(--ui-radius-sm)',
-                fontSize: 'var(--fs-sm)',
+                gap: 2,
                 WebkitAppRegion: 'no-drag',
               } as React.CSSProperties}
             >
-              <span
+              {/* aria-disabled, not disabled, so focus stays on it while it runs. */}
+              <Button
+                size="sm"
+                variant="primary"
                 onClick={handleUpdate}
-                style={{ cursor: updating ? 'wait' : 'pointer' }}
+                aria-busy={updating || undefined}
+                aria-disabled={updating || undefined}
+                style={updating ? { cursor: 'progress' } : undefined}
               >
                 {updateState?.status === 'downloading'
                   ? (typeof updateState.percent === 'number'
@@ -981,13 +978,10 @@ export default function TerminalTopbar({
                       : updateState?.latestVersion
                         ? `↑ Update to ${updateState.latestVersion}`
                         : '↑ Update & Restart'}
-              </span>
+              </Button>
               {!updating && (
-                <IconBtn
-                  onClick={() => setUpdateDismissed(true)}
-                  style={{ opacity: 0.7, marginLeft: 4 }}
-                >
-                  ×
+                <IconBtn onClick={() => setUpdateDismissed(true)} aria-label="Dismiss update">
+                  <CloseIcon size="sm" />
                 </IconBtn>
               )}
             </span>
@@ -1003,23 +997,23 @@ export default function TerminalTopbar({
               <BrowserLauncher />
               <TopbarIconButton
                 onClick={() => _onNav('map')}
-                active={page === 'map'}
+                current={page === 'map'}
                 label="Map"
                 tooltip="Map"
                 tooltipKbd={kbd('mod', 'M')}
               >
-                <MapIcon size={14} />
+                <MapIcon />
               </TopbarIconButton>
               {prefs.digestEnabled && (
                 <TopbarIconButton
                   onClick={() => _onNav('digest')}
-                  active={page === 'digest'}
+                  current={page === 'digest'}
                   label="Digest"
                   tooltip="Digest"
                   tooltipKbd={kbd('mod', 'D')}
                   dot={hasUnreadDigest}
                 >
-                  <DigestIcon size={14} />
+                  <DigestIcon />
                 </TopbarIconButton>
               )}
             </>
@@ -1028,11 +1022,11 @@ export default function TerminalTopbar({
             <TopbarIconButton
               onClick={toggleArtifacts}
               disabled={!workspaceReady}
-              active={artifactsOpen}
+              expanded={artifactsOpen}
               label="Artifacts"
               tooltip="Artifacts"
             >
-              <ArtifactsIcon size={14} />
+              <ArtifactsIcon />
             </TopbarIconButton>
           )}
           </ResponsiveToolbar>}
@@ -1041,12 +1035,13 @@ export default function TerminalTopbar({
           {showsHome && (
             <TopbarIconButton
               onClick={() => setTemporaryChatDraft(!temporaryChat)}
-              active={temporaryChat}
-              label={temporaryChat ? 'Turn off temporary chat' : 'Temporary chat'}
-              tooltip={temporaryChat ? 'Turn off temporary chat' : 'Temporary chat'}
+              pressed={temporaryChat}
+              label="Temporary chat"
+              tooltip="Temporary chat"
               className="topbar-temporary-chat"
             >
-              <TemporaryChatGlyph size={14} />
+              {/* 13, not 14: Lucide's 24-unit ghost is then as tall as the bar's 16-unit glyphs. A phone draws it solid, at the bar's size. */}
+              <TemporaryChatGlyph size={13} filled={phone} />
             </TopbarIconButton>
           )}
           {/* Every area, with or without a workspace: the Companion is global. */}
@@ -1080,34 +1075,28 @@ function CaptionEraseFilter({ dark }: { dark: boolean }) {
 }
 
 function BrandHomeButton({ onClick }: { onClick: () => void }) {
-  const [hover, setHover] = React.useState(false);
   return (
     <HoverTip label="Home" delayMs={TOPBAR_TIP_DELAY_MS}>
       <button
         type="button"
         onClick={onClick}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
         aria-label="Go home"
+        // Its colours and hover are .topbar-brand's (index.css).
+        className="topbar-brand"
         style={{
           height: '100%',
           display: 'flex',
           alignItems: 'center',
           gap: 8,
           flexShrink: 0,
-          border: 'none',
-          background: 'transparent',
           padding: 0,
           cursor: 'pointer',
-          color: 'var(--term-fg)',
           fontFamily: 'inherit',
           fontSize: 'var(--fs-3xl)',
           fontWeight: 700,
           letterSpacing: 'var(--ls-tight)',
-          opacity: hover ? 1 : 0.85,
           whiteSpace: 'nowrap',
           overflow: 'hidden',
-          transition: 'opacity var(--t-quick) var(--t-ease)',
           WebkitAppRegion: 'no-drag',
         } as React.CSSProperties}
       >
@@ -1173,14 +1162,14 @@ function SpaceTopbarActions({ page }: { page: PageId }) {
   return (
     <>
       {scope && (phone ? (
-        <TopbarIconButton onClick={() => openNewChatSheet()} active={false} label="Start a task from this page" tooltip="Start a task">
-          <Plus size={16} strokeWidth={1.7} />
+        <TopbarIconButton onClick={() => openNewChatSheet()} active={false} label="Start a task from this page" tooltip="Start a task" className="topbar-start-task">
+          <PlusIcon bold />
         </TopbarIconButton>
       ) : (
-        <TopbarTextButton onClick={() => openNewChatSheet()} label="Start a task" ariaLabel="Start a task from this page" icon={<Plus size={13} strokeWidth={1.7} aria-hidden="true" />} />
+        <TopbarTextButton onClick={() => openNewChatSheet()} label="Start a task" ariaLabel="Start a task from this page" icon={<PlusIcon />} />
       ))}
       {beside && (
-        <TopbarTextButton onClick={beside} label="Open beside chat" icon={<Columns2 size={13} strokeWidth={1.6} aria-hidden="true" />} />
+        <TopbarTextButton onClick={beside} label="Open beside chat" icon={<ColumnsIcon />} />
       )}
     </>
   );
@@ -1203,7 +1192,6 @@ function BreadcrumbBackButton({
   title?: string;
   children: React.ReactNode;
 }) {
-  const [hover, setHover] = React.useState(false);
   return (
     <button
       type="button"
@@ -1218,41 +1206,5 @@ function BreadcrumbBackButton({
     >
       {children}
     </button>
-  );
-}
-
-function PlusIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      aria-hidden="true"
-    >
-      <path d="M8 2v12M2 8h12" />
-    </svg>
-  );
-}
-
-function SearchGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="7" cy="7" r="4.5" />
-      <line x1="10.4" y1="10.4" x2="13.5" y2="13.5" />
-    </svg>
   );
 }

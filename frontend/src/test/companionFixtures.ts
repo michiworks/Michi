@@ -8,7 +8,7 @@ export function companionItem(id: string, overrides: Partial<CompanionItemDto> =
     id, source: 'cr', subtype: 'cr_needs_attention', bucket: 'needs_you', severity: 'now', itemKey: `cr:${id}:mine`, version: 'v1',
     title: `Item ${id}`, summary: null, target: { kind: 'url', url: `https://reviews.example.com/reviews/${id}` }, facts: {}, status: 'new',
     snoozedUntil: null, feedback: null, feedbackReason: null, firstSeenAt: 1_000, changedAt: 2_000, observedAt: 3_000,
-    createdAt: 1_000, updatedAt: 3_000, resolvedAt: null, ...overrides,
+    createdAt: 1_000, updatedAt: 3_000, resolvedAt: null, raised: null, ...overrides,
   };
 }
 
@@ -21,14 +21,13 @@ export function companionSnapshotDto(overrides: Partial<CompanionSnapshotDto> = 
     settings: { ...settings, enabled: true, paused: false },
     status: {
       state: 'ok', auth: { valid: true, expiresAt: null, checkedAt: null }, sources: [], lastCheckAt: null, nextCheckAt: null,
-      nextHeartbeatAt: null, nextBriefAt: null, turnsToday: 0, working: false,
+      nextHeartbeatAt: null, turnsToday: 0, working: false,
     },
     conversation: {
       workspaceId: 'ws-assistant', nodeId: 'companion-node',
       assistant: { nodeId: 'companion-node', workspaceId: 'ws-assistant', treeId: 'tree-c', settings: runs, conversation: runs, supportedRuntimes: ['claude'] },
     },
     items: [],
-    brief: null,
     cards: [],
     goals: [],
     notes: '',
@@ -36,7 +35,6 @@ export function companionSnapshotDto(overrides: Partial<CompanionSnapshotDto> = 
     rules: '',
     reminders: [],
     demotedSubtypes: [],
-    catchUp: null,
     activity: [],
     counts: { needsYou: 0, newItems: 0, unreadMessages: 0 },
     revision: 1,

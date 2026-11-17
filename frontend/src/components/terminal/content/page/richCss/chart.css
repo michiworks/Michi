@@ -11,7 +11,7 @@
 .michi-mantine .desk-chart-box[data-kind='funnel'] { display: flex; justify-content: center; }
 .michi-mantine .desk-chart-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 8px 0 0; padding: 0; list-style: none; font-size: var(--fs-md); color: var(--term-mid); }
 .michi-mantine .desk-chart-legend li { display: inline-flex; align-items: center; gap: 6px; }
-.michi-mantine .desk-chart-swatch { width: 10px; height: 10px; border-radius: 3px; }
+.michi-mantine .desk-chart-swatch { width: 10px; height: 10px; border-radius: var(--ui-radius-sm); }
 .michi-mantine .desk-chart-legend b { font-weight: 500; color: var(--term-muted); font-variant-numeric: tabular-nums; }
 
 /* Tooltips (Mantine's chart tooltip and Desk's bubble tip) drawn as Michi's floating surface (components/ui/Menu.css). */

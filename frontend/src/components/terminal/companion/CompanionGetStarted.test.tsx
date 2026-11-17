@@ -2,7 +2,7 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { DEFAULT_COMPANION_SETTINGS, type CompanionGetStartedDto, type CompanionSettings, type SpacesFirstRunStatus } from 'michi-shared';
 import { companionSnapshot } from '../../../test/companionFixtures';
-import { CompanionGetStarted, workdaysLabel } from './CompanionGetStarted';
+import { CompanionGetStarted } from './CompanionGetStarted';
 
 const mocks = vi.hoisted(() => ({
   start: vi.fn(),
@@ -70,7 +70,6 @@ describe('CompanionGetStarted', () => {
     const homes = screen.getByRole('checkbox', { name: /Keep workspace homes up to date \(reads the last 30 days\)/ }) as HTMLInputElement;
     const watch = screen.getByRole('checkbox', { name: 'Watch: Michi conversations' }) as HTMLInputElement;
     expect([homes.checked, watch.checked]).toEqual([true, false]);
-    expect(screen.getByText('Morning brief: Weekdays 09:00')).toBeTruthy();
     expect(await screen.findByText(/Learn from conversations: Off/)).toBeTruthy();
     expect(screen.queryByRole('checkbox', { name: /memory/i })).toBeNull();
     expect(mocks.start).not.toHaveBeenCalled();
@@ -129,10 +128,5 @@ describe('CompanionGetStarted', () => {
     render(<CompanionGetStarted getStarted={OFFER} settings={newUserSettings()} name="Michi" />);
     fireEvent.click(screen.getByRole('button', { name: 'Start' }));
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith('Couldn’t start: Workspace homes need scheduled jobs, which are off in this Michi'));
-  });
-
-  it('names the brief days', () => {
-    expect([workdaysLabel([5, 1, 2, 3, 4]), workdaysLabel([0, 1, 2, 3, 4, 5, 6]), workdaysLabel([6, 0]), workdaysLabel([1, 3])])
-      .toEqual(['Weekdays', 'Every day', 'Weekends', 'Mon, Wed']);
   });
 });

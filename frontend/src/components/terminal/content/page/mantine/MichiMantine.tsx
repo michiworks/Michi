@@ -1,4 +1,5 @@
 import React, { useId, useMemo, createContext, useContext } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ActionIcon,
   Button,
@@ -18,6 +19,7 @@ import {
 import './michiMantine.css';
 import { usePagePalette } from '../../../../../state/prefs';
 import { DARK_PALETTES } from '../../../tokens';
+import { DUR, EASE, cssBezier } from '../../../../../motion/tokens';
 const VisualScope = createContext(false);
 
 // Placeholder tuple: Mantine wants hex values here; every variable it derives from them is replaced below.
@@ -93,9 +95,28 @@ const shared: Record<string, string> = {
   '--mantine-color-dark-9': mix('--term-bg', 80, '--term-fg'),
 };
 
+/**
+ * A dropdown (Select's list, the date picker) opens as Michi's menus and
+ * anchored popovers do: it grows from .97 and fades in over DUR.brief, and
+ * fades out over DUR.dismiss (MO-05, TR-12), from the edge at its anchor
+ * (michiMantine.css reads the side it opened on). Mantine's own: the date
+ * picker faded over 150ms both ways, and Select's list opened in one frame.
+ */
+const DROPDOWN_MOTION = {
+  transition: {
+    in: { opacity: 1, transform: 'scale(1)' },
+    out: { opacity: 0, transform: 'scale(.97)' },
+    transitionProperty: 'opacity, transform',
+  },
+  duration: Math.round(DUR.brief * 1000),
+  exitDuration: Math.round(DUR.dismiss * 1000),
+  timingFunction: cssBezier(EASE.out),
+};
+
 const resolver: CSSVariablesResolver = () => ({ variables: {}, light: shared, dark: shared });
 
 const ROOT_ATTR = 'data-michi-mantine';
+const LAYER_ATTR = 'data-michi-mantine-layer';
 
 /** The scheme follows Michi's palette (forceColorScheme); Mantine keeps no choice of its own in localStorage. */
 const noStoredScheme: MantineColorSchemeManager = {
@@ -114,13 +135,18 @@ function themeFor(root: string) {
     fontFamilyMonospace: 'var(--font-mono)',
     headings: { fontFamily: 'var(--ui-font)' },
     fontSizes: FONT_SIZES,
+    // Mantine's own transition timers drop to 0 under the OS setting; the CSS catch-all in index.css
+    // covers both that and Settings › Reduce motion.
+    respectReducedMotion: true,
+    // Its checkboxes, radios and their labels take the pointer, as Michi's own controls do (ST-22).
+    cursorType: 'pointer',
     components: {
       // The variables live on this subtree only, so a portal to <body> would lose them; each page keeps its own.
       Portal: Portal.extend({ defaultProps: { target: root } }),
       // A dropdown that is open takes Esc before the page does (escapeLayers.ts), wherever the focus is.
-      Popover: Popover.extend({ defaultProps: { attributes: { dropdown: { 'data-escape-layer': 'over' } } } }),
+      Popover: Popover.extend({ defaultProps: { attributes: { dropdown: { 'data-escape-layer': 'over' } }, transitionProps: DROPDOWN_MOTION } }),
       // Mantine keeps a closed Select's list mounted (display:none) by default; a list still in the page would take every Esc.
-      Combobox: Combobox.extend({ defaultProps: { keepMounted: false } }),
+      Combobox: Combobox.extend({ defaultProps: { keepMounted: false, transitionProps: DROPDOWN_MOTION } }),
       ActionIcon: ActionIcon.extend({ defaultProps: { size: 'sm' } }),
       Button: Button.extend({ defaultProps: { size: 'xs' } }),
       Checkbox: Checkbox.extend({ defaultProps: { size: 'xs' } }),
@@ -135,15 +161,20 @@ function themeFor(root: string) {
  * Mantine for one subtree of Michi (a Desk page's blocks): its variables and
  * colour-scheme attribute sit on this wrapper, never on :root, and its
  * popovers portal into it. The wrapper takes no box of its own.
+ *
+ * `layerOutside`: popovers portal into a layer of this scope on <body>
+ * instead, for a host that clips or transforms what it holds (the ask card's
+ * sliding track), where a dropdown inside would be cut off.
  */
-export function MichiMantine({ dark: override, children }: { dark?: boolean; children: React.ReactNode }) {
+export function MichiMantine({ dark: override, layerOutside, children }: { dark?: boolean; layerOutside?: boolean; children: React.ReactNode }) {
   const palette = usePagePalette();
   const parent = useContext(VisualScope);
   const dark = override ?? DARK_PALETTES.has(palette);
   const id = useId();
   // React ids hold no quotes or backslashes, so the id needs no escaping inside the quoted value.
   const selector = `[${ROOT_ATTR}="${id}"]`;
-  const theme = useMemo(() => themeFor(selector), [selector]);
+  const layer = `[${LAYER_ATTR}="${id}"]`;
+  const theme = useMemo(() => themeFor(layerOutside ? layer : selector), [layerOutside, layer, selector]);
   if (parent) return <>{children}</>;
   return (
     // `michi-page`: Desk's code finds the page it sits in by this class (its contents block looks for blocks there).
@@ -161,6 +192,11 @@ export function MichiMantine({ dark: override, children }: { dark?: boolean; chi
       >
         <VisualScope.Provider value={true}>{children}</VisualScope.Provider>
       </MantineProvider>
+      {layerOutside && createPortal(
+        // `.michi-mantine` takes the scope's variables; Mantine's scheme rules read the attribute.
+        <div className="michi-mantine" {...{ [LAYER_ATTR]: id }} data-mantine-color-scheme={dark ? 'dark' : 'light'} />,
+        document.body,
+      )}
     </div>
   );
 }

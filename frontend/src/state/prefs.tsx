@@ -1,4 +1,4 @@
-import React, { createContext, use, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PALETTES, type TerminalPalette } from '../components/terminal/tokens';
 import { fetchPrefs, savePrefs } from '../services/api';
 // The level PUT lives with the other prefs calls (W3-F3-review #2): tests that keep a provider
@@ -9,25 +9,21 @@ import {
   isChatNotificationLevel,
   isChatPermissionMode,
   SERVER_PREF_KEYS,
-  VIBRANCY_MATERIALS,
   type ChatNotificationLevel,
   type ChatPermissionSettings,
   type ChatPermissionMode,
   type ServerPrefKey,
 } from 'michi-shared';
-import type { VibrancyMaterial } from '../lib/electronBridge';
 import { SIDEBAR_ROW_STYLES, type SidebarRowStyle } from '../components/terminal/sidebarRowStyle';
 import { normalizePaneWidthMode, type PaneWidthMode } from './paneLayout';
-import { normalizePaneMotion, type PaneMotion } from '../components/terminal/paneMotion';
 
 export type { SidebarRowStyle };
 export type { PaneWidthMode };
 export type { TerminalPalette };
 
+/** A pane's message and transcript spacing (index.css .terminal-pane[data-density]). */
 export type TerminalDensity = 'comfortable' | 'compact' | 'dense';
-/** Vertical density of the LEFT SIDEBAR's rows only. Independent of
- *  `terminalDensity` (which governs message/pane spacing) so the tree can
- *  breathe without loosening chat messages. */
+/** Settings › Density, named by its sidebar rows; it spaces the messages too (state/density.ts). */
 export type SidebarDensity = 'compact' | 'comfortable' | 'airy';
 
 /** Sidebar lens mode: hierarchical tree ('structure') or time-grouped
@@ -40,45 +36,6 @@ export type SidebarView = 'structure' | 'activity';
  *  - 'header'   (02): classic terminal - divider bar with a lowercase
  *    language label. */
 export type CodeBlockStyle = 'hairline' | 'header';
-
-/** Agent block chrome (thinking / tool calls / subagents):
- *  - 'line'     (W2, default): one 28px disclosure line per run, outcome
- *    first ("Merged origin/dev  read 3 files…"), hanging type icon; the same
- *    box live and settled (AgentLineBlocks.tsx).
- *  From the 2026-08 "Agent Blocks Redesign" exploration:
- *  - 'plain'    (1a): bare text rows, ▸/▾ glyphs, 5px dots — the baseline.
- *  - 'card'     (1b): hairline square-corner cards with type icons and a
- *    right-hand status column (✓ / spinner / FAILED).
- *  - 'terminal' (1d): bare text with ❯/✓/× glyph columns, tracking-caps
- *    section headers, dotted leaders; only payloads/subagents get boxes. */
-export type AgentBlockStyle = 'line' | 'plain' | 'card' | 'terminal';
-
-const AGENT_BLOCK_STYLES: ReadonlySet<string> = new Set<AgentBlockStyle>(['line', 'plain', 'card', 'terminal']);
-
-const DEFAULT_AGENT_BLOCK_STYLE: AgentBlockStyle = 'line';
-/** Revision 2 made 'line' the default in place of 'card'. */
-export const AGENT_BLOCK_STYLE_REVISION = 2;
-
-/**
- * The saved agent-block style, migrated once. Settings had no picker when
- * revision 2 shipped, so a 'card' saved before it is the old default rather
- * than a choice: it becomes 'line'. The revision is saved alongside, so a
- * later explicit 'card' (Settings › Appearance › Advanced has a picker again)
- * stays. 'terminal' and 'plain' are kept; anything invalid gets the default.
- */
-export function migrateAgentBlockStyle(saved: { agentBlockStyle?: unknown; agentBlockStyleRevision?: unknown }): {
-  agentBlockStyle: AgentBlockStyle;
-  agentBlockStyleRevision: number;
-} {
-  const style = typeof saved.agentBlockStyle === 'string' && AGENT_BLOCK_STYLES.has(saved.agentBlockStyle)
-    ? saved.agentBlockStyle as AgentBlockStyle
-    : DEFAULT_AGENT_BLOCK_STYLE;
-  const current = typeof saved.agentBlockStyleRevision === 'number' && saved.agentBlockStyleRevision >= AGENT_BLOCK_STYLE_REVISION;
-  return {
-    agentBlockStyle: !current && style === 'card' ? 'line' : style,
-    agentBlockStyleRevision: AGENT_BLOCK_STYLE_REVISION,
-  };
-}
 
 /** UI font presets the user can A/B test. Each preset resolves to a full
  *  CSS font-family stack in the effect that sets `--ui-font`. Order matches
@@ -108,7 +65,6 @@ export interface Prefs {
   /** Show Pages recommendations and custom content on Home. */
   homeRecommendations: boolean;
   linkOpenTarget: 'internal' | 'external';
-  fontFamily: 'sans' | 'serif' | 'mono';
   /** When true, show the agent's streamed reasoning (agent_thought_chunk) + execution plan inside the assistant message. */
   showThoughts: boolean;
   terminalPalette: TerminalPalette;
@@ -131,18 +87,11 @@ export interface Prefs {
   /** Assistant code-block chrome. Drives the `data-code-block` attribute on
    *  <html>; the visual treatment lives in index.css (`.michi-code-*`). */
   codeBlockStyle: CodeBlockStyle;
-  /** Agent block chrome (thinking / tool calls / subagents). Read via
-   *  `useAgentBlockStyle()` so components render 'plain' outside a
-   *  PrefsProvider (tests, isolated mounts). */
-  agentBlockStyle: AgentBlockStyle;
-  /** Migration marker for `agentBlockStyle` (migrateAgentBlockStyle). */
-  agentBlockStyleRevision: number;
   /** When true, long lines inside assistant code/text blocks wrap at the
    *  container edge instead of horizontally scrolling. Drives the
    *  `data-code-wrap` attribute on <html>; the wrap CSS lives in index.css.
    *  Default off (preserves the scroll behaviour). */
   codeWrap: boolean;
-  terminalDensity: TerminalDensity;
   /** When true, draw a 1px hairline between panes (and between caption-row
    *  cells in the topbar). Off = panes butt up against each other with no
    *  visible seam. */
@@ -153,16 +102,10 @@ export interface Prefs {
    *  each passes to usePanelWidth. A panel with no entry uses its own
    *  default width. */
   panelWidths: Partial<Record<string, number>>;
-  /** Row density of the left sidebar (workspace / thread / branch rows + bottom
-   *  nav). Drives the `--sb-*` CSS vars (row padding, font size, workspace group
-   *  gap, timestamp size) set on the sidebar root in Sidebar.tsx. */
+  /** Settings › Density. Drives the sidebar's `--sb-*` CSS vars (row padding,
+   *  font size, workspace group gap, timestamp size; Sidebar.tsx) and, through
+   *  messageDensity (state/density.ts), each pane's `data-density`. */
   sidebarDensity: SidebarDensity;
-  /** Horizontal gutter (px) between the sidebar's content and its left/right
-   *  edges. Added on top of each row's own padding via the `--sb-inset` CSS
-   *  var (0 = current flush look). Honoured by `sidebarRowStyle: 'classic'`
-   *  only — the three card modes pin their own inset so switching between
-   *  them is a controlled comparison of the corners alone. */
-  sidebarInset: number;
   /** Shape of the sidebar's thread/branch rows. `classic` is the historical
    *  full-bleed row with a left accent bar; the other three are the "direction
    *  B" card treatment (state lives on the container, not the text) and differ
@@ -176,21 +119,11 @@ export interface Prefs {
    *  through; without vibrancy it just controls the CSS-glass tint. Drives
    *  --term-sidebar-translucency (a 0..1 alpha) on <html>. */
   sidebarTranslucency: number;
-  /** Sidebar glass blur radius in px (0–40). Drives --term-glass-blur. Overlays
-   *  use their own fixed frost (--term-overlay-* in index.css). */
-  glassBlur: number;
-  /** Sidebar glass backdrop saturation in % (100–220). Drives
-   *  --term-glass-saturate. */
-  glassSaturate: number;
   /** Corner radius in px (0–12, default 4) for floating surfaces (menus,
    *  modals, popovers, toasts) and controls. Drives --ui-radius, plus
    *  --ui-radius-sm (half, for rows/buttons/tooltips inside those surfaces)
    *  and --ui-radius-lg (double, for cards, tables and tab pills). */
   cornerRadius: number;
-  /** Sidebar's native macOS vibrancy material (Electron+macOS only). Lightest →
-   *  densest: under-window < sidebar < menu < hud. Applied via
-   *  window.electron.setVibrancy; ignored on web / Windows / Linux. */
-  sidebarVibrancy: VibrancyMaterial;
   /** Window glass (Electron+macOS only): native vibrancy shows the desktop
    *  through the sidebar. Off makes the window opaque, which stops drawers, ⌘K
    *  and Settings from vanishing for a frame while agents run. Applied via
@@ -207,8 +140,6 @@ export interface Prefs {
   trashTTLDays: number;
   /** How much to dim unfocused panes. 0 = no dimming, 100 = maximum dimming. */
   focusDim: number;
-  /** Height in px of the soft fade at the top of each pane where content scrolls into the title area. 0 disables. */
-  paneTopFadeHeight: number;
   /**
    * When to show OS/toast notifications. 'all' = needs input + finished + failed,
    * 'approval-only' = only when an agent needs input (approvals, questions), 'off' = none.
@@ -218,8 +149,6 @@ export interface Prefs {
   /** Play a short synthesized tone when a notification is shown: one for
    *  "needs input", another for "finished". */
   notificationSounds: boolean;
-  /** Pane entrance/exit style, including quiet fades and frozen-content retraction. */
-  paneSpawnAnimation: PaneMotion;
   /** Default width (px) for new dashboard panes that have no explicit width set. */
   defaultPaneWidth: number;
   /** Width policy for two or more panes; custom per-pane widths take precedence. */
@@ -277,7 +206,6 @@ export interface Prefs {
 export const DEFAULT_PREFS: Prefs = {
   homeRecommendations: true,
   linkOpenTarget: 'internal',
-  fontFamily: 'sans',
   showThoughts: true,
   terminalPalette: 'slate',
   terminalAccentOverrides: {},
@@ -287,33 +215,24 @@ export const DEFAULT_PREFS: Prefs = {
   composerFontSize: 14.5,
   phoneTextSize: 's',
   codeBlockStyle: 'hairline',
-  agentBlockStyle: DEFAULT_AGENT_BLOCK_STYLE,
-  agentBlockStyleRevision: AGENT_BLOCK_STYLE_REVISION,
   codeWrap: false,
-  terminalDensity: 'compact',
   paneRules: true,
   terminalSidebarWidth: 252,
   panelWidths: {},
   sidebarDensity: 'comfortable',
-  sidebarInset: 2,
   sidebarRowStyle: 'square-full',
   showSidebarTimestamps: false,
   sidebarTranslucency: 60,
-  glassBlur: 10,
-  glassSaturate: 130,
   cornerRadius: 4,
-  sidebarVibrancy: 'under-window',
   windowGlass: true,
   sidebarCollapsed: false,
   sidebarView: 'structure',
   trashTTLDays: 30,
   focusDim: 20,
-  paneTopFadeHeight: 30,
   notifications: 'all',
   notificationSounds: true,
   defaultPaneWidth: 600,
   paneWidthMode: 'half',
-  paneSpawnAnimation: 'soft-fade',
   singlePaneContentWidth: 676,
   singlePageMode: false,
   digestEnabled: false,
@@ -342,7 +261,6 @@ export const DEFAULT_PREFS: Prefs = {
 export const PREF_STORAGE = {
   homeRecommendations: 'server',
   linkOpenTarget: 'server',
-  fontFamily: 'local',
   showThoughts: 'local',
   terminalPalette: 'server',
   terminalAccentOverrides: 'server',
@@ -352,22 +270,15 @@ export const PREF_STORAGE = {
   composerFontSize: 'server',
   phoneTextSize: 'server',
   codeBlockStyle: 'server',
-  agentBlockStyle: 'local',
-  agentBlockStyleRevision: 'local',
   codeWrap: 'server',
-  terminalDensity: 'server',
   paneRules: 'server',
   terminalSidebarWidth: 'local',
   panelWidths: 'local',
   sidebarDensity: 'server',
-  sidebarInset: 'server',
   sidebarRowStyle: 'server',
   showSidebarTimestamps: 'server',
   sidebarTranslucency: 'local',
-  glassBlur: 'local',
-  glassSaturate: 'local',
   cornerRadius: 'server',
-  sidebarVibrancy: 'local',
   // Applied to this machine's macOS window; main also keeps it in userData.
   windowGlass: 'local',
   sidebarCollapsed: 'local',
@@ -375,10 +286,8 @@ export const PREF_STORAGE = {
   // A policy over the backend's data: the trash sweep deletes for good by it.
   trashTTLDays: 'server',
   focusDim: 'server',
-  paneTopFadeHeight: 'local',
   notifications: 'server',
   notificationSounds: 'server',
-  paneSpawnAnimation: 'server',
   defaultPaneWidth: 'server',
   paneWidthMode: 'server',
   singlePaneContentWidth: 'server',
@@ -445,7 +354,6 @@ const VALID_PALETTES: ReadonlySet<TerminalPalette> = new Set([
 ]);
 
 const MESSAGE_FONT_OPTS: readonly MessageFont[] = ['Source Serif 4', 'Geist'];
-const TERMINAL_DENSITIES: readonly TerminalDensity[] = ['comfortable', 'compact', 'dense'];
 const NOTIFICATION_LEVELS: readonly Prefs['notifications'][] = ['all', 'approval-only', 'off'];
 
 type PermissionPrefs = Pick<Prefs, 'globalPermissions' | 'permissionMode' | 'permissionApproveForMe'>;
@@ -472,7 +380,6 @@ function normalizePrefs(parsed: Record<string, any>): Prefs {
   delete (merged as { bypassPermissions?: unknown }).bypassPermissions;
   merged.linkOpenTarget = merged.linkOpenTarget === 'external' ? 'external' : 'internal';
   merged.paneWidthMode = normalizePaneWidthMode(merged.paneWidthMode);
-  merged.paneSpawnAnimation = normalizePaneMotion(merged.paneSpawnAnimation);
   delete (merged as { theme?: string }).theme;
   if (!VALID_PALETTES.has(merged.terminalPalette)) {
     merged.terminalPalette = DEFAULT_PREFS.terminalPalette;
@@ -508,9 +415,25 @@ function normalizePrefs(parsed: Record<string, any>): Prefs {
   // Drop legacy userBubbleStyle picker (the variant explorations are gone;
   // D is now the only user-bubble treatment, hardcoded in CSS).
   delete (merged as { userBubbleStyle?: unknown }).userBubbleStyle;
+  // Drop the retired agent-block style picker ('line' is the only chrome).
+  delete (merged as { agentBlockStyle?: unknown }).agentBlockStyle;
+  delete (merged as { agentBlockStyleRevision?: unknown }).agentBlockStyleRevision;
+  // Drop the retired Glass blur and Glass saturation knobs (the sidebar no longer blurs).
+  delete (merged as { glassBlur?: unknown }).glassBlur;
+  delete (merged as { glassSaturate?: unknown }).glassSaturate;
+  // Drop the retired Sidebar edge padding (classic rows keep CLASSIC_INSET).
+  delete (merged as { sidebarInset?: unknown }).sidebarInset;
+  // Drop the retired Pane animation picker (soft-fade is the only entrance).
+  delete (merged as { paneSpawnAnimation?: unknown }).paneSpawnAnimation;
+  // Drop the retired message density: Density (sidebarDensity) spaces the messages too.
+  delete (merged as { terminalDensity?: unknown }).terminalDensity;
+  // Drop the retired Sidebar material: macOS vibrancy keeps main's 'under-window'.
+  delete (merged as { sidebarVibrancy?: unknown }).sidebarVibrancy;
+  // Drop the retired message font family and top fade height (no Settings row since 2026-04 / 2026-09).
+  delete (merged as { fontFamily?: unknown }).fontFamily;
+  delete (merged as { paneTopFadeHeight?: unknown }).paneTopFadeHeight;
   if (!UI_FONT_OPTS.includes(merged.uiFont as UiFont)) merged.uiFont = DEFAULT_PREFS.uiFont;
   if (!MESSAGE_FONT_OPTS.includes(merged.messageFont)) merged.messageFont = DEFAULT_PREFS.messageFont;
-  if (!TERMINAL_DENSITIES.includes(merged.terminalDensity)) merged.terminalDensity = DEFAULT_PREFS.terminalDensity;
   if (!NOTIFICATION_LEVELS.includes(merged.notifications)) merged.notifications = DEFAULT_PREFS.notifications;
   if (typeof merged.messageFontSize !== 'number' || merged.messageFontSize < 11 || merged.messageFontSize > 28) {
     merged.messageFontSize = DEFAULT_PREFS.messageFontSize;
@@ -524,29 +447,16 @@ function normalizePrefs(parsed: Record<string, any>): Prefs {
   if (merged.codeBlockStyle !== 'hairline' && merged.codeBlockStyle !== 'header') {
     merged.codeBlockStyle = DEFAULT_PREFS.codeBlockStyle;
   }
-  Object.assign(merged, migrateAgentBlockStyle(parsed));
   if (typeof merged.codeWrap !== 'boolean') {
     merged.codeWrap = DEFAULT_PREFS.codeWrap;
   }
   merged.enableKiroSidecarTitles = normalizeKiroSidecarTitlesPreference(
     merged.enableKiroSidecarTitles,
   );
-  if (typeof merged.paneTopFadeHeight !== 'number' || merged.paneTopFadeHeight < 0 || merged.paneTopFadeHeight > 80) {
-    merged.paneTopFadeHeight = DEFAULT_PREFS.paneTopFadeHeight;
-  }
   if (typeof merged.sidebarTranslucency !== 'number' || merged.sidebarTranslucency < 0 || merged.sidebarTranslucency > 100) {
     merged.sidebarTranslucency = DEFAULT_PREFS.sidebarTranslucency;
   }
-  if (typeof merged.glassBlur !== 'number' || merged.glassBlur < 0 || merged.glassBlur > 40) {
-    merged.glassBlur = DEFAULT_PREFS.glassBlur;
-  }
-  if (typeof merged.glassSaturate !== 'number' || merged.glassSaturate < 100 || merged.glassSaturate > 220) {
-    merged.glassSaturate = DEFAULT_PREFS.glassSaturate;
-  }
   merged.cornerRadius = normalizeCornerRadius(merged.cornerRadius);
-  if (!VIBRANCY_MATERIALS.includes(merged.sidebarVibrancy)) {
-    merged.sidebarVibrancy = DEFAULT_PREFS.sidebarVibrancy;
-  }
   if (typeof merged.windowGlass !== 'boolean') merged.windowGlass = DEFAULT_PREFS.windowGlass;
   if (
     merged.sidebarDensity !== 'compact' &&
@@ -554,9 +464,6 @@ function normalizePrefs(parsed: Record<string, any>): Prefs {
     merged.sidebarDensity !== 'airy'
   ) {
     merged.sidebarDensity = DEFAULT_PREFS.sidebarDensity;
-  }
-  if (typeof merged.sidebarInset !== 'number' || merged.sidebarInset < 0 || merged.sidebarInset > 24) {
-    merged.sidebarInset = DEFAULT_PREFS.sidebarInset;
   }
   merged.panelWidths = normalizePanelWidths(merged.panelWidths);
   // Drop the floating ⌘J card's size: the docked Companion panel keeps its own width.
@@ -726,9 +633,6 @@ const PrefsContext = createContext<PrefsContextValue | null>(null);
 // React 19 propagates an outer context change through nested providers of the
 // same context, so sidebar contents read their shielded value from a separate one.
 const SidebarContentPrefsContext = createContext<PrefsContextValue | null>(null);
-// Every agent block reads its style. A context of that one value keeps other
-// pref writes (a sidebar resize, a toggle) from re-rendering every block.
-const AgentBlockStyleContext = createContext<AgentBlockStyle | null>(null);
 
 /** Inside the sidebar shield, rows never subscribe to the outer prefs context. */
 function usePrefsContext(): PrefsContextValue | null {
@@ -922,14 +826,6 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    // The sidebar's glass knobs. Overlays (.term-glass) use their own fixed frost.
-    const s = document.documentElement.style;
-    s.setProperty('--term-glass-blur', `${prefs.glassBlur}px`);
-    s.setProperty('--term-glass-saturate', `${prefs.glassSaturate}%`);
-  }, [prefs.glassBlur, prefs.glassSaturate]);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
     const s = document.documentElement.style;
     for (const [name, value] of Object.entries(cornerRadiusVars(prefs.cornerRadius))) s.setProperty(name, value);
   }, [prefs.cornerRadius]);
@@ -1030,20 +926,14 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       composerFontSize: DEFAULT_PREFS.composerFontSize,
       phoneTextSize: DEFAULT_PREFS.phoneTextSize,
       codeBlockStyle: DEFAULT_PREFS.codeBlockStyle,
-      agentBlockStyle: DEFAULT_PREFS.agentBlockStyle,
-      agentBlockStyleRevision: DEFAULT_PREFS.agentBlockStyleRevision,
       codeWrap: DEFAULT_PREFS.codeWrap,
-      terminalDensity: DEFAULT_PREFS.terminalDensity,
       paneRules: DEFAULT_PREFS.paneRules,
       paneWidthMode: DEFAULT_PREFS.paneWidthMode,
-      paneSpawnAnimation: DEFAULT_PREFS.paneSpawnAnimation,
       defaultPaneWidth: DEFAULT_PREFS.defaultPaneWidth,
       terminalSidebarWidth: DEFAULT_PREFS.terminalSidebarWidth,
       panelWidths: {},
       sidebarDensity: DEFAULT_PREFS.sidebarDensity,
-      sidebarInset: DEFAULT_PREFS.sidebarInset,
       sidebarRowStyle: DEFAULT_PREFS.sidebarRowStyle,
-      paneTopFadeHeight: DEFAULT_PREFS.paneTopFadeHeight,
       cornerRadius: DEFAULT_PREFS.cornerRadius,
       reduceMotion: DEFAULT_PREFS.reduceMotion,
     }));
@@ -1055,9 +945,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <PrefsContext.Provider value={value}>
-      <AgentBlockStyleContext.Provider value={prefs.agentBlockStyle}>{children}</AgentBlockStyleContext.Provider>
-    </PrefsContext.Provider>
+    <PrefsContext.Provider value={value}>{children}</PrefsContext.Provider>
   );
 }
 
@@ -1094,19 +982,6 @@ const SidebarContentPrefs = React.memo(function SidebarContentPrefs({
 export function SidebarContentPrefsProvider({ children }: { children: React.ReactNode }) {
   const value = usePrefs();
   return <SidebarContentPrefs value={value}>{children}</SidebarContentPrefs>;
-}
-
-/** Forces a specific agent-block style regardless of prefs — used by the dev
- *  specimen page to render every variant on one screen. */
-export const AgentBlockStyleOverride = createContext<AgentBlockStyle | null>(null);
-
-/** Active agent-block variant. Unlike usePrefs this never throws: outside a
- *  PrefsProvider (unit tests mounting ToolCallGroup / MessageBlock directly)
- *  it falls back to 'plain', keeping the baseline render path. */
-export function useAgentBlockStyle(): AgentBlockStyle {
-  const override = useContext(AgentBlockStyleOverride);
-  const style = useContext(AgentBlockStyleContext);
-  return override ?? style ?? 'plain';
 }
 
 /** A resizable drawer's or side column's saved width (e.g. for DrawerShell's

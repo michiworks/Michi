@@ -50,15 +50,14 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
       { label: 'Name', description: 'What you call it on its button, in messages, notifications and Settings.', keywords: [...AGENT_WORDS, 'rename', 'display name'] },
       { label: name, description: 'On or off. Off stops check-ins, Pages upkeep and the automatic checks of your sources.',
         keywords: [...AGENT_WORDS, ...UPKEEP_WORDS, 'turn on', 'turn off', 'enable', 'disable', 'pause', 'resume', 'stop', 'start', 'quiet'] },
+      { label: 'Auto-continue your chats', description: 'Carry on a turn that stopped at a limit or failed for a moment.',
+        keywords: ['auto-continue', 'continue', 'step limit', 'max tokens', 'retry'] },
     ]),
     ...entries('companion', 'Model', [
       { label: 'Conversations', description: 'Same as Settings › Runtime & model.', keywords: [...AGENT_WORDS, 'runtime', 'model'] },
       { label: 'Background work', description: 'What check-ins and Pages upkeep run on: the same as conversations, or a runtime, model and reasoning of their own.', keywords: [...AGENT_WORDS, ...UPKEEP_WORDS, 'runtime', 'model', 'custom', 'reasoning', 'effort'] },
     ]),
     ...entries('companion', 'Watching', [
-    ]),
-    ...entries('companion', 'Updates', [
-      { label: 'Morning brief', description: 'A short brief of what matters today, on the days you choose.', keywords: [...AGENT_WORDS, 'brief', 'daily', 'pulse', 'check-in', 'weekdays', 'workdays'] },
     ]),
     ...entries('companion', 'Instructions', [
       { label: 'Your rules', description: 'What it must always follow.', keywords: [...AGENT_WORDS, 'instructions', 'rules'] },
@@ -74,11 +73,8 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
     ...entries('memory', 'Memory', [
       { label: 'Use memory', description: 'On or off. Michi remembers what you tell it.', keywords: ['remember', 'memories', 'forget', 'turn off'] },
       { label: 'Learn from conversations', description: 'Save what your finished conversations say about you, in the background. Off by default.', keywords: ['automatic memory', 'extraction', 'background', 'learn', 'memories'] },
+      { label: 'Your memories', description: 'What agents remember, by topic: search, add, edit, move or delete memories.', keywords: ['remember', 'preferences', 'conventions', 'forget', 'topics', 'about the user', 'profile', 'summary', 'rebuild', 'global', 'workspace', 'imported'] },
       { label: 'Delete all memories', description: 'Every saved memory and About the user. Conversations stay.', keywords: ['reset', 'clear', 'erase', 'forget everything'] },
-    ]),
-    ...entries('memory', undefined, [
-      { label: 'About the user', description: 'The summary Michi writes from its memories of you, and the memories behind each line.', keywords: ['profile', 'summary', 'rebuild'] },
-      { label: 'Saved memories', description: 'Search, edit, delete or change the scope of what agents remember.', keywords: ['remember', 'preferences', 'conventions', 'forget', 'global', 'workspace', 'imported'] },
     ]),
     ...entries('skills', undefined, [
       { label: 'Library', description: 'Create, edit, rename, turn off or delete your own skills.',
@@ -96,13 +92,14 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
       { label: 'Accent', description: 'The highlight color of the current palette.', keywords: ['accent hue', 'color', 'colour', 'rust', 'theme.accent'] },
     ]),
     ...entries('appearance', 'Reading', [
-      { label: 'Density', description: 'Row height and spacing in the sidebar.', keywords: ['sidebar density', 'compact', 'comfortable', 'airy', 'theme.sidebarDensity'] },
+      { label: 'Density', description: 'Spacing of sidebar rows and messages.', keywords: ['sidebar density', 'message density', 'spacing', 'compact', 'comfortable', 'airy', 'theme.sidebarDensity'] },
       { label: 'Text size', description: 'Message text, in pixels.', keywords: ['font size', 'message size', 'bigger', 'smaller', 'theme.messageFontSize'] },
+      { label: 'Show thoughts', description: 'Thinking and plan blocks in replies, on this device.', keywords: ['thinking', 'reasoning', 'plan', 'thoughts'] },
     ]),
     ...entries('appearance', 'Panes', [
       { label: 'Dim unfocused panes', description: 'Lowers the other panes when two or more are open.', keywords: ['dim', 'focus dimming', 'unfocused', 'panes', 'theme.focusDim'] },
       { label: 'Single-page mode', description: 'One pane at a time; the thread’s other panes become tabs.', keywords: ['tabs', 'panes', 'layout.singlePage'] },
-      { label: 'Reduce motion', description: 'Turns off drawer slides and pane transitions.', keywords: ['animation', 'motion', 'a11y.reduceMotion', 'accessibility'] },
+      { label: 'Reduce motion', description: 'Turns off drawer slides and pane transitions, and shows streamed text as it arrives.', keywords: ['animation', 'motion', 'a11y.reduceMotion', 'accessibility'] },
     ]),
     ...entries('appearance', 'Home', [
       { label: 'Pages recommendations', description: 'Pages recommendations or your custom Home page with the composer.', keywords: ['home', 'recommendations', 'suggestions', 'composer'] },
@@ -116,27 +113,20 @@ export function settingsSearchIndex(name: string): SettingsSearchEntry[] {
       { label: 'Composer size', keywords: ['font size', 'text size', 'theme.composerFontSize'] },
       { label: 'Code blocks', description: 'Hairline or Header.', keywords: ['code block style', 'language label', 'hairline', 'header', 'theme.codeBlockStyle'] },
       { label: 'Code wrap', description: 'Wrap long lines in code blocks instead of scrolling sideways.', keywords: ['code', 'wrap', 'theme.codeWrap'] },
-      { label: 'Agent blocks', description: 'How thinking, tool calls and subagents show: Line, Plain, Card or Terminal.',
-        keywords: ['agent block style', 'tool calls', 'thinking', 'subagents', 'line', 'plain', 'card', 'terminal', 'theme.agentBlockStyle'] },
       { label: 'Corner radius', keywords: ['rounded', 'radius', 'theme.cornerRadius'] },
       { label: 'Sidebar row style', keywords: ['sidebar', 'cards', 'theme.sidebarRowStyle'] },
-      { label: 'Sidebar edge padding', keywords: ['sidebar', 'padding', 'inset', 'theme.sidebarInset'] },
       { label: 'Sidebar timestamps', description: 'Show last-active time on thread rows.', keywords: ['sidebar', 'time', 'theme.sidebarTimestamps'] },
       { label: 'Window glass', description: 'See the desktop through the sidebar (macOS app). Turn off if drawers or ⌘K flicker.', keywords: ['vibrancy', 'transparent', 'translucent', 'see-through', 'flicker', 'theme.windowGlass'], vibrancy: true },
       { label: 'Sidebar glass', description: 'How much shows through the sidebar.', keywords: ['glass', 'translucency', 'transparent', 'opacity', 'theme.sidebarTranslucency'] },
-      { label: 'Glass blur', description: 'Blur behind the sidebar.', keywords: ['glass', 'blur', 'frost', 'theme.glassBlur'] },
-      { label: 'Glass saturation', description: 'How vivid what shows through the sidebar is.', keywords: ['glass', 'saturation', 'saturate', 'theme.glassSaturate'] },
-      { label: 'Sidebar material', description: 'How dense the macOS frost behind the sidebar is.', keywords: ['glass', 'vibrancy', 'frost', 'material', 'theme.sidebarVibrancy'], vibrancy: true },
-      { label: 'Glass defaults', description: 'Put the glass settings back to the tuned look.', keywords: ['glass', 'reset', 'default'] },
+      { label: 'Glass defaults', description: 'Put Sidebar glass back to the tuned look.', keywords: ['glass', 'reset', 'default'] },
       { label: 'Dim strength', description: 'How much Dim unfocused panes lowers the other panes.', keywords: ['dim', 'focus dimming', 'unfocused', 'strength', 'theme.focusDim'] },
       { label: 'Pane width mode', keywords: ['panes', 'width', 'layout.paneWidthMode'] },
-      { label: 'Pane animation', description: 'How a pane enters and leaves.', keywords: ['motion', 'animation', 'motion.spawn'] },
       { label: 'Default pane width', keywords: ['panes', 'width', 'layout.paneWidth'] },
       { label: 'Single-pane reading width', keywords: ['reading', 'width', 'layout.singlePaneWidth'] },
       { label: 'Chrome rules', description: 'Hairline rules between panes.', keywords: ['lines', 'borders', 'theme.rules'] },
     ]),
     ...entries('notifications', undefined, [
-      { label: 'Notify me', description: 'One level for every notification: all, only when something needs you, or off.', keywords: ['notifications', 'notify', 'alerts', 'approval', 'questions', 'needs you', 'brief', ...AGENT_WORDS] },
+      { label: 'Notify me', description: 'One level for every notification: all, only when something needs you, or off.', keywords: ['notifications', 'notify', 'alerts', 'approval', 'questions', 'needs you', ...AGENT_WORDS] },
       { label: 'Sounds', description: 'A short tone when an agent needs you or finishes.', keywords: ['notification sounds', 'sound', 'audio', 'chime', 'tone', 'beep'] },
     ]),
     ...entries('notifications', WINDOWS_CLOSED_TITLE, [

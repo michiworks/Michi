@@ -273,7 +273,7 @@ for (const state of ['completed', 'interrupted', 'running'] as const) {
       await expect(page.getByText('Partial live text. Saved complete reply.', { exact: true })).toBeVisible();
       await expect(page.getByTestId('error-tail-retry')).toHaveCount(0);
     } else if (state === 'interrupted') {
-      await expect(page.getByTestId('error-tail-retry')).toHaveText('▶ Resume');
+      await expect(page.getByTestId('error-tail-retry')).toHaveText('Resume');
       await expect(page.getByText('Turn interrupted')).toBeVisible();
       await expect(page.getByText('Check original turn')).toHaveCount(0);
       await expect(page.getByText('Partial live text.', { exact: true })).toBeVisible();

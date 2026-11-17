@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => {
 });
 vi.mock('../../services/api/persistence', () => ({ fetchWorkspaceStructure: mocks.workspace, fetchTreeMessagePage: mocks.messages }));
 vi.mock('../chatStore', () => ({
-  useChatNode: () => mocks.node,
+  useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector(mocks.node ? { [mocks.node.nodeId]: mocks.node } : {}),
   useChatNodeReader: () => mocks.readNode,
   useChatProjects: () => ({ projects: [] }),
   useChatActions: () => ({ installWorkspaceSnapshot: mocks.install, dispatch: mocks.dispatch }),

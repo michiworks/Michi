@@ -1,30 +1,36 @@
 /* Spaces Home, workspace homes and Space pages share a broad document
-   column. Blocks use Michi's document styles, with theme tokens throughout. */
+   column, which spaces.css lays out with their header. Blocks use Michi's
+   document styles, with theme tokens throughout. */
 
-.area-settings.spaces-home .spaces-home__doc {
-  display: flex; flex-direction: column; gap: 22px;
-  width: 100%; max-width: 1552px; padding: 44px clamp(24px, 4%, 56px) 120px;
-  /* Keep select / add / drag controls inside the page, clear of the sidebar resize handle. */
-  padding-inline-start: 72px;
+/* A page or workspace home whose skeleton was on screen arrives as Home does
+   (homeCards.css, home-arrive and home-leave): its content fades in rising 6px
+   while the skeleton fades out beneath it, in a copy of the column laid over
+   the real one. What both show ([data-still]) stays put. */
+.area-settings.spaces-home[data-arriving] { position: relative; }
+.spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > :not(.spaces-home__head),
+.spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > .spaces-home__head > :not([data-still]) {
+  animation: home-arrive var(--t-decay) var(--t-ease) both;
 }
-.spaces-home__head { display: flex; flex-direction: column; gap: 8px; }
-.spaces-home__head .area-settings__kicker { margin: 0; }
-.spaces-home__title-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.spaces-home__title {
-  margin: 0;
-  color: var(--term-fg);
-  font-size: var(--fs-5xl);
-  font-weight: 650;
-  line-height: 1.2;
-  letter-spacing: var(--ls-tight);
-  overflow-wrap: anywhere;
+.area-settings.spaces-home .spaces-arrival-ghost {
+  position: absolute;
+  inset: 0 0 auto;
+  pointer-events: none;
+  animation: home-leave var(--t-decay) var(--t-ease) forwards;
 }
+.spaces-arrival-ghost [data-still] { visibility: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  .spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > :not(.spaces-home__head),
+  .spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > .spaces-home__head > :not([data-still]) { animation: none; }
+  .area-settings.spaces-home .spaces-arrival-ghost { display: none; }
+}
+:root[data-reduce-motion='on'] .spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > :not(.spaces-home__head),
+:root[data-reduce-motion='on'] .spaces-home[data-arriving] > .spaces-home__doc:not(.spaces-arrival-ghost) > .spaces-home__head > :not([data-still]) { animation: none; }
+:root[data-reduce-motion='on'] .area-settings.spaces-home .spaces-arrival-ghost { display: none; }
 .spaces-home__updated { margin: 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
-.spaces-home__date { margin-left: 6px; color: var(--term-muted); font-size: var(--fs-lg); }
 .spaces-home__update { gap: 6px; }
 .spaces-home-spacer { flex: 1; }
 .spaces-home-muted { margin: 0; color: var(--term-muted); font-size: var(--fs-md); }
-.spaces-home-accent { color: var(--term-accent); }
+.spaces-home-accent { color: var(--term-accent-text); }
 .spaces-home-link {
   padding: 0;
   border: 0;
@@ -37,7 +43,7 @@
   text-underline-offset: 3px;
 }
 .spaces-home-link:hover { color: var(--term-fg); }
-.spaces-home-link:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
+.spaces-home-link:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* Meta agent status line */
 .spaces-home-status { display: flex; flex-direction: column; gap: 8px; color: var(--term-mid); font-size: var(--fs-lg); }
@@ -53,10 +59,10 @@
 .spaces-home-status__dot[data-tone='warn'] { background: var(--term-select); }
 .spaces-home-status__error { color: var(--term-danger-text); }
 .spaces-home-status__bar { max-width: 520px; height: 4px; overflow: hidden; border-radius: var(--ui-radius-pill); background: var(--term-alt); }
-.spaces-home-status__bar > i { display: block; height: 100%; background: var(--term-accent); transition: width var(--t-quick) ease; }
+.spaces-home-status__bar > i { display: block; height: 100%; background: var(--term-accent); transform-origin: left; transition: transform var(--t-quick) ease; }
 .spaces-home-status__list {
   display: flex; flex-direction: column; gap: 6px; max-width: 620px; margin: 2px 0 0; padding: 10px 14px; list-style: none;
-  border: 1px solid var(--term-line); border-radius: var(--ui-radius-lg); background: var(--term-surface);
+  border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: var(--term-surface);
 }
 .spaces-home-status__list li { display: grid; grid-template-columns: 16px 130px 1fr auto; gap: 8px; align-items: center; color: var(--term-fg); font-size: var(--fs-lg); line-height: 1.45; }
 .spaces-home-status__list li.is-dim { color: var(--term-faint); }
@@ -101,14 +107,14 @@
 .spaces-home-row__age { color: var(--term-select); }
 .spaces-home-row__ws { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .spaces-home-row__ws:hover { color: var(--term-fg); text-decoration: underline; text-underline-offset: 2px; }
-.spaces-home-row__ws:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+.spaces-home-row__ws:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 /* A table row naming a workspace opens that workspace's home. */
 .spaces-home tr[data-home-workspace] { cursor: pointer; }
 .spaces-home tr[data-home-workspace]:hover td:first-child { text-decoration: underline; text-underline-offset: 2px; }
 /* Its first cell starts with the workspace's dot from the Spaces sidebar (.area-side__dot, same tones). */
 .spaces-home tr[data-home-tone] > td:first-child { font-weight: 500; }
 .spaces-home tr[data-home-tone] > td:first-child::before {
-  content: ''; display: inline-block; width: 7px; height: 7px; margin: 0 8px 1px 0; border-radius: 50%;
+  content: ''; display: inline-block; width: 7px; height: 7px; margin: 0 8px 1px 0; border-radius: var(--ui-radius-pill);
   background: var(--term-line-s); vertical-align: middle;
 }
 /* Conversation text reads at the message body size, as it does in the conversation itself. */
@@ -120,7 +126,7 @@
 .spaces-home-row__more .ui-btn { display: inline-flex; align-items: center; justify-content: center; padding: 5px 7px; }
 /* With a pointer they appear on the row's hover or focus; the space stays reserved so Continue does not shift. */
 @media (hover: hover) {
-  .spaces-home-row__more { opacity: 0; transition: opacity 120ms ease; }
+  .spaces-home-row__more { opacity: 0; transition: opacity var(--t-quick) var(--t-ease); }
   .spaces-home-row:hover .spaces-home-row__more,
   .spaces-home-row:focus-within .spaces-home-row__more { opacity: 1; }
 }
@@ -139,39 +145,29 @@
 .spaces-home-feed__row[data-fresh] {
   background: transparent;
 }
-.spaces-home-feed__row:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+.spaces-home-feed__row:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .spaces-home-feed__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spaces-home-feed__text b { font-weight: 600; }
 .spaces-home-feed__age { margin-left: auto; flex: none; color: var(--term-muted); font-size: var(--fs-md); white-space: nowrap; }
 
 /* Page blocks inside a home: the lead paragraph reads as the page's summary */
 .spaces-home-blocks { display: contents; }
-.spaces-home .michi-doc-blocks { gap: 22px; }
-/* The lead is read, not chrome: its frame's padding is taken back so it sits on the page's rhythm.
-   20px is Michi's level-1 page heading (.michi-doc-h2[data-level='1']); the type scale has no step there. */
+.spaces-home .michi-doc-blocks { --doc-gap: 22px; }
+/* The lead is read, not chrome: its frame's padding is taken back so it sits on the page's rhythm,
+   at the size of Michi's level-1 page heading (.michi-doc-h2[data-level='1']). */
 .spaces-home [data-segment='lead'] > .michi-doc-blocks { margin: -10px 0; }
 .spaces-home [data-segment='lead'] .michi-doc-block:first-child [data-michi-block='markdown'] :is(p, li) {
   color: var(--term-fg);
-  font-size: 20px;
+  font-size: var(--fs-4xl);
   line-height: 1.55;
 }
 /* A home is read like a conversation: its block text uses the message body size, paragraphs in full colour.
    List items are entries (a step, an event), so they sit closer inside and further apart. */
-.spaces-home .michi-doc-block [data-michi-block='markdown'] :is(p, li),
-.spaces-home .michi-doc-callout p { font-size: var(--message-body-size-base); line-height: 1.7; }
+.spaces-home .michi-doc-block [data-michi-block='markdown'] :is(p, li) { font-size: var(--message-body-size-base); line-height: 1.7; }
+.spaces-home .michi-doc-callout { --callout-lh: 1.7; font-size: var(--message-body-size-base); }
 .spaces-home .michi-doc-block [data-michi-block='markdown'] p { color: var(--term-fg); }
 .spaces-home .michi-doc-block [data-michi-block='markdown'] li { line-height: 1.5; }
 .spaces-home .michi-doc-block [data-michi-block='markdown'] li + li { margin-top: 14px; }
-/* Notes follow the document rhythm without a repeated edge marker. */
-.spaces-home .michi-doc-callout {
-  gap: 8px; padding: 4px 0; border: 0;
-  border-radius: 0; background: transparent;
-}
-.spaces-home .michi-doc-callout[data-tone] { background: transparent; border-color: var(--tone, var(--term-line-s)); }
-.spaces-home .michi-doc-callout > .michi-doc-caption {
-  position: static; margin: 0; color: var(--term-fg); font-size: var(--fs-2xl);
-  font-weight: 600; line-height: 1.4; letter-spacing: normal; text-transform: none;
-}
 /* Titles inside a home's blocks match the home's own section titles. */
 .spaces-home .michi-doc-block [data-michi-block='markdown'] :is(h2, h3, h4) {
   margin: 0 0 6px;
@@ -218,7 +214,7 @@
   color: var(--term-fg); font: inherit; text-align: left; cursor: pointer;
 }
 .spaces-home-space-card:hover { border-color: var(--term-line-s); }
-.spaces-home-space-card:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 1px; }
+.spaces-home-space-card:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .spaces-home-space-card__title { display: flex; align-items: center; gap: 7px; font-size: var(--fs-xl); font-weight: 600; }
 .spaces-home-space-card__title > svg { color: var(--term-faint); }
 .spaces-home-space-card__sub { color: var(--term-muted); font-size: var(--fs-md); }
@@ -231,7 +227,7 @@
 }
 .spaces-home-threads__row > svg { flex: none; color: var(--term-faint); }
 .spaces-home-threads__row:hover { background: color-mix(in srgb, var(--term-alt) 50%, transparent); }
-.spaces-home-threads__row:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
+.spaces-home-threads__row:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .spaces-home-threads__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spaces-home-threads__runtime { color: var(--term-mid); border-color: var(--term-line); }
 
@@ -244,8 +240,6 @@
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
   /* The page only scrolls down: anything a little too wide must not let a touch drag it sideways. */
   .area-settings.spaces-home { overflow-x: hidden; overscroll-behavior-x: none; }
-  .area-settings.spaces-home .spaces-home__doc { padding: 24px 16px 120px; }
-  .spaces-home__title-row { flex-wrap: wrap; row-gap: 4px; }
   .spaces-home__doc .michi-doc-block__margin {
     top: -20px;
     right: auto;

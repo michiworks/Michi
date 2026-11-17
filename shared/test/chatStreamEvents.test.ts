@@ -50,3 +50,21 @@ describe('turn_start for a posted check-in (DESIGN-v2 §3.3, W0 review #1)', () 
     assert.deepEqual(parseChatStreamEvent(eventLine!.slice('event: '.length), dataLine!.slice('data: '.length)), frame);
   });
 });
+
+describe('user input with form fields', () => {
+  test('a question keeps a field that parses and drops one that does not; an answer keeps a typed value', () => {
+    const nights = { key: 'n', label: 'Nights', type: 'number', min: 1, unit: 'nights' };
+    const request = parseChatStreamEvent('user_input_request', JSON.stringify({ requestId: 1, questions: [
+      { question: 'Nights?', options: [], multiSelect: false, field: nights },
+      { question: 'Broken?', options: [], multiSelect: false, field: { key: 'b', label: 'B', type: 'slider' } },
+    ] }));
+    assert.ok(request && request.event === 'user_input_request');
+    assert.deepEqual(request.data.questions.map((q) => q.field), [nights, undefined]);
+    const resolved = parseChatStreamEvent('user_input_resolved', JSON.stringify({ requestId: 1, answers: [
+      { question: 'Nights?', answer: '3 nights', value: 3 },
+      { question: 'Broken?', answer: 'x', value: { not: 'a value' } },
+    ] }));
+    assert.ok(resolved && resolved.event === 'user_input_resolved');
+    assert.deepEqual(resolved.data.answers, [{ question: 'Nights?', answer: '3 nights', value: 3 }, { question: 'Broken?', answer: 'x' }]);
+  });
+});

@@ -20,7 +20,7 @@ const chat = vi.hoisted(() => ({
 }));
 vi.mock('../../../state/chatStore', () => ({
   useOptionalChatActions: () => chat.actions,
-  useChatNode: (nodeId: string) => chat.nodes[nodeId],
+  useStructuralSelector: (selector: (nodes: typeof chat.nodes) => unknown) => selector(chat.nodes),
 }));
 /** Settings › Permissions on the local backend. */
 const prefs = vi.hoisted(() => ({ globalPermissions: false, permissionMode: 'ask' as 'ask' | 'trust' | 'yolo', permissionApproveForMe: false }));
@@ -301,7 +301,7 @@ describe('MultiModelRunCard: progress', () => {
     expect(onOpenDrawer).toHaveBeenCalledTimes(2);
   });
 
-  // MessageBlock's TAP_CONTROL: a tap whose hover revealed the message's
+  // index.css's touch rule for the message actions: a tap whose hover revealed the message's
   // actions would be dropped by WebKit, so the drawer opened on the second tap.
   it('marks the card a tap target, so a tap anywhere on it opens the drawer, not the message actions', () => {
     const onOpenDrawer = vi.fn();
@@ -555,8 +555,8 @@ describe('MultiModelRunCard: ended runs', () => {
       const [answer, review, synthesis] = [...card.querySelectorAll('.steps > .step')];
       expect(answer.querySelector('.list2')).toBeNull();
       expect(review.querySelector('.list2')).not.toBeNull();
-      expect(synthesis.textContent).toContain('✓ Written below ↓');
-      expect([...card.querySelectorAll('.step > .n')].map((n) => n.textContent)).toEqual(['✓', '✓', '✓']);
+      expect(synthesis.textContent).toContain(' Written below ↓');
+      expect([...card.querySelectorAll('.step > .n')].map((n) => n.className)).toEqual(['n ok', 'n ok', 'n ok']);
       // It scrolls the chat to the synthesis, and does not open the drawer.
       fireEvent.click(within(synthesis as HTMLElement).getByRole('button', { name: 'Written below ↓' }));
       expect(scrolls).toEqual([{ nodeId: 'caller', messageId: 'self-caller-syn' }]);
@@ -571,7 +571,7 @@ describe('MultiModelRunCard: ended runs', () => {
       phase: 'cancelled', startedAt: NOW - 60_000,
       threads: [sol({ steps: steps(['cancelled', 'pending']) }), fable({ steps: steps(['stopped', 'pending']) })],
     }), { status: 'cancelled', statusDetail: 'Stopped' }));
-    expect([...card.querySelectorAll('.step > .n')].map((n) => `${n.className}:${n.textContent}`)).toEqual(['n stop:■', 'n idle:2', 'n idle:3']);
+    expect([...card.querySelectorAll('.step > .n')].map((n) => `${n.className}:${n.textContent}`)).toEqual(['n stop:', 'n idle:2', 'n idle:3']);
     const synthesis = [...card.querySelectorAll('.steps > .step')].at(-1) as HTMLElement;
     expect(synthesis.textContent).toBe('3SynthesisNot written: the run was stopped');
     expect(card.querySelector('.status')?.textContent).toBe('StoppedRetry');
@@ -587,7 +587,7 @@ describe('MultiModelRunCard: ended runs', () => {
     })));
     expect(screen.getByTestId('mm-chip').textContent).toBe('Adding 1 late answer12s');
     const synthesis = () => [...screen.getByTestId('multi-model-card').querySelectorAll('.steps > .step')].at(-1) as HTMLElement;
-    expect(synthesis().textContent).toContain('✓ Written below ↓');
+    expect(synthesis().textContent).toContain(' Written below ↓');
     expect(card.querySelector('.status')).toBeNull();
     const after = (lastAddendumStatus: 'completed' | 'failed', statusDetail?: string) => rerender(
       <WorkflowDomainProvider api={api()}>

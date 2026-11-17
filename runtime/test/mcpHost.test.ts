@@ -11,6 +11,7 @@ import {
   type McpSlotHandle,
   type SessionToolSink,
 } from '../src/mcp-host';
+import { askUserAnswers, parseAskUserQuestions } from '../src/mcp-host/askUser';
 
 type Binding = { workspace: string };
 type Event = { type: string; payload?: unknown };
@@ -612,6 +613,54 @@ test('ask_user forwards normalized questions to sink.askUser and returns the ans
   const invalid = await call(client, 'ask_user', { questions: [] });
   assert.equal(invalid.isError, true);
   assert.equal(asked.length, 2);
+});
+
+test('ask_user asks a field question in place of options and returns its typed value', async (t) => {
+  const { host } = await startHost(t);
+  const asked: unknown[] = [];
+  const slot = slotOn(host, 'a', 'w1', {
+    builtins: { askUser: true },
+    sink: makeSink({ askUser: async (questions) => { asked.push(questions); return { 'Nights?': 3, 'Leave at?': null }; } }),
+  });
+  const client = await connect(t, slot.endpoint().url);
+  const [tool] = (await client.listTools()).tools;
+  const question = (tool.inputSchema.properties as any).questions.items;
+  assert.deepEqual(question.required, ['question']);
+  assert.deepEqual(question.properties.field.properties.type.enum, ['text', 'textarea', 'number', 'slider', 'select', 'multiselect', 'date', 'time', 'checkbox']);
+
+  const nights = { key: 'nights', label: 'Nights', type: 'slider', min: 1, max: 14, unit: 'nights' };
+  const answered = await call(client, 'ask_user', { questions: [
+    // Options sent with a field are ignored.
+    { question: 'Nights?', field: nights, options: [{ label: 'x' }] },
+    { question: 'Leave at?', field: { key: 'at', label: 'Time', type: 'time' } },
+  ] });
+  assert.deepEqual(JSON.parse(textOf(answered)), { answers: { 'Nights?': 3, 'Leave at?': null } });
+  assert.deepEqual(asked, [[
+    { question: 'Nights?', options: [], multiSelect: false, field: nights },
+    { question: 'Leave at?', options: [], multiSelect: false, field: { key: 'at', label: 'Time', type: 'time' } },
+  ]]);
+
+  const invalid = await call(client, 'ask_user', { questions: [{ question: 'Nights?', field: { ...nights, max: undefined } }] });
+  assert.equal(invalid.isError, true);
+  assert.equal(textOf(invalid), 'questions[0].field.max breaks the rule "a slider needs min and max".');
+  assert.equal(asked.length, 1);
+});
+
+test('ask_user still needs 2-4 options for a question without a field', () => {
+  assert.equal(parseAskUserQuestions([{ question: 'Q?' }]), 'questions[0].options must list 2-4 options.');
+  assert.equal(parseAskUserQuestions([{ question: 'Q?', field: { key: 'k', label: 'K', type: 'select' } }]),
+    'questions[0].field.options breaks the rule "a select or multiselect field needs options".');
+});
+
+test('ask_user answers carry a typed value only for a field question', () => {
+  const questions = [{ question: 'Nights?', field: { key: 'n', label: 'N', type: 'number' } }, { question: 'Allow?' }];
+  assert.deepEqual(askUserAnswers(questions, [
+    { question: 'Nights?', answer: '3 nights', value: 3 },
+    // A value the card sent for a choice question is not taken: approvals read text.
+    { question: 'Allow?', answer: 'Allow', value: true },
+  ]), { 'Nights?': 3, 'Allow?': 'Allow' });
+  // A card that cannot draw fields answers with what was typed.
+  assert.deepEqual(askUserAnswers(questions, [{ question: 'Nights?', answer: 'three' }]), { 'Nights?': 'three' });
 });
 
 test('the structured result tool reports submit success and failure', async (t) => {

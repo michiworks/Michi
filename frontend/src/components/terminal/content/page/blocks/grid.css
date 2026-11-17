@@ -5,16 +5,22 @@
 .michi-doc-grid__tools { display: flex; margin-top: 14px; }
 .michi-doc-grid__tools button, .michi-doc-grid__controls button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 24px; padding: 3px 6px;
-  border: 0; border-radius: 4px; background: transparent; color: var(--term-muted); font: inherit; font-size: var(--fs-sm); cursor: pointer;
+  border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-muted); font: inherit; font-size: var(--fs-sm); cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.michi-doc-grid__tools button:hover, .michi-doc-grid__controls button:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
-.michi-doc-grid__tools button:focus-visible, .michi-doc-grid__controls button:focus-visible, .michi-doc-grid__controls select:focus-visible { outline: 1px solid var(--term-accent); outline-offset: 2px; }
+/* Hover is for a real pointer (ST-02); the press, one step darker on these borderless buttons, also answers a tap (ST-06). */
+@media (hover: hover) {
+  .michi-doc-grid__tools button:hover, .michi-doc-grid__controls button:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+  .michi-doc-grid__resize:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.michi-doc-grid__tools button:active, .michi-doc-grid__controls button:active:not(:disabled) { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); color: var(--term-fg); }
+.michi-doc-grid__tools button:focus-visible, .michi-doc-grid__controls button:focus-visible, .michi-doc-grid__controls select:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .michi-doc-grid__controls { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; color: var(--term-muted); font-size: var(--fs-sm); }
 .michi-doc-grid__controls label { display: inline-flex; align-items: center; gap: 5px; }
-.michi-doc-grid__controls select { min-height: 24px; max-width: 76px; padding: 2px; border: 1px solid var(--term-line); border-radius: 4px; background: var(--term-surface); color: var(--term-fg); font: inherit; }
-.michi-doc-grid__controls button:disabled { opacity: .35; cursor: default; }
+.michi-doc-grid__controls select { min-height: 24px; max-width: 76px; padding: 2px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm); background: var(--term-surface); color: var(--term-fg); font: inherit; }
+.michi-doc-grid__controls button:disabled { opacity: .5; cursor: not-allowed; }
 .michi-doc-grid[data-arranging] > .michi-doc-grid__region { outline: 1px dashed var(--term-line); outline-offset: 7px; }
-.michi-doc-grid__resize { display: none; position: absolute; right: -15px; top: 0; bottom: 0; width: 10px; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: ew-resize; touch-action: none; }
-.michi-doc-grid__resize:hover, .michi-doc-grid__resize:active { background: var(--term-hover-bg, var(--term-alt)); }
+.michi-doc-grid__resize { display: none; position: absolute; right: -15px; top: 0; bottom: 0; width: 10px; padding: 0; border: 0; border-radius: var(--ui-radius); background: transparent; cursor: ew-resize; touch-action: none; }
+.michi-doc-grid__resize:active { background: var(--term-hover-bg, var(--term-alt)); }
 @container (min-width: 600px) { .michi-doc-grid__region { grid-column: span var(--grid-tablet-span); } }
 @container (min-width: 960px) { .michi-doc-grid__region { grid-column: span var(--grid-span); } .michi-doc-grid__resize { display: block; } }

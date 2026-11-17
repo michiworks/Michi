@@ -13,6 +13,7 @@ import {
 import { getDb, runInTransaction } from '../db';
 import { workspaceOwnerMatches } from '../agentOwner';
 import { memoryBodyHash, normalizeMemoryBody, purgeOwnerExtraction, purgeWorkspaceExtraction } from './extractionRepository';
+import { IDLE_SINCE_SQL, NOT_EXPIRED_SQL } from './validity';
 
 /**
  * SQL for Michi Memory (migrations 0059_memories and 0071_memory_v3). Every
@@ -47,13 +48,16 @@ interface MemoryRow {
   /** Migration 0075 (nativeMemoryImport.ts). */
   import_source: MemoryImportSource | null;
   import_ref: string | null;
+  /** Migration 0086 (validity.ts). */
+  valid_until: number | null;
   /** Migration 0085. */
   topic: string | null;
 }
 
 const COLUMNS = `m.row_id, m.id, m.owner_user_id, m.scope, m.workspace_id, m.kind, m.body, m.status, m.origin,
   m.source_node_id, m.source_message_id, m.source_turn_id, m.source_artifact_id, m.source_risk,
-  m.supersedes_id, m.version, m.created_at, m.updated_at, m.keywords, m.event_at, m.observed_at, m.import_source, m.import_ref, m.topic`;
+  m.supersedes_id, m.version, m.created_at, m.updated_at, m.keywords, m.event_at, m.observed_at, m.import_source, m.import_ref, m.topic,
+  m.valid_until`;
 // A read by ids or links writes +owner_user_id: without statistics SQLite would take the owner's index for it and walk
 // every row of the owner's, not the id, supersedes or merged_into index.
 
@@ -95,6 +99,7 @@ function toRecord(row: MemoryRow): MemoryRecord {
     topic: row.topic ?? null,
     eventAt: row.event_at,
     observedAt: row.observed_at ?? row.created_at,
+    validUntil: row.valid_until,
     ...(row.import_source ? { importSource: row.import_source, importRef: row.import_ref ?? '' } : {}),
   };
 }
@@ -130,6 +135,7 @@ export interface NewMemoryRow {
   topic: string | null;
   eventAt: number | null;
   observedAt: number;
+  validUntil: number | null;
   now: number;
 }
 
@@ -158,12 +164,12 @@ export function nextUnusedId(table: keyof typeof ID_SEQUENCES): number {
 export function insertMemoryRow(row: NewMemoryRow): MemoryRecord {
   getDb().prepare(`INSERT INTO memories (row_id, id, owner_user_id, scope, workspace_id, kind, body, status, origin,
       source_node_id, source_message_id, source_turn_id, source_artifact_id, source_risk, supersedes_id,
-      version, created_at, updated_at, keywords, event_at, observed_at, topic)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`).run(
+      version, created_at, updated_at, keywords, event_at, observed_at, topic, valid_until)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`).run(
     nextUnusedId('memories'), row.id, row.ownerUserId, row.workspaceId === null ? 'user' : 'workspace', row.workspaceId,
     row.kind, row.body, row.status, row.origin,
     row.source?.nodeId ?? null, row.source?.messageId ?? null, row.source?.turnId ?? null, row.source?.artifactId ?? null,
-    row.sourceRisk, row.supersedesId, row.now, row.now, encodeKeywords(row.keywords), row.eventAt, row.observedAt, row.topic,
+    row.sourceRisk, row.supersedesId, row.now, row.now, encodeKeywords(row.keywords), row.eventAt, row.observedAt, row.topic, row.validUntil,
   );
   const stored = findMemory(row.ownerUserId, row.id);
   if (!stored) throw new Error('memory insert was not readable');
@@ -176,6 +182,13 @@ export function topicsInUse(ownerUserId: string, workspaceId: string | null, lim
       WHERE owner_user_id = ? AND topic IS NOT NULL AND status = 'active' AND (scope = 'user' OR workspace_id = ?)
       GROUP BY topic ORDER BY COUNT(*) DESC, MAX(updated_at) DESC LIMIT ?`).all(ownerUserId, workspaceId, limit) as Array<{ topic: string }>)
     .map((row) => row.topic);
+}
+
+/** Sets an active memory's topic when it has none: a label, so neither its version nor updated_at changes. Whether it was set. */
+export function setTopicIfUnset(ownerUserId: string, id: string, topic: string): boolean {
+  const result = getDb().prepare(`UPDATE memories SET topic = ? WHERE id = ? AND owner_user_id = ? AND topic IS NULL AND status = 'active'`)
+    .run(topic, id, ownerUserId);
+  return Number(result.changes) === 1;
 }
 
 /**
@@ -204,6 +217,10 @@ export interface MemoryRowChanges {
   /** null clears it. */
   topic?: string | null;
   eventAt?: number | null;
+  /** Migration 0086: when it stops being true; null clears it. */
+  validUntil?: number | null;
+  /** Migration 0086: when the user last confirmed it. */
+  lastConfirmedAt?: number;
   /** Migration 0077: when the user edited it in Settings › Memory (consolidation never changes such a memory). */
   userEditedAt?: number | null;
   /** Migration 0077: the memory consolidation merged it into; null clears the link. */
@@ -230,6 +247,8 @@ export function updateMemoryRow(
   if (changes.keywords !== undefined) { sets.push('keywords = ?'); params.push(encodeKeywords(changes.keywords)); }
   if (changes.topic !== undefined) { sets.push('topic = ?'); params.push(changes.topic); }
   if (changes.eventAt !== undefined) { sets.push('event_at = ?'); params.push(changes.eventAt); }
+  if (changes.validUntil !== undefined) { sets.push('valid_until = ?'); params.push(changes.validUntil); }
+  if (changes.lastConfirmedAt !== undefined) { sets.push('last_confirmed_at = ?'); params.push(changes.lastConfirmedAt); }
   if (changes.userEditedAt !== undefined) { sets.push('user_edited_at = ?'); params.push(changes.userEditedAt); }
   if (changes.mergedIntoId !== undefined) { sets.push('merged_into_id = ?'); params.push(changes.mergedIntoId); }
   sets.push('version = version + 1', 'updated_at = ?');
@@ -304,10 +323,7 @@ export function mergedDirectlyInto(ownerUserId: string, ids: readonly string[]):
 
 /**
  * Whether a memory's source still learns (consolidation's "learning source"):
- * its conversation is gone or learns (nodes.memory_mode NULL). A turn the
- * user asked Michi not to recall (the reply footer's Don't recall) changes
- * nothing here: that hides the excerpt, not the memories saved from it, which
- * packs still pin and cite.
+ * its conversation is gone or learns (nodes.memory_mode NULL).
  */
 export function hasLearningSource(record: Pick<MemoryRecord, 'source'>): boolean {
   const nodeId = record.source?.nodeId;
@@ -432,44 +448,53 @@ type StoredMemoryRow = MemoryRow & { source_title: string | null };
  * it came from: deleting that, or switching it away from learn, only takes
  * the title away.
  */
-const STORED_FROM = `SELECT ${COLUMNS},
-    CASE WHEN n.purged_at IS NULL AND (n.deleted_at IS NULL OR n.deletion_group_id LIKE 'arch-%') AND n.memory_mode IS NULL THEN n.title END AS source_title
-  FROM memories m LEFT JOIN nodes n ON n.id = m.source_node_id`;
+const STORED_COLUMNS = `${COLUMNS},
+    CASE WHEN n.purged_at IS NULL AND (n.deleted_at IS NULL OR n.deletion_group_id LIKE 'arch-%') AND n.memory_mode IS NULL THEN n.title END AS source_title`;
+const STORED_JOIN = 'FROM memories m LEFT JOIN nodes n ON n.id = m.source_node_id';
+const STORED_FROM = `SELECT ${STORED_COLUMNS}
+  ${STORED_JOIN}`;
 
 /** Rows of STORED_FROM as StoredMemory. */
 function storedRows(rows: readonly StoredMemoryRow[]): StoredMemory[] {
   return rows.map((row) => ({ rowId: row.row_id, record: toRecord(row), sourceTitle: row.source_title }));
 }
 
+/** A memory a pack may pin, with when it was last written, used or confirmed if it is one of Michi's own workspace notes (validity.ts). */
+export interface PackMemory extends StoredMemory {
+  idleSince: number | null;
+}
+
 /**
  * What a memory pack may pin (contextBuilder.ts): active memories the user
  * saved (origin explicit, any kind) and active standing preferences and
- * conventions (none tied to a dated event: event_at unset), in the user
- * scope and, with a workspaceId, that workspace; newest said first.
+ * conventions (none tied to a dated event: event_at unset), not past their
+ * end at `now`, in the user scope and, with a workspaceId, that workspace;
+ * newest said first.
  */
-export function packMemoryRows(ownerUserId: string, workspaceId: string | null, limit: number): StoredMemory[] {
+export function packMemoryRows(ownerUserId: string, workspaceId: string | null, limit: number, now: number): PackMemory[] {
   const inWorkspace = workspaceId === null ? '' : ` OR (m.scope = 'workspace' AND m.workspace_id = ?)`;
-  const params: SqlParam[] = workspaceId === null ? [ownerUserId, limit] : [ownerUserId, workspaceId, limit];
-  const rows = getDb().prepare(`${STORED_FROM}
-    WHERE m.owner_user_id = ? AND m.status = 'active'
+  const params: SqlParam[] = workspaceId === null ? [ownerUserId, now, limit] : [ownerUserId, now, workspaceId, limit];
+  const rows = getDb().prepare(`SELECT ${STORED_COLUMNS}, ${IDLE_SINCE_SQL} AS idle_since
+    ${STORED_JOIN}
+    WHERE m.owner_user_id = ? AND m.status = 'active' AND ${NOT_EXPIRED_SQL}
       AND (m.origin = 'explicit' OR (m.kind IN ('preference', 'convention') AND m.event_at IS NULL))
       AND (m.scope = 'user'${inWorkspace})
     ORDER BY COALESCE(m.observed_at, m.created_at) DESC, m.row_id DESC
-    LIMIT ?`).all(...params) as unknown as StoredMemoryRow[];
-  return storedRows(rows);
+    LIMIT ?`).all(...params) as unknown as Array<StoredMemoryRow & { idle_since: number | null }>;
+  return rows.map((row) => ({ rowId: row.row_id, record: toRecord(row), sourceTitle: row.source_title, idleSince: row.idle_since }));
 }
 
 /**
  * What the user's profile is built from (userProfile.ts): the owner's active
- * user-scope memories Michi saved itself (origin extracted), newest said
- * first. The user's own saved memories are pinned word for word in every
- * pack and stay out of it.
+ * user-scope memories Michi saved itself (origin extracted), not past their
+ * end at `now`, newest said first. The user's own saved memories are pinned
+ * word for word in every pack and stay out of it.
  */
-export function profileMemoryRows(ownerUserId: string, limit: number): StoredMemory[] {
+export function profileMemoryRows(ownerUserId: string, limit: number, now = Date.now()): StoredMemory[] {
   const rows = getDb().prepare(`${STORED_FROM}
-    WHERE m.owner_user_id = ? AND m.status = 'active' AND m.scope = 'user' AND m.origin = 'extracted'
+    WHERE m.owner_user_id = ? AND m.status = 'active' AND m.scope = 'user' AND m.origin = 'extracted' AND ${NOT_EXPIRED_SQL}
     ORDER BY COALESCE(m.observed_at, m.created_at) DESC, m.row_id DESC
-    LIMIT ?`).all(ownerUserId, limit) as unknown as StoredMemoryRow[];
+    LIMIT ?`).all(ownerUserId, now, limit) as unknown as StoredMemoryRow[];
   return storedRows(rows);
 }
 
@@ -494,6 +519,25 @@ export function userScopeChangesSince(ownerUserId: string, since: number, cap: n
     // A turn's own tombstone (recallIndex: the empty body's hash) removed no memory.
     .get(ownerUserId, since, cap, ownerUserId, since, memoryBodyHash(''), cap) as { n: number };
   return Math.min(cap, row.n);
+}
+
+/**
+ * A reply used these memories (reply sources), or the user confirmed them: the time goes on each of the owner's
+ * memories with these ids (validity.ts), with no version, updated_at or scope change, so neither the consolidation
+ * cursor nor a pack's version moves. A later time only.
+ */
+export function markMemoriesUsed(ownerUserId: string, ids: readonly string[], now: number): void {
+  markMemories('last_used_at', ownerUserId, ids, now);
+}
+
+export function markMemoriesConfirmed(ownerUserId: string, ids: readonly string[], now: number): void {
+  markMemories('last_confirmed_at', ownerUserId, ids, now);
+}
+
+function markMemories(column: 'last_used_at' | 'last_confirmed_at', ownerUserId: string, ids: readonly string[], now: number): void {
+  if (ids.length === 0) return;
+  getDb().prepare(`UPDATE memories SET ${column} = ? WHERE +owner_user_id = ? AND id IN (SELECT value FROM json_each(?))
+    AND (${column} IS NULL OR ${column} < ?)`).run(now, ownerUserId, JSON.stringify([...new Set(ids)]), now);
 }
 
 /** The owner's memories with these ids, whatever their status (absent ones are missing from the result). */
@@ -657,16 +701,31 @@ export function listOwnersWithPendingMemories(): string[] {
 }
 
 /**
+ * The ids of the owner's active memories, not past their end at `now`, in the user scope and, with a workspaceId,
+ * that workspace whose body reads the same as this one once normalized (normalizeMemoryBody), in row order.
+ */
+export function activeMemoryIdsWithBody(ownerUserId: string, workspaceId: string | null, body: string, now: number): string[] {
+  const wanted = normalizeMemoryBody(body);
+  const inWorkspace = workspaceId === null ? '' : ` OR (m.scope = 'workspace' AND m.workspace_id = ?)`;
+  return (getDb().prepare(`SELECT m.id, m.body FROM memories m WHERE m.owner_user_id = ? AND m.status = 'active' AND ${NOT_EXPIRED_SQL}
+      AND (m.scope = 'user'${inWorkspace}) ORDER BY m.row_id`)
+    .all(...(workspaceId === null ? [ownerUserId, now] : [ownerUserId, now, workspaceId])) as Array<{ id: string; body: string }>)
+    .filter((row) => normalizeMemoryBody(row.body) === wanted).map((row) => row.id);
+}
+
+/**
  * The owner's active memory in the user scope or, with a workspaceId, that
  * workspace whose body reads the same once normalized (normalizeMemoryBody,
  * as extraction's dedupe compares them), the user's own first; else null.
+ * One past its end at `now` (validity.ts) is not the same note: the user
+ * saying it again is a new statement.
  */
-export function activeMemoryWithBody(ownerUserId: string, workspaceId: string | null, body: string): StoredMemory | null {
+export function activeMemoryWithBody(ownerUserId: string, workspaceId: string | null, body: string, now = Date.now()): StoredMemory | null {
   const wanted = normalizeMemoryBody(body);
   const inWorkspace = workspaceId === null ? '' : ` OR (m.scope = 'workspace' AND m.workspace_id = ?)`;
-  const rows = getDb().prepare(`SELECT m.id, m.body FROM memories m WHERE m.owner_user_id = ? AND m.status = 'active'
+  const rows = getDb().prepare(`SELECT m.id, m.body FROM memories m WHERE m.owner_user_id = ? AND m.status = 'active' AND ${NOT_EXPIRED_SQL}
       AND (m.scope = 'user'${inWorkspace}) ORDER BY m.origin = 'explicit' DESC, m.row_id DESC`)
-    .all(...(workspaceId === null ? [ownerUserId] : [ownerUserId, workspaceId])) as Array<{ id: string; body: string }>;
+    .all(...(workspaceId === null ? [ownerUserId, now] : [ownerUserId, now, workspaceId])) as Array<{ id: string; body: string }>;
   const match = rows.find((row) => normalizeMemoryBody(row.body) === wanted);
   return match ? storedMemories(ownerUserId, [match.id])[0] ?? null : null;
 }
@@ -725,6 +784,8 @@ export function deleteOwnerMemoryRows(ownerUserId: string): MemoryRecord[] {
   // Consolidation's log names only memory ids, all gone now; its cursor stays (what follows is new).
   getDb().prepare('DELETE FROM memory_consolidation_log WHERE owner_user_id = ?').run(ownerUserId);
   getDb().prepare('DELETE FROM memory_turn_sources WHERE owner_user_id = ?').run(ownerUserId);
+  // Guesses rest on the memories, all gone now.
+  getDb().prepare('DELETE FROM memory_guesses WHERE owner_user_id = ?').run(ownerUserId);
   return rows.map(toRecord);
 }
 
@@ -766,12 +827,16 @@ export function memoriesAfterRow(afterRowId: number, limit: number): Array<{ row
   return rows.map((row) => ({ rowId: row.row_id, record: toRecord(row) }));
 }
 
-/** Bodies of the owner's active memories in the user scope and, with a workspaceId, in that workspace. */
-export function activeMemoryBodies(ownerUserId: string, workspaceId: string | null): string[] {
+/**
+ * Bodies of the owner's active memories in the user scope and, with a workspaceId, in that workspace; with `now`,
+ * only those not past their end then (validity.ts).
+ */
+export function activeMemoryBodies(ownerUserId: string, workspaceId: string | null, now?: number): string[] {
   const inWorkspace = workspaceId === null ? '' : ` OR (m.scope = 'workspace' AND m.workspace_id = ?)`;
-  return (getDb().prepare(`SELECT m.body FROM memories m WHERE m.owner_user_id = ? AND m.status = 'active'
-      AND (m.scope = 'user'${inWorkspace})`).all(...(workspaceId === null ? [ownerUserId] : [ownerUserId, workspaceId])) as
-    Array<{ body: string }>).map((row) => row.body);
+  const current = now === undefined ? '' : ` AND ${NOT_EXPIRED_SQL}`;
+  const params: SqlParam[] = [ownerUserId, ...(now === undefined ? [] : [now]), ...(workspaceId === null ? [] : [workspaceId])];
+  return (getDb().prepare(`SELECT m.body FROM memories m WHERE m.owner_user_id = ? AND m.status = 'active'${current}
+      AND (m.scope = 'user'${inWorkspace})`).all(...params) as Array<{ body: string }>).map((row) => row.body);
 }
 
 /**
@@ -801,6 +866,7 @@ export function purgeOwnerMemories(ownerUserId: string): void {
   db.prepare('DELETE FROM memory_consolidation_log WHERE owner_user_id = ?').run(ownerUserId);
   db.prepare('DELETE FROM memory_consolidation_state WHERE owner_user_id = ?').run(ownerUserId);
   db.prepare('DELETE FROM memory_turn_sources WHERE owner_user_id = ?').run(ownerUserId);
+  db.prepare('DELETE FROM memory_guesses WHERE owner_user_id = ?').run(ownerUserId);
   db.prepare('DELETE FROM meta WHERE key IN (?, ?)').run(NOTICE_MOVED_KEY(ownerUserId), NOTICE_SEEN_KEY(ownerUserId));
   purgeOwnerExtraction(ownerUserId);
 }

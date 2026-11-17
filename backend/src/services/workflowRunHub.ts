@@ -34,7 +34,8 @@ export interface WorkflowRunContext {
   nodeId: string | null;
 }
 
-export type WorkflowRunListener = (ownerUserId: string, run: WorkflowRunDtoV1) => void;
+/** `previous`: the run as listeners last got it, for a feed that sends changes only. */
+export type WorkflowRunListener = (ownerUserId: string, run: WorkflowRunDtoV1, previous: WorkflowRunDtoV1) => void;
 
 const ALLOWED: Record<WorkflowRunStatus, readonly WorkflowAction[]> = {
   running: ['pause', 'stop'],
@@ -304,11 +305,12 @@ export class WorkflowRunHub {
       run = { ...run, approvals: undefined };
     }
     const actions = ALLOWED[run.status].filter((action) => !!entry.controls[action]);
+    const previous = entry.run;
     entry.run = boundWorkflowRun({ ...run, actions, updatedAt: at, revision: this.nextRevision(entry.run.revision, at) });
     this.schedulePersist(entry);
     this.scheduleEvict(entry);
     for (const listener of this.listeners) {
-      try { listener(entry.ownerUserId, entry.run); } catch (error) {
+      try { listener(entry.ownerUserId, entry.run, previous); } catch (error) {
         log.warn('chat', 'workflow listener failed', { error: error instanceof Error ? error.message : String(error) });
       }
     }

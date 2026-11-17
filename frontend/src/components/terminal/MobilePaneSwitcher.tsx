@@ -9,7 +9,7 @@ import { DUR, EASE } from '../../motion/tokens';
 import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import { PopoverSurface } from '../ui/Popover';
 import { branchMotionAllowed, branchMotionReduced, isFreshBranch, playBranchFlight, pulseBranchTarget, type BranchFlightOrigin } from './branchMotion';
-import { BranchIcon } from './icons';
+import { BranchIcon, CloseIcon, strokeFor } from './icons';
 import { TemporaryChatGlyph } from './TemporaryChat';
 import './mobile.css';
 
@@ -114,7 +114,7 @@ export function MobilePaneSwitcher() {
   // doesn't read as the hamburger that opens a drawer. Sized by mobile.css.
   return <>
     <button ref={trigger} type="button" className="mobile-pane-trigger t-icon-btn" aria-label="Switch pane" aria-expanded={open} aria-controls={id} data-working={working ? 'true' : undefined}
-      onClick={() => setOpen(value => !value)}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 6h16M10 18h10" /><path className="mobile-pane-trigger__live" d="M10 12h10" /></svg></button>
+      onClick={() => setOpen(value => !value)}><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeFor(20, 24)} strokeLinecap="round" aria-hidden="true"><path d="M4 6h16M10 18h10" /><path className="mobile-pane-trigger__live" d="M10 12h10" /></svg></button>
     <AnimatePresence>{open && <PopoverSurface key="list" ref={panel} role="navigation" aria-label="Branches and panes" right={12} top={52}
       width="min(300px, calc(100vw - 24px))" maxHeight="calc(100dvh - 76px)" className="mobile-pane-list" glass exit={LIST_EXIT}>
       <div id={id} onBlur={event => {
@@ -139,7 +139,7 @@ export function MobilePaneSwitcher() {
               tree branch stays listed and can be reopened. */}
           {isOpen && <button type="button" className="mobile-pane-close" aria-label={`Close ${titles[index]}`}
             onClick={event => { (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus({ preventScroll: true }); closePane(row.id); }}>
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+            <CloseIcon />
           </button>}
         </div>;
       })}</div>
@@ -155,6 +155,6 @@ export function MobilePaneSwitcher() {
         },
       ],
     }]} />}</MenuPresence>
-    {flight && createPortal(<span ref={chip} key={flight.id} className="mobile-branch-flight" aria-hidden="true"><BranchIcon size={16} /></span>, document.body)}
+    {flight && createPortal(<span ref={chip} key={flight.id} className="mobile-branch-flight" aria-hidden="true"><BranchIcon size="lg" /></span>, document.body)}
   </>;
 }

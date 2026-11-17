@@ -156,6 +156,19 @@ export function settleStoppedTurnWakes(turnId: string, now = Date.now()): { call
   return { callerCancelled, targetCancelled };
 }
 
+/**
+ * An open wake whose sender can no longer take its reply settles
+ * undeliverable with `detail`, unless its reply turn already began. False
+ * when it was not open, or its reply turn exists.
+ */
+export function settleUnbegunThreadWake(targetTurnId: string, detail: string, now = Date.now()): boolean {
+  return getDb().prepare(`UPDATE thread_message_wakes
+    SET state = 'undeliverable', detail = ?, updated_at = ?
+    WHERE target_turn_id = ? AND state IN ('pending', 'delivering')
+      AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.turn_id = thread_message_wakes.requested_turn_id)`)
+    .run(detail, now, targetTurnId).changes === 1;
+}
+
 /** Open (pending or delivering) wakes after `afterTargetTurnId`, in key order. */
 export function listOpenThreadWakes(afterTargetTurnId: string | null, limit: number): ThreadWakeRecord[] {
   return (getDb().prepare(`SELECT * FROM thread_message_wakes

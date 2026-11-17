@@ -125,7 +125,6 @@ export function EmptyState({ onNew }: { onNew: () => void }) {
         border: '1px solid var(--term-line)',
         background: 'var(--term-surface)',
         textAlign: 'center',
-        boxShadow: '0 1px 2px rgba(26,25,22,.04), 0 6px 18px rgba(26,25,22,.05)',
       }}
     >
       <div

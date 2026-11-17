@@ -501,13 +501,38 @@ describe("elicitation answers map back to the form's values", () => {
         assert.deepEqual(pushed[0].questions.map((q: any) => [q.question, q.options.map((o: any) => o.label), q.multiSelect]), [
             ["Colour?", ["Red, dark", "Blue"], false],
             ["Tools?", ["Git", "npm"], true],
-            ["Sure?", ["Yes", "No"], false],
+            ["Sure?", [], false],
             ["How many?", [], false],
             ["Anything else?", [], false],
             ["Size?", ["Small", "Medium"], false],
         ]);
+        assert.deepEqual(pushed[0].questions.map((q: any) => q.field?.type), [undefined, undefined, "checkbox", "number", undefined, undefined]);
         assert.equal(pushed[0].requestId, ELICITATION_REQUEST_ID_BASE + 1);
+        // Answered as text, as a card that cannot draw fields does: still read as the form's types.
         assert.deepEqual(replied, { action: "accept", content: { colour: "a", tools: ["git", "npm"], sure: false, count: 3, note: "ship it" } });
+    });
+
+    test("numbers and booleans are asked with fields and answered with their typed values", async () => {
+        const { pushed, replied } = await ask({
+            count: { type: "integer", title: "How many?", minimum: 1, maximum: 9, default: 2 },
+            ratio: { type: "number", description: "Ratio?", minimum: 5, maximum: 5 },
+            sure: { type: "boolean", title: "Sure?", default: true },
+            later: { type: "number", title: "Later?" },
+        }, (questions) => [
+            { question: questions[0].question, answer: "4", value: 4 },
+            { question: questions[1].question, answer: "0.5", value: 0.5 },
+            { question: questions[2].question, answer: "No", value: false },
+            // Left empty: nothing is sent for it.
+            { question: questions[3].question, answer: "", value: null },
+        ]);
+        assert.deepEqual(pushed[0].questions.map((q: any) => q.field), [
+            { key: "count", label: "How many?", type: "number", min: 1, max: 9, step: 1, default: 2 },
+            // A range that is no range is left out.
+            { key: "ratio", label: "Ratio?", type: "number" },
+            { key: "sure", label: "Sure?", type: "checkbox", default: true },
+            { key: "later", label: "Later?", type: "number" },
+        ]);
+        assert.deepEqual(replied, { action: "accept", content: { count: 4, ratio: 0.5, sure: false } });
     });
 
     test("typed text without a matching option goes to the question itself when it has no _other field", async () => {

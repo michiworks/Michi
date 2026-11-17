@@ -1,6 +1,6 @@
 import React, { createContext, useEffect, useRef, useState } from 'react';
 import { motion, useIsPresent } from 'motion/react';
-import { Minus } from 'lucide-react';
+import { MinusIcon } from './icons';
 import { DUR, EASE } from '../../motion/tokens';
 
 /**
@@ -151,7 +151,7 @@ export function NoticeHeader({ tone, icon, title, count, status, cardId, minimiz
         title="Shrink (Esc)"
         onClick={(event) => { event.stopPropagation(); onMinimize(); }}
       >
-        <Minus size={14} aria-hidden="true" />
+        <MinusIcon />
       </button>
     </div>
   );

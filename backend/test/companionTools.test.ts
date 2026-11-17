@@ -14,8 +14,7 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * rules Michi could not read; notes and goals record who wrote them; notes
  * need the revision read; cards are proposals with a per-turn and a pending
  * limit, never applied here, and a rule, reminder, watch or conversation only
- * in the user's own turn; the brief is checked and published once a day;
- * companion_read gives V what check-ins wrote; an item whose source is off
+ * in the user's own turn; companion_read gives V what check-ins wrote; an item whose source is off
  * reads as unknown, and a source off says so; times take a local
  * YYYY-MM-DD HH:MM or +90m; Check now answers with what finished after its
  * wait; deep reads answer "not available" until the server wires them, at
@@ -51,22 +50,19 @@ import type { CompanionChangeReason } from '../src/services/companion/delivery';
 import { CompanionError, notOwner } from '../src/services/companion/errors';
 import {
   addGoal,
-  briefForDate,
   countPendingCards,
-  getBriefCurate,
   getCompanionNotesState,
   getGoal,
   getItem,
-  insertBrief,
   listGoals,
   recordGoalProgress,
-  setBriefCurate,
   setNotesByUser,
   startRun,
   upsertItem,
 } from '../src/services/companion/repository';
 import { getCompanionSettings, patchCompanionSettings } from '../src/services/companion/settings';
 import { untrustedBlock } from '../src/services/companion/sources/common';
+import { itemLine } from '../src/services/companion/prompts';
 import { mergeCheckinChanges, undoCompanionRun } from '../src/services/companion/posts';
 import {
   COMPANION_CHECKIN_MAX_ITEM_CHANGES,
@@ -271,7 +267,7 @@ describe('the Companion\'s own tools', () => {
     const description = (name: CompanionOwnToolName) => toolNamed(name).description;
     assert.match(description('companion_propose'), /At most 2 cards in a turn and 8 waiting at once/);
     assert.match(description('companion_propose'), /conversation\.start \{workspaceId, title, text\}/, 'payload shapes in literal braces');
-    assert.match(description('companion_publish_brief'), /7/);
+    assert.match(description('companion_update_item'), /raise/);
     assert.match(description('companion_save_notes'), /4000/);
   });
 
@@ -296,9 +292,9 @@ describe('the Companion\'s own tools', () => {
       const throwing = { ...ctx(null), getActivePageTurnAttribution: () => { throw new Error('gone'); } } as AssistantToolContext;
       assert.equal(companionToolTurn(throwing).origin, 'user');
 
-      beginCompanionHiddenTurn('cmp-run-9', { kind: 'brief', runId: 'run-9' });
+      beginCompanionHiddenTurn('cmp-run-9', { kind: 'worker_report', runId: 'run-9' });
       assert.deepEqual(companionToolTurn(ctx({ turnId: 'cmp-run-9', assistantId: `self-${companion.nodeId}-cmp-run-9` })),
-        { origin: 'hidden', turnId: 'cmp-run-9', kind: 'brief' });
+        { origin: 'hidden', turnId: 'cmp-run-9', kind: 'worker_report' });
       assert.equal(companionToolTurn(ctx({ turnId: 'x-1', assistantId: 'other-1' })).origin, 'unknown');
       endCompanionHiddenTurn('cmp-run-9');
     });
@@ -537,7 +533,7 @@ describe('the Companion\'s own tools', () => {
       const checkin = hiddenTurn();
       const note = ctx(checkin);
       assert.deepEqual(await call('companion_update_item', note, { itemId: item.id, action: 'mute', reason: 'Noise' }), {
-        text: 'REFUSED: in a check-in, companion_update_item only snoozes, dismisses or restores an item; muting answers only the user\'s own request. Mention it in your message instead.',
+        text: 'REFUSED: in a check-in, companion_update_item snoozes, dismisses, restores, raises or lowers an item; muting answers only the user\'s own request. Mention it in your message instead.',
         isError: true,
       });
       for (const reason of [undefined, '\n', 'x'.repeat(501)]) {
@@ -563,12 +559,84 @@ describe('the Companion\'s own tools', () => {
         { text: 'Done: snoozed "CR-1 needs attention" until 2026-11-05 10:42 (Thursday).', isError: false });
 
       assert.deepEqual(runChanges(checkin.runId), [
-        { target: `item:${item.id}`, action: 'snooze', before: { status: 'new', snoozedUntil: null }, after: { status: 'snoozed', snoozedUntil: tomorrowNine }, reason: 'Waiting on the reviewer' },
-        { target: `item:${item.id}`, action: 'restore', before: { status: 'snoozed', snoozedUntil: tomorrowNine }, after: { status: 'seen', snoozedUntil: null }, reason: 'The reviewer answered' },
-        { target: `item:${item.id}`, action: 'snooze', before: { status: 'seen', snoozedUntil: null }, after: { status: 'snoozed', snoozedUntil: T0 + 90 * 60_000 }, reason: 'After the standup' },
+        { target: `item:${item.id}`, action: 'snooze', before: { status: 'new', snoozedUntil: null, raised: null }, after: { status: 'snoozed', snoozedUntil: tomorrowNine, raised: null }, reason: 'Waiting on the reviewer' },
+        { target: `item:${item.id}`, action: 'restore', before: { status: 'snoozed', snoozedUntil: tomorrowNine, raised: null }, after: { status: 'seen', snoozedUntil: null, raised: null }, reason: 'The reviewer answered' },
+        { target: `item:${item.id}`, action: 'snooze', before: { status: 'seen', snoozedUntil: null, raised: null }, after: { status: 'snoozed', snoozedUntil: T0 + 90 * 60_000, raised: null }, reason: 'After the standup' },
       ]);
       assert.deepEqual(checkinWritesOf(checkin.turnId), [{ kind: 'item', id: item.id, applied: 3, proposed: 0, action: 'snooze', reason: 'After the standup' }]);
       assert.deepEqual(emitted, ['items', 'items', 'items']);
+    });
+
+    test('companion_update_item raises what waits on the user today and lowers it again, never touching its status; only a check-in raises (2026-11-17)', async () => {
+      const { item } = upsertItem(draft('cr:CR-1'), T0);
+      // Raising is how a check-in says "this waits on you today" now the brief is gone; in the user's own turn it belongs in the message.
+      const user = ctx(userTurn('turn-user-1'));
+      assert.deepEqual(await call('companion_update_item', user, { itemId: item.id, action: 'raise', reason: 'Its reviewer waits' }), {
+        text: 'REFUSED: raise and lower belong to a check-in, where they say what waits on the user today; in their own turn, say it in your message instead.',
+        isError: true,
+      });
+      assert.match((await call('companion_update_item', user, { itemId: item.id, action: 'lower' })).text, /^REFUSED: raise and lower belong to a check-in/);
+      const checkin = hiddenTurn();
+      const note = ctx(checkin);
+      assert.match((await call('companion_update_item', note, { itemId: item.id, action: 'raise' })).text,
+        /^INVALID_ARGUMENT: reason: a check-in gives a one-line reason of at most 500 characters/, 'the user reads the reason beside the raise');
+      assert.deepEqual(await call('companion_update_item', note, { itemId: item.id, action: 'raise', reason: 'Its reviewer is waiting on you' }),
+        { text: 'Done: "CR-1 needs attention" waits on the user today: Its reviewer is waiting on you.', isError: false });
+      assert.deepEqual([getItem(item.id)?.status, getItem(item.id)?.raised?.reason], ['new', 'Its reviewer is waiting on you'],
+        'a raise moves the item up Today, and changes nothing else about it');
+      assert.deepEqual(await call('companion_update_item', note, { itemId: item.id, action: 'raise', reason: 'Its reviewer is waiting on you' }),
+        { text: 'Nothing changed: "CR-1 needs attention" is raised, for the same reason.', isError: false });
+      assert.deepEqual(await call('companion_update_item', note, { itemId: item.id, action: 'lower', reason: 'They answered it' }),
+        { text: 'Done: "CR-1 needs attention" no longer waits on the user today.', isError: false });
+      assert.equal(getItem(item.id)?.raised, null);
+      assert.deepEqual(await call('companion_update_item', note, { itemId: item.id, action: 'lower', reason: 'Again' }),
+        { text: 'Nothing changed: "CR-1 needs attention" is not raised.', isError: false });
+
+      const raised = { status: 'new' as const, snoozedUntil: null, raised: 'Its reviewer is waiting on you' };
+      assert.deepEqual(runChanges(checkin.runId), [
+        { target: `item:${item.id}`, action: 'raise', before: { ...raised, raised: null }, after: raised, reason: 'Its reviewer is waiting on you' },
+        { target: `item:${item.id}`, action: 'lower', before: raised, after: { ...raised, raised: null }, reason: 'They answered it' },
+      ], 'each raise is an Undo of its own in the post');
+      assert.deepEqual(checkinWritesOf(checkin.turnId), [{ kind: 'item', id: item.id, applied: 2, proposed: 0, action: 'lower', reason: 'They answered it' }]);
+      assert.deepEqual(emitted, ['items', 'items']);
+
+      // Like a rating, a raise is about the version it was made on: the next change to the item reads unraised.
+      assert.equal((await call('companion_update_item', note, { itemId: item.id, action: 'raise', reason: 'Still nothing back' })).isError, false);
+      upsertItem(draft('cr:CR-1', { version: 'v2' }), T0 + 60_000);
+      assert.equal(getItem(item.id)?.raised, null, 'a new version waits on the check-in to raise it again');
+    });
+
+    test('a raise holds for the day it was given on, only on what is on Today, and goes when the user puts the item away (2026-11-17)', async () => {
+      const { item } = upsertItem(draft('cr:CR-1'), T0);
+      const note = ctx(hiddenTurn());
+      assert.equal((await call('companion_update_item', note, { itemId: item.id, action: 'raise', reason: 'Its reviewer is waiting on you' })).isError, false);
+      assert.deepEqual(getItem(item.id)?.raised, { reason: 'Its reviewer is waiting on you', at: T0, until: new Date(2026, 10, 6).getTime() },
+        'it says what waits today, so it lasts until local midnight');
+      assert.match(itemLine(getItem(item.id)!, T0 + 60_000), /you raised it today .*: "Its reviewer is waiting on you"/, 'the next check-in sees its own raise');
+
+      // Tomorrow it is gone: there is nothing to lower, and the day's check-in raises it afresh when it still waits.
+      clockNow = new Date(2026, 10, 6, 9, 0).getTime();
+      assert.doesNotMatch(itemLine(getItem(item.id)!, clockNow), /you raised it/);
+      const tomorrow = ctx(hiddenTurn());
+      assert.deepEqual(await call('companion_update_item', tomorrow, { itemId: item.id, action: 'lower', reason: 'Old news' }),
+        { text: 'Nothing changed: "CR-1 needs attention" is not raised.', isError: false });
+      assert.deepEqual(await call('companion_update_item', tomorrow, { itemId: item.id, action: 'raise', reason: 'Still no answer' }),
+        { text: 'Done: "CR-1 needs attention" waits on the user today: Still no answer.', isError: false });
+
+      // What the user puts away is theirs: dismissing takes the raise with it, and restoring does not bring it back.
+      const user = ctx(userTurn('turn-user-1'));
+      assert.equal((await call('companion_update_item', user, { itemId: item.id, action: 'dismiss' })).isError, false);
+      assert.equal(getItem(item.id)?.raised, null);
+      assert.equal((await call('companion_update_item', user, { itemId: item.id, action: 'restore' })).isError, false);
+      assert.deepEqual([getItem(item.id)?.status, getItem(item.id)?.raised], ['seen', null]);
+
+      // And a check-in cannot raise what is not on Today: a snoozed item waits for its time.
+      assert.equal((await call('companion_update_item', tomorrow, { itemId: item.id, action: 'snooze', until: '+90m', reason: 'After the standup' })).isError, false);
+      assert.deepEqual(await call('companion_update_item', tomorrow, { itemId: item.id, action: 'raise', reason: 'Still no answer' }), {
+        text: 'REFUSED: "CR-1 needs attention" is snoozed, not on the user\'s Today, so it is not raised. Restore it first when Michi\'s data shows it waits on them today (never one the user muted), or mention it in your message.',
+        isError: true,
+      });
+      assert.equal(getItem(item.id)?.raised, null);
     });
   });
 
@@ -641,7 +709,7 @@ describe('the Companion\'s own tools', () => {
   });
 
   describe('when Michi cannot read the user\'s rules (§1.3)', () => {
-    const ACTION_TOOLS: readonly CompanionOwnToolName[] = ['companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal', 'companion_propose', 'companion_publish_brief', 'companion_session_send'];
+    const ACTION_TOOLS: readonly CompanionOwnToolName[] = ['companion_update_item', 'companion_save_notes', 'companion_goal_progress', 'companion_edit_goal', 'companion_propose', 'companion_session_send'];
     const refusal = (tool: string) => `REFUSED: Michi could not read the user's rules for you this turn, so ${tool} did nothing. Answer without acting on your own, and tell the user if it matters.`;
 
     test('a user turn the route marked: every action tool refuses, the rest still answer', async () => {
@@ -717,10 +785,6 @@ describe('the Companion\'s own tools', () => {
       recordGoalProgress(checkinGoal.id, 'Two of five reviewers signed off', T0);
       const goals = await read({ what: 'goals' });
       assert.match(goals, new RegExp(`- ${userGoal.id} \\(worded by the user\\): "Ship the auth migration"\n- ${checkinGoal.id} \\(worded by a check-in\\): "Close the launch review" — latest reading: "Two of five reviewers signed off" \\(09:12\\)`));
-
-      assert.match(await read({ what: 'brief' }), /\[TODAY'S BRIEF — not published yet\]/);
-      insertBrief({ date: localDateKey(T0), headline: 'A quiet day', cards: [{ title: 'Reviews', body: 'Two wait on you.', itemIds: [], action: null }], closing: 'That is all.', origin: 'llm', now: T0 - 10 * 60_000 });
-      assert.match(await read({ what: 'brief' }), /\[TODAY'S BRIEF — published at 09:02\]\nheadline: "A quiet day"\n- "Reviews": Two wait on you\.\nclosing: "That is all\."/);
 
       const cards = await read({ what: 'cards' });
       assert.match(cards, new RegExp(`\\[YOUR CARDS STILL WAITING FOR THE USER\\]\n- ${card.id} rules\\.update, proposed 08:12: [^\n]+\n  reason: You asked twice`));
@@ -819,7 +883,7 @@ describe('the Companion\'s own tools', () => {
         ['watch.add', { itemId: item.id, until: 'answered' }],
         ['conversation.start', { workspaceId: 'ws-1', title: 'Fix the pipeline', text: 'MyService is blocked in Gamma.' }],
       ];
-      for (const kind of ['heartbeat', 'wake', 'brief', 'worker_report', 'welcome'] as const) {
+      for (const kind of ['heartbeat', 'wake', 'worker_report', 'welcome'] as const) {
         const note = ctx(hiddenTurn(kind));
         for (const [cardKind, payload] of userOnly) {
           // Arguments cannot claim the user's turn.
@@ -857,52 +921,6 @@ describe('the Companion\'s own tools', () => {
       assert.equal(countPendingCards(T0), 7);
     });
 
-    test('companion_publish_brief: at most seven cards about items that exist, once a day; the brief turn uses up the user\'s focus', async () => {
-      const { item } = upsertItem(draft('cr:CR-1'), T0);
-      setBriefCurate('Focus on the launch');
-      const user = ctx(userTurn('turn-user-1'));
-      const card = (index: number, itemIds: string[] = [item.id]) => ({ title: `Card ${index}`, body: 'Why it matters today.', itemIds });
-      const tooMany = await call('companion_publish_brief', user, { headline: 'Today', cards: Array.from({ length: 8 }, (_, index) => card(index)), closing: 'That is all.' });
-      assert.equal(tooMany.isError, true);
-      assert.match(tooMany.text, /^INVALID_ARGUMENT: cards/);
-      const unknown = await call('companion_publish_brief', user, { headline: 'Today', cards: [card(1, [item.id, 'cmi-missing'])], closing: 'That is all.' });
-      assert.match(unknown.text, /^INVALID_ARGUMENT: cards: unknown item cmi-missing; use item ids from Michi's data/);
-      assert.equal(briefForDate(localDateKey(T0)), null);
-
-      const published = await call('companion_publish_brief', user, {
-        headline: 'CR-1 needs you',
-        cards: [card(1), { title: 'Calendar', body: 'Two meetings.', action: { label: 'Prepare', prompt: 'Help me prepare' } }],
-        closing: 'That is all for today.',
-      });
-      assert.deepEqual(published, { text: 'Today\'s brief is published (2 cards). Now reply with one line that points to it, and end your turn.', isError: false });
-      const brief = briefForDate(localDateKey(T0))!;
-      assert.deepEqual([brief.origin, brief.headline, brief.cards.length, brief.cards[0].itemIds, brief.cards[1].action],
-        ['llm', 'CR-1 needs you', 2, [item.id], { label: 'Prepare', prompt: 'Help me prepare' }]);
-      assert.equal(getBriefCurate(), 'Focus on the launch', 'only the morning brief\'s own turn uses it up');
-      const again = await call('companion_publish_brief', user, { headline: 'Again', cards: [], closing: 'Done.' });
-      assert.deepEqual(again, { text: 'REFUSED: today\'s brief is already published.', isError: true });
-      assert.deepEqual(emitted, ['brief']);
-
-      clockNow = T0 + DAY;
-      const tomorrow = await call('companion_publish_brief', ctx(hiddenTurn('brief')), { headline: 'Quiet day', cards: [], closing: 'Nothing else.' });
-      assert.equal(tomorrow.isError, false);
-      assert.equal(briefForDate(localDateKey(T0 + DAY))?.headline, 'Quiet day');
-      assert.equal(getBriefCurate(), '');
-    });
-
-    test('a check-in\'s brief goes out only while its memory pack holds (D5): a note saved meanwhile refuses it as withdrawn, and so does every later try; V\'s own turn is not a check-in', async () => {
-      const brief = { headline: 'Today', cards: [], closing: 'Done.' };
-      const checkin = ctx(hiddenTurn('brief'));
-      const note = createMemory({ ownerUserId: LOCAL_AGENT_OWNER_ID }, { scope: { kind: 'user' }, kind: 'preference', body: 'No briefs on Fridays.', status: 'active', origin: 'explicit' });
-      const refused = await call('companion_publish_brief', checkin, brief);
-      assert.deepEqual(refused, { text: 'WITHDRAWN: Michi Memory changed while this check-in ran, so nothing from it goes out.', isError: true });
-      deleteMemory({ ownerUserId: LOCAL_AGENT_OWNER_ID }, note.id);
-      assert.equal((await call('companion_publish_brief', checkin, brief)).isError, true, 'withdrawn for good, though it shows the same again');
-      const unattributed = await call('companion_publish_brief', ctx(UNATTRIBUTED, hiddenTurn('brief').nodeId), brief);
-      assert.match(unattributed.text, /^REFUSED: Michi cannot tell which turn this call belongs to, so companion_publish_brief did nothing/);
-      assert.equal(briefForDate(localDateKey(T0)), null);
-      assert.equal((await call('companion_publish_brief', ctx(userTurn('turn-user-1')), brief)).isError, false);
-    });
   });
 
   describe('reading', () => {
@@ -1087,8 +1105,8 @@ describe('the Companion\'s own tools', () => {
       const reminder = await call('companion_propose', ctx(userTurn('turn-user-2')), { kind: 'reminder.add', payload: { text: 'Answer Alex', at: T0 + HOUR, itemId: email.id } });
       assert.deepEqual(reminder, { text: 'NOT_FOUND: That item does not exist', isError: true });
       assert.equal(countPendingCards(T0), 0);
-      const brief = await call('companion_publish_brief', user, { headline: 'Today', cards: [{ title: 'Mail', body: 'One email.', itemIds: [email.id] }], closing: 'Done.' });
-      assert.deepEqual(brief, { text: `INVALID_ARGUMENT: cards: unknown item ${email.id}; use item ids from Michi's data`, isError: true });
+      const raised = await call('companion_update_item', ctx(hiddenTurn()), { itemId: email.id, action: 'raise', reason: 'Alex is waiting' });
+      assert.deepEqual(raised, { text: 'NOT_FOUND: Companion item not found', isError: true });
 
       // A check reports what changed on items in sight only.
       deps({
@@ -1101,7 +1119,7 @@ describe('the Companion\'s own tools', () => {
       const checked = await call('companion_check_now', user, {});
       assert.ok(checked.text.startsWith('Michi checked every enabled source: 1 item changed.'), checked.text);
       assert.match(checked.text, /CR-2 got a comment/);
-      for (const text of [read.text, updated.text, watch.text, reminder.text, brief.text, checked.text]) assert.doesNotMatch(text, /offsite budget|From Alex/);
+      for (const text of [read.text, updated.text, watch.text, reminder.text, raised.text, checked.text]) assert.doesNotMatch(text, /offsite budget|From Alex/);
 
       // Back on, the item reads as before.
       patchCompanionSettings({ sources: { email: { enabled: true } } });
@@ -1184,16 +1202,6 @@ describe('the Companion\'s own tools', () => {
       assert.match(toolNamed('companion_headline').description, /120 characters, never how many things need them/);
     });
 
-    test('a brief the check-in published gives its headline as the line, unless the check-in wrote its own', async () => {
-      const brief = hiddenTurn('brief');
-      assert.equal((await call('companion_publish_brief', ctx(brief), { headline: 'A quiet Thursday', cards: [], closing: 'That is all.' })).isError, false);
-      assert.equal(endCompanionHiddenTurn(brief.turnId).headline, 'A quiet Thursday');
-      clockNow += DAY;
-      const own = hiddenTurn('brief');
-      await call('companion_publish_brief', ctx(own), { headline: 'Friday', cards: [], closing: 'Done.' });
-      await call('companion_headline', ctx(own), { text: 'Wrapping up the release notes' });
-      assert.equal(endCompanionHiddenTurn(own.turnId).headline, 'Wrapping up the release notes');
-    });
   });
 
   describe('what a check-in changed: titles only storage gives (§2.8 T1, G1b-review #1, G1a-review #1)', () => {

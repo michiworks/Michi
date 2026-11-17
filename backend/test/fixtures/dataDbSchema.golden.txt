@@ -520,6 +520,47 @@ index idx_attention_workspace on attention_notifications; origin c (workspace_id
   | CREATE INDEX idx_attention_workspace
   | ON attention_notifications(workspace_id)
 index sqlite_autoindex_attention_notifications_1 on attention_notifications; unique; origin pk (id)
+table block_submissions
+  | CREATE TABLE block_submissions (
+  | owner_user_id TEXT NOT NULL,
+  | workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  | host_key TEXT NOT NULL,
+  | page_id TEXT REFERENCES pages(id) ON DELETE CASCADE,
+  | node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  | message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+  | block_id TEXT NOT NULL,
+  | signature TEXT NOT NULL,
+  | value TEXT NOT NULL CHECK (json_valid(value)),
+  | text TEXT NOT NULL,
+  | submitted_at INTEGER NOT NULL,
+  | PRIMARY KEY (owner_user_id, workspace_id, host_key, block_id, signature),
+  | CHECK (
+  | (page_id IS NOT NULL AND node_id IS NULL AND message_id IS NULL AND host_key = 'page:' || page_id) OR
+  | (page_id IS NULL AND node_id IS NOT NULL AND message_id IS NOT NULL AND host_key = 'chat:' || node_id || ':' || message_id)
+  | )
+  | )
+  column 0 owner_user_id TEXT; not null; pk 1
+  column 1 workspace_id TEXT; not null; pk 2
+  column 2 host_key TEXT; not null; pk 3
+  column 3 page_id TEXT
+  column 4 node_id TEXT
+  column 5 message_id TEXT
+  column 6 block_id TEXT; not null; pk 4
+  column 7 signature TEXT; not null; pk 5
+  column 8 value TEXT; not null
+  column 9 text TEXT; not null
+  column 10 submitted_at INTEGER; not null
+  foreign key 0.0 message_id -> messages(id); on update NO ACTION; on delete CASCADE; match NONE
+  foreign key 1.0 node_id -> nodes(id); on update NO ACTION; on delete CASCADE; match NONE
+  foreign key 2.0 page_id -> pages(id); on update NO ACTION; on delete CASCADE; match NONE
+  foreign key 3.0 workspace_id -> workspaces(id); on update NO ACTION; on delete CASCADE; match NONE
+index idx_block_submissions_message on block_submissions; origin c; partial (message_id)
+  | CREATE INDEX idx_block_submissions_message ON block_submissions (message_id) WHERE message_id IS NOT NULL
+index idx_block_submissions_node on block_submissions; origin c; partial (node_id)
+  | CREATE INDEX idx_block_submissions_node ON block_submissions (node_id) WHERE node_id IS NOT NULL
+index idx_block_submissions_page on block_submissions; origin c; partial (page_id)
+  | CREATE INDEX idx_block_submissions_page ON block_submissions (page_id) WHERE page_id IS NOT NULL
+index sqlite_autoindex_block_submissions_1 on block_submissions; unique; origin pk (owner_user_id, workspace_id, host_key, block_id, signature)
 table chat_permission_grants
   | CREATE TABLE chat_permission_grants (
   | node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -546,6 +587,18 @@ table claude_fork_anchors
   column 4 native_message_id TEXT; not null
   foreign key 0.0 node_id -> nodes(id); on update NO ACTION; on delete CASCADE; match NONE
 index sqlite_autoindex_claude_fork_anchors_1 on claude_fork_anchors; unique; origin pk (node_id, native_session_id, message_id)
+table claude_fork_boundaries
+  | CREATE TABLE claude_fork_boundaries (
+  | node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  | native_session_id TEXT NOT NULL,
+  | boundary_at TEXT NOT NULL,
+  | PRIMARY KEY (node_id, native_session_id)
+  | )
+  column 0 node_id TEXT; not null; pk 1
+  column 1 native_session_id TEXT; not null; pk 2
+  column 2 boundary_at TEXT; not null
+  foreign key 0.0 node_id -> nodes(id); on update NO ACTION; on delete CASCADE; match NONE
+index sqlite_autoindex_claude_fork_boundaries_1 on claude_fork_boundaries; unique; origin pk (node_id, native_session_id)
 table command_receipts
   | CREATE TABLE command_receipts (
   | workspace_id TEXT NOT NULL,
@@ -563,30 +616,6 @@ table command_receipts
 index idx_command_receipts_created on command_receipts; origin c (created_at)
   | CREATE INDEX idx_command_receipts_created ON command_receipts(created_at)
 index sqlite_autoindex_command_receipts_1 on command_receipts; unique; origin pk (workspace_id, operation_id)
-table companion_briefs
-  | CREATE TABLE companion_briefs (
-  | id TEXT PRIMARY KEY,
-  | owner_user_id TEXT NOT NULL DEFAULT 'local-user',
-  | date TEXT NOT NULL,
-  | headline TEXT NOT NULL,
-  | cards_json TEXT NOT NULL,
-  | closing TEXT NOT NULL,
-  | origin TEXT NOT NULL CHECK (origin IN ('llm','fallback')),
-  | card_feedback_json TEXT NOT NULL DEFAULT '{}',
-  | created_at INTEGER NOT NULL,
-  | UNIQUE (owner_user_id, date, origin)
-  | )
-  column 0 id TEXT; pk 1
-  column 1 owner_user_id TEXT; not null; default 'local-user'
-  column 2 date TEXT; not null
-  column 3 headline TEXT; not null
-  column 4 cards_json TEXT; not null
-  column 5 closing TEXT; not null
-  column 6 origin TEXT; not null
-  column 7 card_feedback_json TEXT; not null; default '{}'
-  column 8 created_at INTEGER; not null
-index sqlite_autoindex_companion_briefs_1 on companion_briefs; unique; origin pk (id)
-index sqlite_autoindex_companion_briefs_2 on companion_briefs; unique; origin u (owner_user_id, date, origin)
 table companion_cards
   | CREATE TABLE companion_cards (
   | id TEXT PRIMARY KEY,
@@ -740,7 +769,7 @@ table companion_items
   | updated_at INTEGER NOT NULL,
   | resolved_at INTEGER,
   | notified_version TEXT,
-  | missing_count INTEGER NOT NULL DEFAULT 0, feedback_version TEXT, feedback_at INTEGER,
+  | missing_count INTEGER NOT NULL DEFAULT 0, feedback_version TEXT, feedback_at INTEGER, raised_reason TEXT, raised_version TEXT, raised_at INTEGER,
   | UNIQUE (owner_user_id, item_key)
   | )
   column 0 id TEXT; pk 1
@@ -770,6 +799,9 @@ table companion_items
   column 24 missing_count INTEGER; not null; default 0
   column 25 feedback_version TEXT
   column 26 feedback_at INTEGER
+  column 27 raised_reason TEXT
+  column 28 raised_version TEXT
+  column 29 raised_at INTEGER
 index idx_companion_items_open on companion_items; origin c (owner_user_id, status, changed_at)
   | CREATE INDEX idx_companion_items_open ON companion_items(owner_user_id, status, changed_at)
 index idx_companion_items_source on companion_items; origin c (owner_user_id, source, status)
@@ -1096,7 +1128,7 @@ table memories
   | supersedes_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
   | version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   | created_at INTEGER NOT NULL,
-  | updated_at INTEGER NOT NULL, keywords TEXT NOT NULL DEFAULT '', event_at INTEGER, observed_at INTEGER, import_source TEXT, import_ref TEXT, merged_into_id TEXT, user_edited_at INTEGER, topic TEXT,
+  | updated_at INTEGER NOT NULL, keywords TEXT NOT NULL DEFAULT '', event_at INTEGER, observed_at INTEGER, import_source TEXT, import_ref TEXT, merged_into_id TEXT, user_edited_at INTEGER, topic TEXT, valid_until INTEGER, last_used_at INTEGER, last_confirmed_at INTEGER,
   | CHECK ((scope = 'user' AND workspace_id IS NULL) OR (scope = 'workspace' AND workspace_id IS NOT NULL))
   | )
   column 0 row_id INTEGER; pk 1
@@ -1125,6 +1157,9 @@ table memories
   column 23 merged_into_id TEXT
   column 24 user_edited_at INTEGER
   column 25 topic TEXT
+  column 26 valid_until INTEGER
+  column 27 last_used_at INTEGER
+  column 28 last_confirmed_at INTEGER
   foreign key 0.0 supersedes_id -> memories(id); on update NO ACTION; on delete SET NULL; match NONE
   foreign key 1.0 workspace_id -> workspaces(id); on update NO ACTION; on delete CASCADE; match NONE
 index idx_memories_merged_into on memories; origin c; partial (merged_into_id)
@@ -1466,6 +1501,34 @@ table memory_extraction_usage
   column 3 executions INTEGER; not null; default 0
   column 4 exhausted_at INTEGER
 index sqlite_autoindex_memory_extraction_usage_1 on memory_extraction_usage; unique; origin pk (owner_user_id, day_start)
+table memory_guesses
+  | CREATE TABLE memory_guesses (
+  | id TEXT PRIMARY KEY,
+  | owner_user_id TEXT NOT NULL,
+  | body TEXT NOT NULL,
+  | refs TEXT NOT NULL,
+  | status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed', 'rejected')),
+  | fingerprint TEXT NOT NULL,
+  | body_hash TEXT NOT NULL,
+  | memory_id TEXT,
+  | run_id TEXT,
+  | created_at INTEGER NOT NULL,
+  | updated_at INTEGER NOT NULL
+  | )
+  column 0 id TEXT; pk 1
+  column 1 owner_user_id TEXT; not null
+  column 2 body TEXT; not null
+  column 3 refs TEXT; not null
+  column 4 status TEXT; not null
+  column 5 fingerprint TEXT; not null
+  column 6 body_hash TEXT; not null
+  column 7 memory_id TEXT
+  column 8 run_id TEXT
+  column 9 created_at INTEGER; not null
+  column 10 updated_at INTEGER; not null
+index idx_memory_guesses_owner on memory_guesses; origin c (owner_user_id, status, created_at)
+  | CREATE INDEX idx_memory_guesses_owner ON memory_guesses(owner_user_id, status, created_at)
+index sqlite_autoindex_memory_guesses_1 on memory_guesses; unique; origin pk (id)
 table memory_import_items
   | CREATE TABLE memory_import_items (
   | owner_user_id TEXT NOT NULL,
@@ -1706,8 +1769,8 @@ table messages
   foreign key 0.0 node_id -> nodes(id); on update NO ACTION; on delete CASCADE; match NONE
 index idx_messages_node on messages; origin c (node_id)
   | CREATE INDEX idx_messages_node ON messages(node_id)
-index idx_messages_node_role on messages; origin c (node_id, role)
-  | CREATE INDEX idx_messages_node_role ON messages(node_id, role)
+index idx_messages_node_role_created on messages; origin c (node_id, role, created_at)
+  | CREATE INDEX idx_messages_node_role_created ON messages(node_id, role, created_at)
 index idx_messages_node_seq_id on messages; origin c (node_id, seq, id)
   | CREATE INDEX idx_messages_node_seq_id ON messages(node_id, seq, id)
 index sqlite_autoindex_messages_1 on messages; unique; origin pk (id)
@@ -1803,8 +1866,8 @@ table meta_agent_home_runs
   column 12 created_at INTEGER; not null
   column 13 updated_at INTEGER; not null
   foreign key 0.0 workspace_id -> workspaces(id); on update NO ACTION; on delete CASCADE; match NONE
-index idx_meta_agent_home_runs_owner on meta_agent_home_runs; origin c (owner_user_id, kind, state)
-  | CREATE INDEX idx_meta_agent_home_runs_owner ON meta_agent_home_runs(owner_user_id, kind, state)
+index idx_meta_agent_home_runs_owner_created on meta_agent_home_runs; origin c (owner_user_id, kind, state, created_at)
+  | CREATE INDEX idx_meta_agent_home_runs_owner_created ON meta_agent_home_runs(owner_user_id, kind, state, created_at)
 index sqlite_autoindex_meta_agent_home_runs_1 on meta_agent_home_runs; unique; origin pk (id)
 index sqlite_autoindex_meta_agent_home_runs_2 on meta_agent_home_runs; unique; origin u (job_id, run_id)
 table meta_agent_home_state
@@ -2058,7 +2121,7 @@ table nodes
   | CHECK (
   | agent_effective_definition IS NULL OR
   | (json_valid(agent_effective_definition) AND json_extract(agent_effective_definition, '$.version') IS NOT NULL)
-  | ), pinned_at INTEGER, runtime_engine TEXT, permission_mode TEXT CHECK (permission_mode IN ('ask', 'trust', 'yolo')), crew_memory_mode TEXT CHECK (crew_memory_mode IN ('persistent', 'incognito', 'temporary')), forked_from_node_id TEXT, fork_boundary_message_id TEXT, inherited_message_count INTEGER NOT NULL DEFAULT 0, page_id TEXT REFERENCES pages(id) ON DELETE SET NULL, maintenance_job_id TEXT, viewed_at INTEGER, permission_approve_for_me INTEGER NOT NULL DEFAULT 0 CHECK (permission_approve_for_me IN (0, 1)), ultracode INTEGER NOT NULL DEFAULT 0 CHECK (ultracode IN (0, 1)), completion_seq INTEGER NOT NULL DEFAULT 0, last_completed_at INTEGER, last_completed_turn_id TEXT, seen_completion_seq INTEGER NOT NULL DEFAULT 0, scheduled_only_job_id TEXT, multi_model_run_id TEXT, fresh_context INTEGER NOT NULL DEFAULT 0 CHECK (fresh_context IN (0, 1)), memory_mode TEXT)
+  | ), pinned_at INTEGER, runtime_engine TEXT, permission_mode TEXT CHECK (permission_mode IN ('ask', 'trust', 'yolo')), crew_memory_mode TEXT CHECK (crew_memory_mode IN ('persistent', 'incognito', 'temporary')), forked_from_node_id TEXT, fork_boundary_message_id TEXT, inherited_message_count INTEGER NOT NULL DEFAULT 0, page_id TEXT REFERENCES pages(id) ON DELETE SET NULL, maintenance_job_id TEXT, viewed_at INTEGER, permission_approve_for_me INTEGER NOT NULL DEFAULT 0 CHECK (permission_approve_for_me IN (0, 1)), ultracode INTEGER NOT NULL DEFAULT 0 CHECK (ultracode IN (0, 1)), completion_seq INTEGER NOT NULL DEFAULT 0, last_completed_at INTEGER, last_completed_turn_id TEXT, seen_completion_seq INTEGER NOT NULL DEFAULT 0, scheduled_only_job_id TEXT, multi_model_run_id TEXT, fresh_context INTEGER NOT NULL DEFAULT 0 CHECK (fresh_context IN (0, 1)), memory_mode TEXT, service_tier TEXT)
   column 0 id TEXT; pk 1
   column 1 workspace_id TEXT; not null
   column 2 tree_id TEXT
@@ -2115,6 +2178,7 @@ table nodes
   column 53 multi_model_run_id TEXT
   column 54 fresh_context INTEGER; not null; default 0
   column 55 memory_mode TEXT
+  column 56 service_tier TEXT
   foreign key 0.0 page_id -> pages(id); on update NO ACTION; on delete SET NULL; match NONE
   foreign key 1.0 agent_definition_id -> agent_definitions(id); on update NO ACTION; on delete SET NULL; match NONE
   foreign key 2.0 parent_node_id -> nodes(id); on update NO ACTION; on delete SET NULL; match NONE
@@ -2319,6 +2383,8 @@ index idx_page_changes_database_source on page_changes; origin c (database_id, s
   | CREATE INDEX idx_page_changes_database_source ON page_changes(database_id, source_node_id)
 index idx_page_changes_page on page_changes; origin c (page_id, seq)
   | CREATE INDEX idx_page_changes_page ON page_changes(page_id, seq)
+index idx_page_changes_page_created on page_changes; origin c (page_id, created_at)
+  | CREATE INDEX idx_page_changes_page_created ON page_changes(page_id, created_at)
 index idx_page_changes_source on page_changes; origin c (workspace_id, source_node_id, seq)
   | CREATE INDEX idx_page_changes_source ON page_changes(workspace_id, source_node_id, seq)
 index idx_page_changes_source_node on page_changes; origin c (source_node_id)
@@ -2771,6 +2837,8 @@ table page_maintenance_receipts
   foreign key 1.0 plan_id -> page_maintenance_plans(id); on update NO ACTION; on delete CASCADE; match NONE
 index idx_page_maintenance_receipt_source on page_maintenance_receipts; origin c (job_id, source_turn_id, generation)
   | CREATE INDEX idx_page_maintenance_receipt_source ON page_maintenance_receipts(job_id,source_turn_id,generation)
+index idx_page_maintenance_receipts_plan on page_maintenance_receipts; origin c (plan_id, outcome)
+  | CREATE INDEX idx_page_maintenance_receipts_plan ON page_maintenance_receipts(plan_id, outcome)
 index sqlite_autoindex_page_maintenance_receipts_1 on page_maintenance_receipts; unique; origin pk (receipt_key)
 index sqlite_autoindex_page_maintenance_receipts_2 on page_maintenance_receipts; unique; origin u (job_id, source_turn_id, resource_kind, resource_id, generation)
 table page_maintenance_reconsider_requests

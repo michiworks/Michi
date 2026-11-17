@@ -122,7 +122,7 @@ describe('Topbar background work badges', () => {
     const badgeOf = (id: string) => container.querySelector(`[data-pane-caption-id="${id}"] [data-testid="pane-background-work-badge"]`);
     expect(badgeOf('n1')?.getAttribute('aria-label')).toBe('1 subagent running. Show background work');
     expect(badgeOf('n3')?.getAttribute('aria-label')).toBe('1 subagent · 1 workflow running. Show background work');
-    expect(badgeOf('n3')?.textContent).toBe('◆2');
+    expect(badgeOf('n3')?.textContent).toBe('2');
     expect(badgeOf('d1')).toBeNull();
     expect(badgeOf('n2')).toBeNull();
     expect(badgeOf('launcher')).toBeNull();
@@ -130,12 +130,12 @@ describe('Topbar background work badges', () => {
     // n1's agent finishes: only its badge goes.
     act(() => store.set({ ...store.value.getNodes(), n1: node('n1', { status: 'streaming' }, [subagent({ sessionId: 'a', status: 'terminated', outcome: 'completed' })]) }));
     expect(badgeOf('n1')).toBeNull();
-    expect(badgeOf('n3')?.textContent).toBe('◆2');
+    expect(badgeOf('n3')?.textContent).toBe('2');
 
     // The feed's snapshot lists no live background agent for n3: the
     // process that ran it ended, so only the workflow still counts.
     act(() => handlers[0].onBackgroundSubagents?.({ snapshot: true, nodes: {} }));
-    expect(badgeOf('n3')?.textContent).toBe('◆1');
+    expect(badgeOf('n3')?.textContent).toBe('1');
     expect(badgeOf('n3')?.getAttribute('aria-label')).toBe('1 workflow running. Show background work');
   });
 });
@@ -167,7 +167,7 @@ describe('Topbar background work button', () => {
       ['a', 'b', 'c'].map((sessionId) => subagent({ sessionId, status, ...(outcome ? { outcome } : {}) }));
     const { store, button } = mount({ n1: node('n1', { status: 'streaming' }, crew('working')), n2: node('n2'), n3: node('n3') });
     expect(button()?.dataset.state).toBe('running');
-    expect(button()?.textContent).toBe('◆3');
+    expect(button()?.textContent).toBe('3');
     expect(button()?.getAttribute('aria-label')).toBe('3 subagents running. Show background work');
 
     // A subagent's approval is shown in the parent's chat.
@@ -180,7 +180,7 @@ describe('Topbar background work button', () => {
     // The turn ended: what it started stays listed, muted.
     act(() => store.set({ ...store.value.getNodes(), n1: node('n1', {}, crew('terminated', 'completed')) }));
     expect(button()?.dataset.state).toBe('done');
-    expect(button()?.textContent).toBe('◆3');
+    expect(button()?.textContent).toBe('3');
     expect(button()?.getAttribute('aria-label')).toBe('3 background items finished. Show background work');
 
     const opened: unknown[] = [];

@@ -19,14 +19,26 @@ export function codexTurnInput(
 }
 
 /**
+ * The `serviceTier` a turn asks for: the chat's tier when its model lists it,
+ * else standard (`default`), so a tier in the user's Codex config cannot apply
+ * unseen. Undefined, which leaves Codex's config in charge, for an owner with
+ * no choice (not a chat) and for a model that lists no tiers.
+ */
+export function codexTurnServiceTier(chosen: string | null | undefined, offered: readonly string[]): string | undefined {
+  if (chosen === undefined || offered.length === 0) return undefined;
+  return chosen !== null && offered.includes(chosen) ? chosen : 'default';
+}
+
+/**
  * `turn/start` params: the turn's approval and sandbox policy, then the thread,
- * input, effort and, once the session chose one, its collaboration mode.
+ * input, effort, speed tier and, once the session chose one, its collaboration mode.
  */
 export function codexTurnStartParams(turn: {
   policy: object;
   threadId: string;
   input: Array<Record<string, unknown>>;
   effort: string | null;
+  serviceTier?: string;
   modeId: string | null;
   modelId: string | null;
 }): Record<string, unknown> {
@@ -35,6 +47,8 @@ export function codexTurnStartParams(turn: {
     threadId: turn.threadId,
     input: turn.input,
     ...(turn.effort ? { effort: turn.effort } : {}),
+    // Codex keeps it for the thread's later turns too; every turn sends its own.
+    ...(turn.serviceTier ? { serviceTier: turn.serviceTier } : {}),
     ...(isCodexModeKind(turn.modeId) && turn.modelId
       ? { collaborationMode: buildCodexCollaborationMode(turn.modeId, turn.modelId, turn.effort) }
       : {}),

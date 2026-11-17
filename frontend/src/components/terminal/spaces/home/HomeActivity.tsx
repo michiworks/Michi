@@ -1,14 +1,23 @@
 import React from 'react';
-import { MessageSquare, Sparkles } from 'lucide-react';
 import { joinAnd, type SpaceActivityDetail, type SpaceActivityItem } from 'michi-shared';
 import { useCompanionName } from '../../../../state/companion/companionName';
 import { michiOneLine } from '../../content/michiPlainText';
 import { companionActorName } from '../../content/db/taskActivity';
 import { formatMichiAgo } from '../../content/michiFormat';
+import { CompanionGlyph } from '../../companion/CompanionGlyph';
+import { AgentIcon, ChatIcon, EditIcon } from '../../icons';
 
 export const SPACE_ACTIVITY_SHOWN = 7;
 
 type PageChangeItem = Extract<SpaceActivityItem, { kind: 'page-change' }>;
+
+/** A page change's mark says who made it: Michi, you, or a conversation's agent. */
+function ChangeMark({ item }: { item: PageChangeItem }) {
+  const by = item.detail?.by;
+  if (by?.kind === 'companion') return <CompanionGlyph />;
+  if (by ? by.kind === 'user' : item.actor !== 'agent') return <EditIcon aria-hidden="true" />;
+  return <AgentIcon aria-hidden="true" />;
+}
 
 function activityKey(item: SpaceActivityItem): string {
   return item.kind === 'page-change' ? `change:${item.batchId}` : `thread:${item.threadNodeId}`;
@@ -87,8 +96,8 @@ export function SpaceActivityList({ items, clock, onOpen }: {
         {shown.map((item) => (
           <button key={activityKey(item)} type="button" className="spaces-home-feed__row" data-fresh={item.fresh || undefined} onClick={() => onOpen(item)}>
             {item.kind === 'conversation'
-              ? <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
-              : <Sparkles size={13} strokeWidth={1.7} aria-hidden="true" />}
+              ? <ChatIcon aria-hidden="true" />
+              : <ChangeMark item={item} />}
             <span className="spaces-home-feed__text">
               <b>{item.kind === 'conversation' ? item.workspaceName : item.pageTitle}</b>
               <span aria-hidden="true"> · </span>

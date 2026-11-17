@@ -6,8 +6,9 @@ import { threadDisplayTitle } from '../../../state/displayTitle';
 import { nodeMessageCount } from '../../../state/nodeMessageCount';
 import { clearRequestedDigest, useRequestedDigest } from '../../../state/digestFocus';
 import MarkdownContent from '../../MarkdownContent';
+import { TERM_PROSE_CLASS } from '../../markdownProse';
 import DigestGenerationStatus from '../DigestGenerationStatus';
-import { Dot, Tag } from '../primitives';
+import { DisclosureChevron, Dot, Tag } from '../primitives';
 import type { PageId } from '../../../state/commands';
 import ManageComposer from '../manage/ManageComposer';
 import { Button } from '../../ui/controls';
@@ -20,8 +21,6 @@ import { kbd } from '../../../lib/platform';
 /** Wash behind the outline's current item. Accent, like every other "current"
  *  marker and the page's buttons — this page carries no digest-hued chrome. */
 const OUTLINE_ACTIVE_FILL = 'color-mix(in srgb, var(--term-accent) 8%, transparent)';
-
-const DIGEST_PROSE ='prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg) [&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent)';
 
 export default function TerminalDigest({
   onNav,
@@ -263,7 +262,6 @@ export default function TerminalDigest({
             width: 'min(640px, 100%)',
             border: '1px solid var(--term-line)',
             background: 'var(--term-surface)',
-            boxShadow: '0 1px 2px rgba(26,25,22,.04), 0 16px 44px rgba(26,25,22,.07)',
           }}
         >
           <div
@@ -311,6 +309,7 @@ export default function TerminalDigest({
               OPTIONAL GUIDANCE
             </label>
             <div
+              className="t-field-frame"
               style={{
                 display: 'flex',
                 alignItems: 'flex-start',
@@ -346,7 +345,6 @@ export default function TerminalDigest({
                   flex: 1,
                   minWidth: 0,
                   border: 'none',
-                  outline: 'none',
                   resize: 'vertical',
                   background: 'transparent',
                   color: 'var(--term-fg)',
@@ -391,8 +389,8 @@ export default function TerminalDigest({
       `,
     }}>
       <div className="flex min-w-0 shrink-0 flex-col gap-4 px-5 py-[18px] lg:min-h-0 lg:flex-1 lg:shrink">
-      {/* Content card — raised independently */}
-      <div ref={scrollRef} className="term-scrollbar min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-y-auto" style={{ background: 'var(--term-surface)', boxShadow: '0 8px 32px rgba(26,25,22,.07), 0 1px 3px rgba(26,25,22,.04)', border: '1px solid var(--term-line)' }}>
+      {/* Content card — scrolls on its own on wide screens */}
+      <div ref={scrollRef} className="term-scrollbar min-w-0 lg:min-h-0 lg:flex-1 lg:overflow-y-auto" style={{ background: 'var(--term-surface)', border: '1px solid var(--term-line)' }}>
         <div
           style={{
             padding: '20px 28px 16px',
@@ -425,7 +423,7 @@ export default function TerminalDigest({
             >
               {title}
             </span>
-            {stale.length > 0 && <Tag color="var(--term-select)">{stale.length} stale</Tag>}
+            {stale.length > 0 && <Tag color="var(--term-waiting-text)">{stale.length} stale</Tag>}
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 18, fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>
             <span><span style={{ color: 'var(--term-mid)' }}>scope</span> thread</span>
@@ -463,7 +461,7 @@ export default function TerminalDigest({
                 gap: 6,
               }}
             >
-              <span aria-hidden>{promptOpen ? '▾' : '▸'}</span> CUSTOM PROMPT
+              <DisclosureChevron open={promptOpen} /> CUSTOM PROMPT
               {d.customPrompt && !promptOpen && (
                 <span aria-hidden style={{ color: 'var(--term-accent)', fontSize: 'var(--fs-2xs)' }}>●</span>
               )}
@@ -485,7 +483,6 @@ export default function TerminalDigest({
                     padding: '6px 8px',
                     fontSize: 'var(--fs-md)',
                     fontFamily: 'var(--ui-font)',
-                    outline: 'none',
                     resize: 'vertical',
                     boxSizing: 'border-box',
                   }}
@@ -532,7 +529,7 @@ export default function TerminalDigest({
                 lineHeight: 1.6,
               }}
             >
-              <MarkdownContent text={parsed.tldr} className={DIGEST_PROSE} />
+              <MarkdownContent text={parsed.tldr} className={TERM_PROSE_CLASS} />
             </div>
           </div>
         )}
@@ -571,7 +568,7 @@ export default function TerminalDigest({
                     >
                       {s.title}
                     </span>
-                    {isStale && <Tag color="var(--term-select)">stale — source changed</Tag>}
+                    {isStale && <Tag color="var(--term-waiting-text)">stale — source changed</Tag>}
                     <div style={{ flex: 1 }} />
                     {s.sourceId && (
                       <button
@@ -587,7 +584,7 @@ export default function TerminalDigest({
                           cursor: 'pointer',
                         }}
                       >
-                        source ↗
+                        source
                       </button>
                     )}
                   </div>
@@ -600,7 +597,7 @@ export default function TerminalDigest({
                       marginTop: 8,
                     }}
                   >
-                    <MarkdownContent text={s.body} className={DIGEST_PROSE} />
+                    <MarkdownContent text={s.body} className={TERM_PROSE_CLASS} />
                   </div>
                 </div>
               );
@@ -617,7 +614,7 @@ export default function TerminalDigest({
             }}
           >
             {content ? (
-              <MarkdownContent text={content} className={DIGEST_PROSE} />
+              <MarkdownContent text={content} className={TERM_PROSE_CLASS} />
             ) : d.status === 'idle' ? (
               <span>— digest is empty —</span>
             ) : null}
@@ -642,7 +639,6 @@ export default function TerminalDigest({
               style={{
                 border: '1px solid var(--term-line)',
                 background: 'var(--term-surface)',
-                boxShadow: '0 1px 2px rgba(26,25,22,.03)',
               }}
             >
               {parsed.openThreads.map((q, i) => (
@@ -678,7 +674,8 @@ export default function TerminalDigest({
                   >
                     {q}
                   </span>
-                  <span
+                  <button
+                    type="button"
                     onClick={() => void createChildChat(digestNode.nodeId, q).then(() => onNav('dashboard')).catch(() => {})}
                     style={{
                       fontSize: 'var(--fs-xs)',
@@ -687,8 +684,8 @@ export default function TerminalDigest({
                       fontFamily: 'var(--ui-font)',
                     }}
                   >
-                    ⧉ explore
-                  </span>
+                    <span aria-hidden="true">⧉</span> explore
+                  </button>
                 </div>
               ))}
             </div>
@@ -716,7 +713,6 @@ export default function TerminalDigest({
           style={{
             background: 'var(--term-surface)',
             border: '1px solid var(--term-line)',
-            boxShadow: '0 4px 12px rgba(26,25,22,.05), 0 1px 2px rgba(26,25,22,.03)',
           }}
         >
           <div
@@ -735,9 +731,14 @@ export default function TerminalDigest({
           <div style={{ padding: '6px 0' }}>
             {/* TL;DR item */}
             {parsed?.tldr && (
-              <div
+              <button
+                type="button"
+                className="t-row-focus"
+                aria-current={activeOutlineIdx === -1 ? 'true' : undefined}
                 onClick={() => scrollToSection(-1)}
                 style={{
+                  width: '100%',
+                  textAlign: 'left',
                   padding: '7px 14px',
                   fontSize: 'var(--fs-md)',
                   color: 'var(--term-fg)',
@@ -753,14 +754,19 @@ export default function TerminalDigest({
               >
                 <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>tl;dr</span>
                 <span style={{ fontFamily: 'var(--ui-font)', fontWeight: 500 }}>Summary</span>
-              </div>
+              </button>
             )}
             {/* Section items */}
             {parsed?.sections.map((s, i) => (
-              <div
+              <button
+                type="button"
                 key={i}
+                className="t-row-focus"
+                aria-current={activeOutlineIdx === i ? 'true' : undefined}
                 onClick={() => scrollToSection(i)}
                 style={{
+                  width: '100%',
+                  textAlign: 'left',
                   padding: '7px 14px 7px 18px',
                   fontSize: 'var(--fs-md)',
                   color: activeOutlineIdx === i ? 'var(--term-fg)' : 'var(--term-mid)',
@@ -780,7 +786,7 @@ export default function TerminalDigest({
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {s.title}
                 </span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -790,7 +796,6 @@ export default function TerminalDigest({
           style={{
             background: 'var(--term-surface)',
             border: '1px solid var(--term-line)',
-            boxShadow: '0 4px 12px rgba(26,25,22,.05), 0 1px 2px rgba(26,25,22,.03)',
           }}
         >
           <div
@@ -827,10 +832,14 @@ export default function TerminalDigest({
                 );
               }
               return (
-                <div
+                <button
+                  type="button"
                   key={id}
+                  className="t-row-focus"
                   onClick={() => openSource(id)}
                   style={{
+                    width: '100%',
+                    textAlign: 'left',
                     padding: '10px 14px',
                     borderBottom: '1px solid var(--term-line)',
                     display: 'flex',
@@ -851,9 +860,10 @@ export default function TerminalDigest({
                     }
                     size={5}
                   />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div
+                  <span style={{ display: 'block', flex: 1, minWidth: 0 }}>
+                    <span
                       style={{
+                        display: 'block',
                         fontSize: 'var(--fs-sm)',
                         color: 'var(--term-fg)',
                         fontFamily: 'var(--ui-font)',
@@ -863,17 +873,17 @@ export default function TerminalDigest({
                       }}
                     >
                       {n.title || chatLabel(n) || id}
-                    </div>
-                    <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
+                    </span>
+                    <span style={{ display: 'block', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontFamily: 'var(--font-mono, ui-monospace, monospace)' }}>
                       {nodeMessageCount(n)} msgs · in sync
-                    </div>
-                  </div>
+                    </span>
+                  </span>
                   {isNew ? (
-                    <Tag color="var(--term-accent)">new</Tag>
+                    <Tag color="var(--term-accent-text)">new</Tag>
                   ) : isStale ? (
-                    <Tag color="var(--term-select)">stale</Tag>
+                    <Tag color="var(--term-waiting-text)">stale</Tag>
                   ) : null}
-                </div>
+                </button>
               );
             })}
           </div>
@@ -884,7 +894,6 @@ export default function TerminalDigest({
           style={{
             background: 'var(--term-surface)',
             border: '1px solid var(--term-line)',
-            boxShadow: '0 4px 12px rgba(26,25,22,.05), 0 1px 2px rgba(26,25,22,.03)',
             padding: '14px',
           }}
         >

@@ -35,6 +35,11 @@ export interface PagesMockController {
 }
 
 const now = 1_800_000_000_000;
+
+/** A workspace's task database with the columns and views Michi gives one, for a test to seed. */
+export function taskDatabaseFixture(database: Omit<PageDatabase, 'role' | 'columns' | 'views'>): PageDatabase {
+  return { ...database, role: 'tasks', columns: taskDatabaseColumns(), views: taskDatabaseViews() };
+}
 const json = (route: Route, value: unknown, status = 200) => route.fulfill({
   status, contentType: 'application/json', body: JSON.stringify(value),
 });

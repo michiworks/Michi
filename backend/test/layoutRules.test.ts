@@ -179,12 +179,13 @@ describe('layout rule storage', () => {
 
 describe('counted sections follow the Spaces Home rules', () => {
   const now = 100 * DAY;
-  // Failed last turns, quiet for 4 to 13 days: all four are Stalled.
+  // Unanswered questions, quiet for 4 to 13 days: all four are Stalled. (Not
+  // failures: an unseen failure leaves after a week, a question stays.)
   const seedStalled = () => {
-    chat('s1', { status: 'error', error: 'x', startedAt: now - 4 * DAY - 10, completedAt: now - 4 * DAY });
-    chat('s2', { status: 'error', error: 'x', startedAt: now - 6.9 * DAY - 10, completedAt: now - 6.9 * DAY });
-    chat('s3', { status: 'error', error: 'x', startedAt: now - 7 * DAY - 10, completedAt: now - 8 * DAY });
-    chat('s4', { status: 'error', error: 'x', startedAt: now - 13 * DAY - 10, completedAt: now - 13 * DAY });
+    chat('s1', { status: 'completed', reply: 'Ship it?', startedAt: now - 4 * DAY - 10, completedAt: now - 4 * DAY });
+    chat('s2', { status: 'completed', reply: 'Ship it?', startedAt: now - 6.9 * DAY - 10, completedAt: now - 6.9 * DAY });
+    chat('s3', { status: 'completed', reply: 'Ship it?', startedAt: now - 7 * DAY - 10, completedAt: now - 8 * DAY });
+    chat('s4', { status: 'completed', reply: 'Ship it?', startedAt: now - 13 * DAY - 10, completedAt: now - 13 * DAY });
   };
   const ids = (items: Array<{ id: string }>) => items.map((item) => item.id.replace('conversation:', ''));
 

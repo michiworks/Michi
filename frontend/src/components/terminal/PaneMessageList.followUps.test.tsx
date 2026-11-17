@@ -29,12 +29,16 @@ describe('PaneMessageList follow-ups presentation', () => {
     expect(within(section).getByRole('heading', { name: 'Explore further' })).toBeTruthy();
     expect(section.querySelectorAll('.t-followup-row')).toHaveLength(3);
     expect(section.querySelector('.t-followup-num, .t-followup-text svg')).toBeNull();
-    const collapse = within(section).getByRole('button', { name: 'Collapse follow-ups' });
-    const content = document.getElementById(collapse.getAttribute('aria-controls')!)!;
-    fireEvent.click(collapse);
+    // The whole heading line is the toggle.
+    const toggle = within(section).getByRole('button', { name: 'Explore further' });
+    expect(toggle.closest('h3')).toBe(within(section).getByRole('heading', { name: 'Explore further' }));
+    const content = document.getElementById(toggle.getAttribute('aria-controls')!)!;
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(content.hidden).toBe(true);
     expect(within(section).queryByRole('button', { name: /Continue follow-up/ })).toBeNull();
-    fireEvent.click(within(section).getByRole('button', { name: 'Expand follow-ups' }));
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(content.hidden).toBe(false);
     expect(within(section).getAllByRole('button', { name: /Continue follow-up/ })).toHaveLength(3);
   });
@@ -43,7 +47,7 @@ describe('PaneMessageList follow-ups presentation', () => {
     render(list({ status: 'streaming', followUps: [], followUpsGenerating: true }));
     const section = screen.getByRole('region', { name: 'Suggested follow-ups' });
     expect(section.getAttribute('aria-busy')).toBe('true');
-    expect(within(section).getByRole('status').textContent).toBe('Preparing next steps...');
+    expect(within(section).getByRole('status').textContent).toBe('Preparing next steps…');
     expect(section.querySelectorAll('.t-followup-skeleton')).toHaveLength(3);
     expect(section.querySelector('.t-followup-row, .t-followup-num')).toBeNull();
   });
@@ -63,6 +67,35 @@ describe('PaneMessageList follow-ups presentation', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /^Branch follow-up/ })[1]);
     expect(onBranch).toHaveBeenCalledWith(node.followUps[1]);
     expect(onContinue).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PaneMessageList follow-ups arrival', () => {
+  const answer = { id: 'answer', role: 'assistant' as const, text: 'Done.', toolCalls: [] };
+  const rows = () => [...screen.getByRole('region', { name: 'Suggested follow-ups' }).querySelectorAll<HTMLElement>('.t-followup-row')];
+  const arriving = () => rows().map((row) => row.hasAttribute('data-arriving'));
+
+  it('renders restored follow-ups settled', () => {
+    render(list({ messages: [answer] }));
+    expect(arriving()).toEqual([false, false, false]);
+  });
+
+  it('pops in the follow-ups of a turn that ended on screen, once', () => {
+    const { rerender } = render(list({ status: 'streaming', followUps: [], messages: [answer] }));
+    rerender(list({ messages: [answer] }));
+    expect(arriving()).toEqual([true, true, true]);
+    // The last row's pop has ended: the next render leaves them settled.
+    fireEvent.animationEnd(rows()[2]);
+    rerender(list({ messages: [answer] }));
+    expect(arriving()).toEqual([false, false, false]);
+  });
+
+  it('never replays the pop when the follow-ups are collapsed and expanded again', () => {
+    const { rerender } = render(list({ status: 'streaming', followUps: [], messages: [answer] }));
+    rerender(list({ messages: [answer] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Explore further' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Explore further' }));
+    expect(arriving()).toEqual([false, false, false]);
   });
 });
 
@@ -98,7 +131,8 @@ describe('PaneMessageList follow-ups after a short streamed answer', () => {
         blocks: [{ id: 'answer-b-0', kind: 'answer', rawText: '好', streaming: true }],
       }],
     };
-    const { rerender } = render(list(currentNode));
+    const { container, rerender } = render(list(currentNode));
+    const metaLine = () => container.querySelector('.t-answer-meta');
     const dispatch = (action: ChatAction) => {
       currentNode = reduceNodes({ [node.nodeId]: currentNode }, action)[node.nodeId];
     };
@@ -123,6 +157,8 @@ describe('PaneMessageList follow-ups after a short streamed answer', () => {
     if (doneTiming === 'before') {
       finish();
       expect(screen.queryByRole('region', { name: 'Suggested follow-ups' })).toBeNull();
+      // The meta line waits for the typewriter too.
+      expect(metaLine()).toBeNull();
     }
 
     for (let i = 0; i < 20 && frames.size > 0; i++) {
@@ -140,5 +176,6 @@ describe('PaneMessageList follow-ups after a short streamed answer', () => {
       // Final metadata extraction must preserve the section and its entry animation.
       expect(screen.getByRole('region', { name: 'Suggested follow-ups' })).toBe(section);
     }
+    expect(metaLine()).not.toBeNull();
   });
 });

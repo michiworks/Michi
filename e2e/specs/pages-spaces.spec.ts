@@ -1,5 +1,5 @@
 import type { PageChangeDto } from 'michi-shared';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { bootWithWorkspace, installMockApi } from '../fixtures/mockApi';
 import { createPagesMockController } from '../fixtures/pagesFixtures';
 import { openArea } from '../fixtures/shell';
@@ -82,6 +82,9 @@ test('create a release Space, add a nested page, edit Risks and resolve its prot
   const space = page.locator('main.space-doc');
   await expect(space.locator('.michi-doc-title-row').getByRole('heading', { name: 'Launch plan', exact: true })).toBeVisible();
   await expect(space.getByText('Release checklist', { exact: true }).first()).toBeVisible();
+  // The new page rises in over its skeleton. Clicking its moving menu button
+  // makes the click retry with a forced scroll, and the scroll closes the menu.
+  await expect(space).not.toHaveAttribute('data-arriving');
 
   await space.getByRole('button', { name: 'Page actions' }).click();
   await page.getByRole('menuitem', { name: 'Add a page inside' }).click();
@@ -187,13 +190,11 @@ test('sidebar page menus create, rename, move and trash nested pages', async ({ 
   await sidebar.getByRole('button', { name: 'Design decisions', exact: true }).click();
   await expect(heading).toHaveText('Design decisions');
   await openMenu('Review');
+  // Trash can be undone: the move runs at once, with Undo in its toast.
   await page.getByRole('menuitem', { name: 'Move to trash', exact: true }).click();
-  const trash = page.getByRole('dialog', { name: 'Move to trash', exact: true });
-  await trash.getByRole('button', { name: 'Cancel' }).click();
-  expect(mock.pages.has('page-3')).toBe(true);
-  await openMenu('Review');
-  await page.getByRole('menuitem', { name: 'Move to trash', exact: true }).click();
-  await trash.getByRole('button', { name: 'Move to trash', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Move to trash', exact: true })).toHaveCount(0);
+  const moved = page.locator('[data-sonner-toast]').filter({ hasText: 'Moved “Review” to Trash' });
+  await expect(moved.getByRole('button', { name: 'Undo', exact: true })).toBeVisible();
   await expect(sidebar.getByRole('button', { name: 'Review', exact: true })).toHaveCount(0);
   await expect(sidebar.getByRole('button', { name: 'Design decisions', exact: true })).toHaveCount(0);
   await expect(page.locator('main.space-doc')).toHaveCount(0);
@@ -423,6 +424,63 @@ test('block handles persist pointer sorting, cancel drags, and expose native blo
   expect(errors).toEqual([]);
 });
 
+
+test('on a touch screen a block’s hidden chrome takes no tap until a tap selects the block', async ({ browser, baseURL }) => {
+  // A touch screen reports (hover: none); the desktop width keeps the page's layout.
+  const context = await browser.newContext({ baseURL, viewport: { width: 1280, height: 800 }, hasTouch: true });
+  const page = await context.newPage();
+  try {
+    const mock = createPagesMockController();
+    await installMockApi(page, { custom: mock.handle });
+    await bootWithWorkspace(page, 'Touch blocks');
+    await closeNewWorkspaceDialog(page);
+    await openSpaces(page);
+    const create = await newSpace(page);
+    await create.getByLabel('Name').fill('Touch notes');
+    await create.getByLabel('Starting point').selectOption('release');
+    await create.getByRole('button', { name: 'Create page' }).click();
+    const blocks = page.locator('main.space-doc [data-native-page] > .michi-doc-block[data-top]');
+    await expect(blocks).toHaveCount(8);
+    const goal = blocks.filter({ hasText: 'Ship a clear release.' });
+    const risk = blocks.filter({ hasText: 'Confirm the launch date.' });
+    const center = async (target: Locator) => {
+      const box = (await target.boundingBox())!;
+      return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    };
+    const grip = await center(goal.getByRole('button', { name: 'Block menu' }));
+
+    // The hidden ⋮⋮ lets the tap through: no menu opens.
+    await page.touchscreen.tap(grip.x, grip.y);
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(goal).not.toHaveAttribute('data-active');
+
+    // A tap on the block selects it and brings out its margin and toolbar, and runs nothing.
+    const words = await center(goal.getByText('Ship a clear release.'));
+    await page.touchscreen.tap(words.x, words.y);
+    await expect(goal).toHaveAttribute('data-active', 'true');
+    await expect(goal.locator('.michi-doc-block__margin')).toHaveCSS('opacity', '1');
+    await expect(goal.getByRole('toolbar')).toHaveCSS('opacity', '1');
+    await expect(page.getByRole('menu')).toHaveCount(0);
+
+    // The next tap on ⋮⋮ acts.
+    await page.touchscreen.tap(grip.x, grip.y);
+    await expect(page.getByRole('menu', { name: /^Block menu/ })).toBeVisible();
+
+    // A tap on another block closes the menu and selects that block instead.
+    const other = await center(risk.getByText('Confirm the launch date.'));
+    await page.touchscreen.tap(other.x, other.y);
+    await expect(page.getByRole('menu')).toHaveCount(0);
+    await expect(goal).not.toHaveAttribute('data-active');
+    await expect(goal.locator('.michi-doc-block__margin')).toHaveCSS('opacity', '0');
+    await expect(risk).toHaveAttribute('data-active', 'true');
+
+    // Esc puts it away.
+    await page.keyboard.press('Escape');
+    await expect(risk).not.toHaveAttribute('data-active');
+  } finally {
+    await context.close();
+  }
+});
 
 test('database configuration suggestions show field changes and apply only after acceptance', async ({ page }) => {
   const mock = createPagesMockController();

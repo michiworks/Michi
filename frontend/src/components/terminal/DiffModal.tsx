@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import { ModalShell } from '../ui/ModalShell';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 import { UnifiedDiff } from './diff/UnifiedDiff';
 import { useWorkspaceDiff } from './diff/useWorkspaceDiff';
+import { WarningIcon } from './icons';
 
 export interface DiffModalProps {
   /** Workspace whose cwd the diff is resolved against. */
@@ -18,6 +21,8 @@ export interface DiffModalProps {
  */
 export function DiffModal({ workspaceId, filePath, onClose }: DiffModalProps) {
   const state = useWorkspaceDiff(workspaceId, filePath);
+  // A notification's click opens its target over the pane this sits on.
+  useEffect(() => leaveOverlaysEvent.subscribe(() => onClose()), [onClose]);
 
   return (
     <ModalShell
@@ -55,8 +60,9 @@ export function DiffModal({ workspaceId, filePath, onClose }: DiffModalProps) {
             <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', padding: '12px' }}>loading diff…</div>
           )}
           {state.phase === 'error' && (
-            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', padding: '12px' }}>
-              ⚠ {state.status === 404 ? 'no diff available for this file' : state.status ? `request failed (${state.status})` : 'failed to fetch diff'}
+            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)', padding: '12px', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <WarningIcon size="sm" style={{ flexShrink: 0 }} />
+              {state.status === 404 ? 'no diff available for this file' : state.status ? `request failed (${state.status})` : 'failed to fetch diff'}
             </div>
           )}
           {state.phase === 'loaded' && <UnifiedDiff diff={state.diff} wrap />}

@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReplyMemorySource } from 'michi-shared';
 
-const api = vi.hoisted(() => ({ fetchReplyMemorySources: vi.fn(), deleteMemory: vi.fn(), hideRecalledTurn: vi.fn() }));
+const api = vi.hoisted(() => ({ fetchReplyMemorySources: vi.fn(), deleteMemory: vi.fn() }));
 const nav = vi.hoisted(() => ({ openSourcePopover: vi.fn(), requestMemoryReveal: vi.fn() }));
 vi.mock('../../services/api/memories', async (original) => ({
   ...(await original<typeof import('../../services/api/memories')>()),
-  fetchReplyMemorySources: api.fetchReplyMemorySources, deleteMemory: api.deleteMemory, hideRecalledTurn: api.hideRecalledTurn,
+  fetchReplyMemorySources: api.fetchReplyMemorySources, deleteMemory: api.deleteMemory,
 }));
 vi.mock('../../state/sourceNav/sourceNav', () => ({ openSourcePopover: nav.openSourcePopover }));
 vi.mock('./pages/settings/memoryReveal', () => ({ requestMemoryReveal: nav.requestMemoryReveal }));
@@ -23,8 +23,6 @@ const saved: ReplyMemorySource = { kind: 'memory', memoryId: 'mem-1', text: 'Use
 const noted: ReplyMemorySource = { kind: 'memory', memoryId: 'mem-2', text: 'The user is a night owl.', savedBy: 'michi', at: NOW - 86_400_000, from: null };
 const imported: ReplyMemorySource = { kind: 'memory', memoryId: 'mem-3', text: 'Run tests with vitest.', savedBy: 'import', importSource: 'codex',
   at: new Date(2025, 10, 6).getTime(), from: null };
-const pastChat: ReplyMemorySource = { kind: 'conversation', docId: 7, text: 'The launch is on March 3', at: new Date(2026, 10, 6).getTime(),
-  from: { nodeId: 'n-old', messageId: 'u-7', title: 'Launch plan' } };
 
 function answer(sources: ReplyMemorySource[]) {
   api.fetchReplyMemorySources.mockImplementation(async (_apiBase: string, _nodeId: string, ids: string[]) => ({
@@ -49,7 +47,7 @@ async function expanded(target: ReplySourcesTarget = LOCAL) {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(NOW);
-  for (const fn of [api.fetchReplyMemorySources, api.deleteMemory, api.hideRecalledTurn, nav.openSourcePopover, nav.requestMemoryReveal]) fn.mockReset();
+  for (const fn of [api.fetchReplyMemorySources, api.deleteMemory, nav.openSourcePopover, nav.requestMemoryReveal]) fn.mockReset();
   resetReplySources();
 });
 afterEach(() => vi.useRealTimers());
@@ -83,25 +81,24 @@ describe('ReplyMemorySources', () => {
     expect(screen.queryByRole('list')).toBeNull();
     unmount();
     resetReplySources();
-    answer([saved, pastChat]);
+    answer([saved, noted]);
     show();
     expect(await screen.findByRole('button', { name: 'Based on 2 things you told me' })).toBeTruthy();
   });
 
   it('expands into who, when and where; the source opens its conversation; Escape collapses and keeps focus on the toggle', async () => {
-    answer([saved, noted, imported, pastChat]);
+    answer([saved, noted, imported]);
     const toggle = await expanded();
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     const list = screen.getByRole('list');
     expect(toggle.getAttribute('aria-controls')).toBe(list.id);
     const items = screen.getAllByRole('listitem');
     expect(items.map((item) => item.querySelector('.t-reply-sources-meta')!.textContent)).toEqual([
-      'Saved by you · today · Repo setup', 'Noted by Michi · yesterday', 'From Codex · Nov 6, 2025', 'From a past chat · Nov 6 · Launch plan',
+      'Saved by you · today · Repo setup', 'Noted by Michi · yesterday', 'From Codex · Nov 6, 2025',
     ]);
-    expect(items[3]!.textContent).toContain('“The launch is on March 3”');
-    fireEvent.click(screen.getByRole('button', { name: 'Launch plan' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Repo setup' }));
     expect(nav.openSourcePopover).toHaveBeenCalledWith(expect.objectContaining({
-      target: { backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n-old', messageId: 'u-7' },
+      target: { backendConnectionId: 'local', workspaceId: 'ws-1', nodeId: 'n-src', messageId: 'u-1' },
     }));
     fireEvent.click(screen.getAllByRole('button', { name: 'Forget' })[0]!);
     fireEvent.keyDown(screen.getByRole('button', { name: 'Confirm forget' }), { key: 'Escape' });
@@ -131,20 +128,14 @@ describe('ReplyMemorySources', () => {
     expect(screen.queryByRole('region')).toBeNull();
   });
 
-  it('a failed Forget says so and keeps the buttons; Don\'t recall asks first, then hides the past turn', async () => {
-    answer([saved, pastChat]);
+  it('a failed Forget says so and keeps the buttons', async () => {
+    answer([saved]);
     api.deleteMemory.mockRejectedValueOnce(new MemoryApiError(500, 'disk full'));
-    api.hideRecalledTurn.mockResolvedValueOnce(undefined);
     await expanded();
     fireEvent.click(screen.getByRole('button', { name: 'Forget' }));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm forget' }));
     expect((await screen.findByRole('alert')).textContent).toBe('Couldn’t forget it: disk full');
     expect(screen.getByRole('button', { name: 'Confirm forget' })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Don’t recall' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    await screen.findByRole('status');
-    expect(api.hideRecalledTurn).toHaveBeenCalledWith(LOCAL.apiBase, 7);
-    expect(screen.getByRole('status').textContent).toBe('Michi won’t recall this again.');
   });
 
   it('Edit opens Settings › Memory at the memory, on this machine\'s backend only', async () => {
@@ -169,7 +160,7 @@ describe('ReplyMemorySources', () => {
   });
 
   it('every control is a button: a tap\'s hover lands on a control (MessageBlock reveals nothing for it)', async () => {
-    answer([saved, pastChat]);
+    answer([saved, noted]);
     await expanded();
     for (const control of screen.getByRole('region').querySelectorAll('button, a, [role="button"]')) {
       expect(control.tagName).toBe('BUTTON');
@@ -192,7 +183,7 @@ describe('ReplyMemorySources, timing and freshness', () => {
   });
 
   it('opening asks again: what was forgotten elsewhere is gone from the list', async () => {
-    answer([saved, pastChat]);
+    answer([saved, noted]);
     show();
     const toggle = await screen.findByRole('button', { name: 'Based on 2 things you told me' });
     answer([saved]);

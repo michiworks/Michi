@@ -14,6 +14,9 @@ type Of<K extends Kind>=ChartData extends infer C?C extends {kind:infer X}?K ext
 // The values are --desk-chart-0…9 and --desk-ramp-0…3 in desk.css, which night mode swaps for its own; a variable is what lets the SVG follow it.
 const COLORS=Array.from({length:10},(_,i)=>`var(--desk-chart-${i})`);
 const color=(i:number)=>COLORS[i%COLORS.length];
+/** A funnel's steps are one quantity in order, so they take the accent in steps of lightness, not different hues. The ramp
+ * stops at 70%: below that the last step falls under 3:1 on the page (bone's accent reads 3.13 at 70%, 2.62 at 60%). */
+const step=(i:number,n:number)=>`color-mix(in srgb, ${COLORS[0]} ${n<=1?100:Math.round(100-i*30/(n-1))}%, var(--desk-paper))`;
 const RAMP=Array.from({length:4},(_,i)=>`var(--desk-ramp-${i})`);
 const H=220,DOTS=24,fmt=(n:number)=>n.toLocaleString(locale());
 const label=(s:string,i:number)=>s||L(`系列 ${i+1}`,`Series ${i+1}`);
@@ -42,12 +45,14 @@ const scatter=(c:Of<'scatter'>)=><ScatterChart {...look} dataKey={{x:'x',y:'y'}}
 type Dot={s:string;c:string;x:number;y:number;z:number};
 const dotTip=({active,payload}:{active?:boolean;payload?:readonly {payload?:unknown}[]})=>{const d=active?payload?.[0]?.payload as Dot|undefined:undefined;
   return d?<div className="desk-chart-tip"><b>{d.s}</b><span>{L(`x ${fmt(d.x)}，y ${fmt(d.y)}${d.z===1?'':`，大小 ${fmt(d.z)}`}`,`x ${fmt(d.x)}, y ${fmt(d.y)}${d.z===1?'':`, size ${fmt(d.z)}`}`)}</span></div>:null;};
+// eslint-disable-next-line no-restricted-syntax -- recharts writes the size as an SVG attribute, which takes no var(); 12 is --fs-md
+const BUBBLE_TICK={fontSize:12,fill:'currentColor'};
 /** Mantine's bubble chart draws one colour and a category x axis (a timeline of rows), so this one puts a number axis under it and colours each bubble itself;
  * a point with no size is a plain dot. */
 const bubble=(c:Of<'bubble'>)=>{
   const data:Dot[]=c.series.flatMap((s,i)=>s.points.map(p=>({s:label(s.label,i),c:color(i),x:p.x,y:p.y,z:p.z??1})));
   return <BubbleChart {...look} data={data} dataKey={{x:'x',y:'y',z:'z'}} range={[40,400]} valueFormatter={fmt}
-    xAxisProps={{type:'number',domain:['auto','auto'],tickFormatter:fmt}} yAxisProps={{width:48,tick:{fontSize:12,fill:'currentColor'},tickFormatter:fmt}}
+    xAxisProps={{type:'number',domain:['auto','auto'],tickFormatter:fmt}} yAxisProps={{width:48,tick:BUBBLE_TICK,tickFormatter:fmt}}
     tooltipProps={{content:dotTip}}
     scatterProps={{shape:(p:{cx?:number;cy?:number;size?:number;payload?:Dot})=><circle cx={p.cx} cy={p.cy} r={Math.sqrt((p.size??0)/Math.PI)} fill={p.payload?.c} fillOpacity={.7}/>}}/>;
 };
@@ -62,7 +67,7 @@ const heatmap=(c:Of<'heatmap'>)=>{
   return <Heatmap data={data} startDate={dates[0]<floor?floor:dates[0]} endDate={end} colors={RAMP} firstDayOfWeek={1} withMonthLabels monthLabels={MONTHS} withWeekdayLabels weekdayLabels={WEEKDAYS}
     withTooltip getTooltipLabel={({date,value})=>L(`${date}：${value==null?'没有':fmt(value)}`,`${date}: ${value==null?'none':fmt(value)}`)} withLegend legendLabels={L(['少','多'],['Less','More'])}/>;
 };
-const funnel=(c:Of<'funnel'>)=><FunnelChart data={slices(c.steps)} size={H} withTooltip valueFormatter={fmt}/>;
+const funnel=(c:Of<'funnel'>)=><FunnelChart data={c.steps.map((s,i,all)=>({name:s.label,value:s.value,color:step(i,all.length)}))} size={H} withTooltip valueFormatter={fmt}/>;
 const sparkline=(c:Of<'sparkline'>)=><Sparkline h="100%" w="100%" data={c.values} color={COLORS[0]} curveType="monotone"/>;
 const sankey=(c:Of<'sankey'>)=>{
   const at=new Map(c.nodes.map((n,i)=>[n.name,i]));
@@ -98,7 +103,7 @@ export function Chart({block:c}:{block:ChartData}){
   const names=legend(c),tabular=c.kind==='bar'||c.kind==='line'||c.kind==='area'||c.kind==='composite';
   return <div className="desk-chart">
     <div className="desk-chart-box" data-kind={c.kind} role="img" aria-label={L(`${c.title}（${CHART_KIND_LABELS[c.kind]}）`,`${c.title} (${CHART_KIND_LABELS[c.kind]})`)}>{(DRAW[c.kind] as (c:ChartData)=>ReactNode)(c)}</div>
-    {names.length>0&&<ul className="desk-chart-legend">{names.map((n,i)=><li key={i}><span className="desk-chart-swatch" style={{background:color(i)}} aria-hidden="true"/>{n.text}{n.value!==undefined&&<b>{fmt(n.value)}</b>}</li>)}</ul>}
+    {names.length>0&&<ul className="desk-chart-legend">{names.map((n,i)=><li key={i}><span className="desk-chart-swatch" style={{background:c.kind==='funnel'?step(i,names.length):color(i)}} aria-hidden="true"/>{n.text}{n.value!==undefined&&<b>{fmt(n.value)}</b>}</li>)}</ul>}
     {tabular&&<Table title={c.title} series={c.series}/>}
   </div>;
 }

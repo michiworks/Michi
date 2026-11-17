@@ -5,20 +5,24 @@ import { usePrefs } from '../../state/prefs';
 import { isWorkspaceExpanded, sortTrees, sortLiveProjects, workspaceHasUnread, type NodePinnedAt } from '../../state/sidebarSelectors';
 import { isListedThread, isVisibleConversationNode } from '../../state/conversationVisibility';
 import { useRunningWorkNodeIds } from '../../state/runningWork';
-import WorkspaceRow from './WorkspaceRow';
+import WorkspaceRow, { type WorkspaceRowMove } from './WorkspaceRow';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { descendants } from '../../state/tree';
 import { flattenBranchIds, useSidebarTreeController } from './sidebar/useSidebarTreeController';
 import { EARLIER_GROUP_KEY, splitEarlierWorkspaces } from './sidebar/earlierWorkspaces';
-import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
+import { PROVISIONAL_LABEL_STYLE, rowLabel, type RowLabel } from './sidebar/rowLabel';
+import { rowKeyDown } from './sidebar/rowKeyboard';
 import { Row } from './primitives';
 import { Chevron } from './ThreadRow';
 import { rowGeom, spinePadding, WORKSPACE_ICON_GAP, WORKSPACE_ICON_SIZE, type RowGeom } from './sidebarRowStyle';
 import type { Project, ChatNodeState } from '../../state/chatTypes';
 import { SidebarScroller } from './SidebarScroller';
+import { ICON_PX, strokeFor } from './icons';
 
 const MERGED_PREVIEW_LIMIT = 5;
 const MERGED_PAGE_SIZE = 10;
+/** A merged-section title fades out at the row's end. */
+const TITLE_FADE = 'linear-gradient(to right, black calc(100% - 14px), transparent)';
 
 interface MergeGroup {
   mergeNodeId: string;
@@ -31,6 +35,7 @@ export default function WorkspaceTree({
   chatViewActive = true,
   onOpenWorkspaces,
   workspacesPageOpen = false,
+  phoneDrawer = false,
 }: {
   /** Called after a thread/branch click so the parent can switch to dashboard. */
   onActivate?: () => void;
@@ -42,6 +47,8 @@ export default function WorkspaceTree({
   onOpenWorkspaces?: () => void;
   /** The Workspaces page is on screen: "All N ›" reads as current. */
   workspacesPageOpen?: boolean;
+  /** The tree is the phone drawer's: its folder rows follow ST-36 (useSidebarTreeController). */
+  phoneDrawer?: boolean;
 }) {
   const {
     projects,
@@ -74,7 +81,7 @@ export default function WorkspaceTree({
   const { openPanes } = useChatPanes();
   // Conversations whose workflow or background agents still run after their turn ended.
   const workRunning = useRunningWorkNodeIds();
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const earlierGroupId = `sidebar-earlier-${useId().replace(/[^\w-]/g, '')}`;
 
   const liveProjects = useMemo(
@@ -93,17 +100,14 @@ export default function WorkspaceTree({
     });
   }, []);
 
+  /** Puts `sourceId` just before (a drop, Move up) or after (Move down) `targetId`. */
   const commitWorkspaceReorder = useCallback(
-    (sourceId: string, targetId: string) => {
+    (sourceId: string, targetId: string, place: 'before' | 'after' = 'before') => {
       if (sourceId === targetId) return;
       const ids = liveProjects.map((p) => p.id);
-      const fromIdx = ids.indexOf(sourceId);
-      const toIdx = ids.indexOf(targetId);
-      if (fromIdx === -1 || toIdx === -1) return;
-      const next = [...ids];
-      const [moved] = next.splice(fromIdx, 1);
-      const insertAt = toIdx > fromIdx ? toIdx - 1 : toIdx;
-      next.splice(insertAt, 0, moved);
+      if (!ids.includes(sourceId) || !ids.includes(targetId)) return;
+      const next = ids.filter((id) => id !== sourceId);
+      next.splice(next.indexOf(targetId) + (place === 'after' ? 1 : 0), 0, sourceId);
       // Preserve any archived/stale IDs from the current pref as tombstones
       // — sortLiveProjects ignores them, but they let us restore explicit
       // ordering if a workspace is later unarchived.
@@ -113,6 +117,12 @@ export default function WorkspaceTree({
     },
     [liveProjects, prefs.workspaceOrder, setPref],
   );
+  // The drag's order without dragging: past the neighbour in the row's own
+  // list. Pinned workspaces keep their pin order, so they get none.
+  const moveWithin = (group: readonly Project[], index: number): WorkspaceRowMove => ({
+    up: index > 0 ? () => commitWorkspaceReorder(group[index].id, group[index - 1].id, 'before') : undefined,
+    down: index < group.length - 1 ? () => commitWorkspaceReorder(group[index].id, group[index + 1].id, 'after') : undefined,
+  });
 
   const dndForProject = useCallback(
     (projectId: string) => ({
@@ -182,7 +192,7 @@ export default function WorkspaceTree({
     isBranchMenuTarget,
     renamingNodeId,
     endRename,
-  } = useSidebarTreeController({ onActivate, branchIdsForProject });
+  } = useSidebarTreeController({ onActivate, branchIdsForProject, phoneDrawer });
 
   const toggleWorkspace = useCallback(
     (projectId: string) =>
@@ -240,7 +250,7 @@ export default function WorkspaceTree({
     [activeProjectId, selectProjectStable, toggleWorkspace],
   );
 
-  const renderProject = (project: typeof projects[number], opts: { dnd?: ReturnType<typeof dndForProject> } = {}) => {
+  const renderProject = (project: typeof projects[number], opts: { dnd?: ReturnType<typeof dndForProject>; move?: WorkspaceRowMove } = {}) => {
     const wsExpanded = isWorkspaceExpanded(
       prefs.sidebarExpanded,
       project.id,
@@ -261,6 +271,7 @@ export default function WorkspaceTree({
         <WorkspaceRow
           project={project}
           dnd={opts.dnd}
+          move={opts.move}
           workspaceExpanded={wsExpanded}
           forceExpand={unreadFilterOn}
           activeProjectId={activeProjectId}
@@ -311,6 +322,7 @@ export default function WorkspaceTree({
           renamingNodeId={renamingNodeId}
           onRenameNode={renameNode}
           onRenameEnd={endRename}
+          phoneDrawer={phoneDrawer}
         />
         {wsExpanded && mergeGroups.length > 0 && (
           <MergedGroupsSection
@@ -346,7 +358,7 @@ export default function WorkspaceTree({
       style={{
         // Horizontal gutter between tree content and the sidebar edges. The
         // scroll thumb still sits at the list's true right edge; only the rows
-        // inset. 0 = original flush look. See Sidebar.tsx `--sb-inset`.
+        // inset. See Sidebar.tsx `--sb-inset`.
         paddingLeft: 'var(--sb-inset, 0px)',
         paddingRight: 'var(--sb-inset, 0px)',
       }}
@@ -420,7 +432,7 @@ export default function WorkspaceTree({
               <>
                 <SectionLabel label="Projects" action={showPinnedSection ? null : allLink} />
                 <div className="sb-section-items">
-                  {recent.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
+                  {recent.map((p, index) => renderProject(p, { dnd: dndForProject(p.id), move: moveWithin(recent, index) }))}
                   {earlier.length > 0 && (
                     <EarlierGroup
                       id={earlierGroupId}
@@ -432,7 +444,7 @@ export default function WorkspaceTree({
                         groups: { ...cur.groups, [EARLIER_GROUP_KEY]: !(cur.groups?.[EARLIER_GROUP_KEY] === true) },
                       }))}
                     >
-                      {earlier.map((p) => renderProject(p, { dnd: dndForProject(p.id) }))}
+                      {earlier.map((p, index) => renderProject(p, { dnd: dndForProject(p.id), move: moveWithin(earlier, index) }))}
                     </EarlierGroup>
                   )}
                 </div>
@@ -597,14 +609,15 @@ function MergedGroupsSection({
         const expanded = !collapsedMergeGroups.has(g.mergeNodeId);
         const branchChildIds = Array.from(descendants(g.mergeNodeId, project.edges, isAlive));
         const hasChildren = g.sources.length > 0 || branchChildIds.length > 0;
+        const toggle = () => toggleMergeGroup(g.mergeNodeId);
         return (
           <div key={g.mergeNodeId} data-testid={`merge-group-${g.mergeNodeId}`}>
             <Row
               active={isFocused}
-              onClick={() => onSelectMergeNode(g.mergeNodeId)}
               onContextMenu={(e: React.MouseEvent) => onContextMenu(g.mergeNodeId, e)}
               data-context-target=""
               style={{
+                position: 'relative',
                 display: 'flex',
                 alignItems: 'center',
                 gap: 5,
@@ -622,41 +635,40 @@ function MergedGroupsSection({
                 fontFamily: 'var(--ui-font)',
               }}
             >
-              <Chevron
-                expanded={expanded}
-                visible={hasChildren}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (hasChildren) toggleMergeGroup(g.mergeNodeId);
-                }}
+              {hasChildren ? (
+                <button
+                  type="button"
+                  className="sb-row-caret"
+                  aria-expanded={expanded}
+                  aria-label={`${expanded ? 'Collapse' : 'Expand'} ${mergedLabel.text}`}
+                  onClick={toggle}
+                >
+                  <Chevron expanded={expanded} visible />
+                </button>
+              ) : (
+                <Chevron expanded={expanded} visible={false} />
+              )}
+              <MergedRowTitle
+                label={mergedLabel}
+                current={isFocused}
+                onOpen={() => onSelectMergeNode(g.mergeNodeId)}
+                onMenu={(anchor) => onContextMenu(g.mergeNodeId, menuEventAt(anchor))}
+                expanded={hasChildren ? expanded : undefined}
+                onToggle={hasChildren ? toggle : undefined}
               />
-              <span
-                style={{
-                  flex: 1,
-                  overflow: 'hidden',
-                  whiteSpace: 'nowrap',
-                  maskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                  WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                  ...(mergedLabel.provisional ? PROVISIONAL_LABEL_STYLE : {}),
-                }}
-              >
-                {mergedLabel.text}
-              </span>
             </Row>
             {expanded && g.sources.map((sid) => {
               const src = nodesSnapshot[sid];
               const deleted = !src || !!src.deletedAt;
-              // Source rows are already italic and muted, so an excerpt needs no extra mark.
-              const title = deleted ? '(deleted)' : rowLabel(undefined, src).text;
               const focused = focusedNodeId === sid;
               return (
                 <Row
                   key={`src-${sid}`}
                   active={focused}
-                  onClick={() => { if (!deleted) onSelectMergeSource(sid); }}
                   onContextMenu={(e: React.MouseEvent) => { if (!deleted) onContextMenu(sid, e); }}
                   data-context-target={deleted ? undefined : ''}
                   style={{
+                    position: 'relative',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 6,
@@ -673,33 +685,34 @@ function MergedGroupsSection({
                     cursor: deleted ? 'default' : 'pointer',
                   }}
                 >
-                  <span
-                    style={{
-                      flex: 1,
-                      overflow: 'hidden',
-                      whiteSpace: 'nowrap',
-                      maskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                      WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                    }}
-                  >
-                    {title}
-                  </span>
+                  {deleted ? (
+                    <span style={{ flex: 1, overflow: 'hidden', whiteSpace: 'nowrap', maskImage: TITLE_FADE, WebkitMaskImage: TITLE_FADE }}>
+                      (deleted)
+                    </span>
+                  ) : (
+                    // Source rows are already italic and muted, so an excerpt needs no extra mark.
+                    <MergedRowTitle
+                      label={{ text: rowLabel(undefined, src).text, provisional: false }}
+                      current={focused}
+                      onOpen={() => onSelectMergeSource(sid)}
+                      onMenu={(anchor) => onContextMenu(sid, menuEventAt(anchor))}
+                    />
+                  )}
                 </Row>
               );
             })}
             {expanded && branchChildIds.map((cid) => {
               const child = nodesSnapshot[cid];
               if (!child) return null;
-              const childLabel = rowLabel(undefined, child);
               const focused = focusedNodeId === cid;
               return (
                 <Row
                   key={`child-${cid}`}
                   active={focused}
-                  onClick={() => onSelectMergeSource(cid)}
                   onContextMenu={(e: React.MouseEvent) => onContextMenu(cid, e)}
                   data-context-target=""
                   style={{
+                    position: 'relative',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 6,
@@ -715,18 +728,12 @@ function MergedGroupsSection({
                     cursor: 'pointer',
                   }}
                 >
-                  <span
-                    style={{
-                      flex: 1,
-                      overflow: 'hidden',
-                      whiteSpace: 'nowrap',
-                      maskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                      WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 14px), transparent)',
-                      ...(childLabel.provisional ? PROVISIONAL_LABEL_STYLE : {}),
-                    }}
-                  >
-                    {childLabel.text}
-                  </span>
+                  <MergedRowTitle
+                    label={rowLabel(undefined, child)}
+                    current={focused}
+                    onOpen={() => onSelectMergeSource(cid)}
+                    onMenu={(anchor) => onContextMenu(cid, menuEventAt(anchor))}
+                  />
                 </Row>
               );
             })}
@@ -750,16 +757,58 @@ function MergedGroupsSection({
   );
 }
 
+/** What a merged row's menu handler reads of a right-click, for a menu the keyboard opens. */
+function menuEventAt(anchor: { x: number; y: number }): React.MouseEvent {
+  return { preventDefault: () => {}, clientX: anchor.x, clientY: anchor.y } as unknown as React.MouseEvent;
+}
+
+/**
+ * A merged-section row's title: a button whose ::after covers the row
+ * (sidebar.css), so the whole row opens it, keyed like the other sidebar
+ * rows (rowKeyDown).
+ */
+function MergedRowTitle({ label, current, onOpen, onMenu, expanded, onToggle }: {
+  label: RowLabel;
+  current: boolean;
+  onOpen: () => void;
+  onMenu: (anchor: { x: number; y: number }) => void;
+  expanded?: boolean;
+  onToggle?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="sb-row-open"
+      aria-current={current ? 'true' : undefined}
+      onClick={onOpen}
+      onKeyDown={(e) => rowKeyDown(e, { activate: onOpen, expanded, toggle: onToggle, openMenu: onMenu })}
+    >
+      <span
+        style={{
+          display: 'block',
+          overflow: 'hidden',
+          whiteSpace: 'nowrap',
+          maskImage: TITLE_FADE,
+          WebkitMaskImage: TITLE_FADE,
+          ...(label.provisional ? PROVISIONAL_LABEL_STYLE : {}),
+        }}
+      >
+        {label.text}
+      </span>
+    </button>
+  );
+}
+
 /** Double-check glyph — "mark all read". */
 function ReadAllIcon() {
   return (
     <svg
-      width="14"
-      height="14"
+      width={ICON_PX.md}
+      height={ICON_PX.md}
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.6"
+      strokeWidth={strokeFor(ICON_PX.md)}
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"

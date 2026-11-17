@@ -122,6 +122,25 @@ describe('ContextMenu on a phone', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it('takes the focus onto its first item and gives it back as it closes', () => {
+    const row = rowElement();
+    const opener = document.createElement('button');
+    document.body.append(opener);
+    opener.focus();
+    const first = render(<Harness anchor={row} sections={sections} />);
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Rename…' }));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(document.activeElement).toBe(opener);
+    first.unmount();
+
+    // A chosen item runs with the focus already back, so one that moves it keeps it.
+    render(<Harness anchor={row} sections={sections} />);
+    const focusedAtRun: Array<Element | null> = [];
+    run.mockImplementation(() => focusedAtRun.push(document.activeElement));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Pin' }));
+    expect(focusedAtRun).toEqual([opener]);
+  });
+
   it('shows the row again if the menu goes away underneath', () => {
     const row = rowElement();
     const { unmount } = render(<Harness anchor={row} sections={sections} />);

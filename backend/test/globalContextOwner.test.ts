@@ -27,11 +27,11 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('in cloud mode a session without an owner reads no workspace, as one with another owner', () => {
+test('in cloud mode a session without an owner reads no workspace, as one with another owner', async () => {
   for (const owner of [null, undefined, '', 'alice']) {
     assert.equal(listThreads('ws', owner, 'other').status, 'no_workspace', String(owner));
     assert.equal(readNode('ws', owner, 'n-other').status, 'not_found', String(owner));
     assert.equal(readNodeOverview('ws', owner, 'n-other').status, 'not_found', String(owner));
-    assert.doesNotMatch(searchMessages('ws', owner, 'codeword', 'all').text, /n-other/, String(owner));
+    assert.doesNotMatch((await searchMessages('ws', owner, 'codeword', 'all')).text, /n-other/, String(owner));
   }
 });

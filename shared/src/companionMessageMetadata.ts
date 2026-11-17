@@ -15,8 +15,10 @@ import { COMPANION_LIMITS } from './companionConstants';
 export type CompanionRunKind =
   | 'poll'
   | 'heartbeat'
+  /** The morning brief, gone since 2026-11-17: never started again; older runs and posts keep the kind. */
   | 'brief'
   | 'welcome'
+  /** The "Since you left" catch-up, gone since 2026-11-17 (it ran no model turn); older runs keep the kind. */
   | 'catch_up'
   | 'worker_report'
   | 'wake'
@@ -33,7 +35,8 @@ export type CompanionRunKind =
 /**
  * The runs that are turns of the agent's own, each a check-in in a fresh
  * throwaway node and session (DESIGN-v2 §3.1): every run kind but polls and
- * sends (catch-ups are deterministic now, but stay a turn kind as before).
+ * sends. The brief and the catch-up no longer run; they stay check-in kinds
+ * so the posts and runs they left still read.
  * CompanionPostMetadata.kind names one. Backend services/companion/types.ts
  * CompanionTurnKind is `Exclude<CompanionRunKind, 'poll'>`, which now also
  * takes 'send'; W2-G1a can narrow it to this type.
@@ -56,14 +59,16 @@ export type CompanionPostChangeKind = 'page' | 'database' | 'item' | 'goal' | 's
 export const COMPANION_POST_CHANGE_KINDS: readonly CompanionPostChangeKind[] = Object.freeze(['page', 'database', 'item', 'goal', 'send']);
 
 /**
- * What a check-in did to a Today item (snooze, dismiss, restore: the
+ * What a check-in did to a Today item (snooze, dismiss, restore, raise: the
  * companion_update_item actions it may use) or a goal (add, reword, remove:
  * companion_edit_goal), so a receipt can say "snoozed 1 item and reworded 1
  * goal" (DESIGN-v2 §3.4). Pages and databases have none: their counts say it.
+ * `raise` puts an item into Today's "Waiting on you" with the reason
+ * (CompanionItemDto.raised); older windows read it as no action.
  */
-export type CompanionPostChangeAction = 'snooze' | 'dismiss' | 'restore' | 'add' | 'reword' | 'remove';
+export type CompanionPostChangeAction = 'snooze' | 'dismiss' | 'restore' | 'raise' | 'lower' | 'add' | 'reword' | 'remove';
 
-export const COMPANION_ITEM_CHANGE_ACTIONS: readonly CompanionPostChangeAction[] = Object.freeze(['snooze', 'dismiss', 'restore']);
+export const COMPANION_ITEM_CHANGE_ACTIONS: readonly CompanionPostChangeAction[] = Object.freeze(['snooze', 'dismiss', 'restore', 'raise', 'lower']);
 export const COMPANION_GOAL_CHANGE_ACTIONS: readonly CompanionPostChangeAction[] = Object.freeze(['add', 'reword', 'remove']);
 
 /** The actions a check-in can take on a target of this kind (none for pages, databases and sends). */
@@ -111,7 +116,7 @@ export interface CompanionPostChange {
  * has no user message. Its text is check-in material: the turn that posts it
  * is marked untrusted, a rebuilt session replays it as a one-line fact, never
  * its text (§2.8 T2), and its follow-up chips only fill the composer (T3).
- * Rendered as "<name> · check-in" ("morning brief", "worker update" by kind)
+ * Rendered as "<name> · check-in" ("worker update" by kind)
  * with a receipt of `changes` and no tool rows. W2-G1a writes it
  * (services/companion/posts.ts); W1-B replays it; W2-F1a renders it.
  */
@@ -204,7 +209,7 @@ export function parseCompanionSendSource(value: unknown): CompanionSendSource | 
 /**
  * The kind of untrusted material a turn started with or read (DESIGN-v2 §2.8
  * T4, T5): `checkin` = text a check-in wrote (posts, notes, goal readings and
- * reworded goals, the brief, card summaries, blocks and rows it wrote);
+ * reworded goals, card summaries, blocks and rows it wrote);
  * `collector` = what a source brought in (item titles, mail, CR text). It is
  * the `detail` W2-E records with recordUntrustedSource, and what
  * CompanionTurnMetadata.startTaint names.

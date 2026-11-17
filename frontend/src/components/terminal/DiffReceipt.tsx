@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { AnimatePresence, PresenceContext, motion } from 'motion/react';
 import type { ChatMessage } from '../../state/chatTypes';
 import { deriveDiffReceipt } from '../../lib/turnDiffReceipt';
@@ -38,6 +38,7 @@ const RECEIPT_GROW_STYLE: React.CSSProperties = { display: 'flow-root' };
 export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceiptProps) {
   const receipt = useMemo(() => deriveDiffReceipt(message), [message]);
   const [expanded, setExpanded] = useState(false);
+  const openedByClickRef = useRef(false);
   const [diffPath, setDiffPath] = useState<string | null>(null);
   // Decided once, so the element tree never changes under the receipt.
   const [grows] = useState(enter);
@@ -66,17 +67,15 @@ export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceipt
       <button
         type="button"
         data-testid="diff-receipt-header"
-        onClick={() => setExpanded((e) => !e)}
+        onClick={() => { openedByClickRef.current = !expanded; setExpanded(!expanded); }}
         className="t-hover-fg"
         aria-expanded={expanded}
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: 8,
-          background: 'transparent',
           border: 'none',
           padding: 0,
-          color: 'inherit',
           font: 'inherit',
           cursor: 'pointer',
           textAlign: 'left',
@@ -100,7 +99,7 @@ export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceipt
       </button>
 
       {/* The file list opens and closes as a height disclosure (260/160ms). */}
-      <Reveal show={expanded}>
+      <Reveal show={expanded} scrollOnOpen={openedByClickRef}>
         <div style={{ marginTop: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
           {files.map((f) => (
             <button
@@ -115,9 +114,7 @@ export function DiffReceipt({ message, workspaceId, enter = false }: DiffReceipt
                 alignItems: 'flex-start',
                 gap: 8,
                 paddingLeft: 16,
-                background: 'transparent',
                 border: 'none',
-                color: 'inherit',
                 font: 'inherit',
                 cursor: 'pointer',
                 textAlign: 'left',

@@ -3,6 +3,7 @@ export { writeSseFrame, type SseWritableResponse } from "../services/httpSse";
 import { createToolOutputStreamProjector, projectMessageRowsForTransport } from "./toolOutputTransport";
 import { resetKiroContext } from '../services/resetKiroContext';
 import { subscribeSessionStates } from '../agents/sessionStateFeed';
+import { sessionStateForFeed } from './sessionStateWire';
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -19,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import { CheckinSessionError, ChatManager, ExtraContext, PrimaryAgentBindingError, primaryAgentSessionOptions } from "../services/chatManager";
 import { assistantPurposeOf, assistantTargetWorkspace, isAssistantNode } from "../assistant/identity";
 import { companionStartTaint } from "../assistant/startTaint";
-import { sessionReplayHistory } from "../agents/sessionReplayView";
+import { sessionReplayTranscript } from "../agents/sessionReplayView";
 import { getCompanionSettings } from "../services/companion/settings";
 import { forgetCompanionContext } from "../services/companion/turnContext";
 import { activeTurnTrust, carriedCompanionTaintOf, clearCarriedCompanionTaint, recordCompanionTaint } from "../services/turnTrust";
@@ -57,7 +58,7 @@ import {
 } from "../services/metaAgent/chatTurnContext";
 import { isChatPermissionMode } from 'michi-shared';
 import { writeNodePermissionMode } from '../services/chatPermissions';
-import { isCrewMemoryMode } from 'michi-shared';
+import { isCrewMemoryMode, isFormFieldValue } from 'michi-shared';
 // getSessionForUser enforces ownership in cloud mode; getSession is for internal callers.
 const { getSessionForUser } = sessionRegistry;
 import type { AgentSession } from "../agents/types";
@@ -237,7 +238,7 @@ const companionReplayName = () => getCompanionSettings().displayName;
  * §2.8 T2): posted check-ins as Michi's one-line facts, never their text.
  */
 function replayTranscript(nodeId: string, userId?: string): TranscriptMessage[] {
-    return sessionReplayHistory(listMessages(nodeId, userId), { name: companionReplayName });
+    return sessionReplayTranscript(listMessages(nodeId, userId), { name: companionReplayName });
 }
 
 /**
@@ -1868,7 +1869,7 @@ export function setupMichiRoutes(chatManager: ChatManager) {
             ownerUserId: backgroundUserId,
             }, { cursors, durableCursors }));
             observer.addCleanup(subscribeSessionStates((nodeId, state) => {
-                observer.write(encodeChatStreamEvent({ event: 'session_state', data: { ...state, nodeId, chatId: nodeId } }));
+                observer.write(encodeChatStreamEvent({ event: 'session_state', data: { ...sessionStateForFeed(state), nodeId, chatId: nodeId } }));
             }, backgroundUserId));
             // Scheduled runs create threads without a renderer. This control
             // frame lets every open window install the new thread and refresh
@@ -2032,8 +2033,9 @@ export function setupMichiRoutes(chatManager: ChatManager) {
         if (!answers.every((answer: unknown) => answer && typeof answer === 'object'
             && typeof (answer as { question?: unknown }).question === 'string'
             && typeof (answer as { answer?: unknown }).answer === 'string'
-            && ((answer as { id?: unknown }).id === undefined || typeof (answer as { id?: unknown }).id === 'string'))) {
-            return res.status(400).json({ error: 'Each answer requires question and answer strings' });
+            && ((answer as { id?: unknown }).id === undefined || typeof (answer as { id?: unknown }).id === 'string')
+            && ((answer as { value?: unknown }).value === undefined || isFormFieldValue((answer as { value?: unknown }).value)))) {
+            return res.status(400).json({ error: 'Each answer requires question and answer strings, and a value only of a form field\'s shape' });
         }
         session.respondToUserInput(requestId, answers);
         chatHub.resolveUserInput(nodeId, requestId, answers, false);

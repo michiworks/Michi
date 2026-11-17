@@ -62,10 +62,13 @@
   color: var(--term-mid); font-size: var(--fs-sm);
 }
 .meta-chat-panel__target button {
-  display: grid; place-items: center; width: 16px; height: 16px; padding: 0;
+  position: relative; display: grid; place-items: center; width: 16px; height: 16px; padding: 0;
   border: 0; background: none; color: inherit; cursor: pointer; border-radius: var(--ui-radius-sm);
 }
-.meta-chat-panel__target button:hover { background: var(--term-hover); }
+.meta-chat-panel__target button:hover { background: var(--term-hover-bg, var(--term-alt)); }
+
+/* The 16px × takes clicks across 24px (ST-21). */
+.meta-chat-panel__target button::after { content: ''; position: absolute; inset: -4px; }
 
 /* Resize handles: four edges, four corners */
 .meta-chat-panel__resize { position: absolute; z-index: 3; touch-action: none; }
@@ -178,24 +181,44 @@
 }
 .meta-chat-cards { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
 .meta-chat-card.assistant-receipt {
-  margin: 0; gap: 6px; padding: 9px 8px 9px 12px; border-radius: var(--ui-radius-lg);
-  background: var(--term-bg); font-size: var(--fs-lg); color: var(--term-fg);
+  position: relative; margin: 0; gap: 6px; padding: 9px 8px 9px 12px; border-color: transparent; border-radius: var(--ui-radius);
+  background: color-mix(in srgb, var(--term-fg) 6%, transparent); font-size: var(--fs-lg); color: var(--term-fg);
+  transition: background var(--t-soft) ease-out;
+}
+/* The whole card opens what it names: its View (a conversation's chip) stretches over the card;
+   Undo / Restore sit above it in a cell of their own. */
+.meta-chat-card .meta-chat-card__primary,
+.meta-chat-card__open .assistant-cite { position: static; }
+.meta-chat-card .meta-chat-card__primary::after,
+.meta-chat-card__open .assistant-cite::after { content: ''; position: absolute; inset: 0; border-radius: var(--ui-radius); }
+.meta-chat-card .meta-chat-card__primary { padding-inline: 4px; color: var(--term-muted); }
+/* The card lights up instead of the chevron's own button. */
+.meta-chat-card .meta-chat-card__primary:hover:not(:disabled) { background: transparent; color: var(--term-fg); }
+.meta-chat-card .meta-chat-card__primary:focus-visible,
+.meta-chat-card__open .assistant-cite:focus-visible { outline: none; }
+.meta-chat-card:has(.meta-chat-card__primary:hover, .assistant-cite:hover) { background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
+.meta-chat-card:has(.meta-chat-card__primary:focus-visible, .assistant-cite:focus-visible) { outline: var(--focus-ring); outline-offset: -2px; }
+.meta-chat-card .meta-chat-card__side {
+  position: relative; z-index: 1; align-self: stretch; margin: -9px -8px -9px 2px; padding: 0 12px;
+  border-left: 1px solid color-mix(in srgb, var(--term-fg) 10%, transparent); border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
 }
 .meta-chat-card .meta-chat-card__glyph { color: var(--term-accent); }
 .meta-chat-card b { font-weight: 600; }
 .meta-chat-card.is-undone { opacity: .6; }
 .meta-chat-card.is-undone .assistant-receipt__label { text-decoration: none; }
 .meta-chat-card.is-undone .assistant-receipt__label b { text-decoration: line-through; }
-.meta-chat-card .meta-chat-card__btn { flex: none; color: var(--term-accent); }
+.meta-chat-card .meta-chat-card__btn { flex: none; color: var(--term-accent-text); }
 .meta-chat-card__label--wrap { display: flex; flex-direction: column; flex: 1; min-width: 0; line-height: 1.8; }
 .meta-chat-card__line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meta-chat-card__meta { color: var(--term-mid); }
 .meta-chat-card__open { flex: none; align-self: center; }
-.meta-chat-card__open { max-width: 96px; }
-.meta-chat-card__open .assistant-cite { border-color: transparent; color: var(--term-accent); padding: 0 4px; line-height: 1.6; }
-.meta-chat-card__open .assistant-cite__text { white-space: normal; text-align: left; }
+.meta-chat-card__open .assistant-cite { border-color: transparent; color: var(--term-accent); padding: 0; }
+/* The chevron stands for "Open conversation", which stays the chip's name for a screen reader. */
+.meta-chat-card__open .assistant-cite__text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 /* The card's own glyph already says conversation. */
 .meta-chat-card__open .assistant-cite__icon { display: none; }
+.meta-chat-card__chevron { flex: none; margin-right: 4px; color: var(--term-muted); }
+.meta-chat-card--conversation:not(:has(.assistant-cite)) .meta-chat-card__chevron { display: none; }
 
 .meta-chat-panel__notice {
   display: flex; align-items: baseline; gap: 6px; flex: none; margin: 0 14px 4px; overflow: hidden;

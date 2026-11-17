@@ -57,8 +57,10 @@
   border-color: var(--term-line);
   color: var(--term-mid);
 }
-.sidebar-new-row .ui-btn:hover:not(:disabled) {
-  color: var(--term-fg);
+@media (hover: hover) {
+  .sidebar-new-row .ui-btn:hover:not(:disabled) {
+    color: var(--term-fg);
+  }
 }
 .sidebar-new-row .ui-btn svg {
   flex: none;
@@ -127,12 +129,12 @@
 }
 .sidebar-view-tabs__tab:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 .sidebar-view-tabs__count {
   font-size: var(--fs-xs);
   font-variant-numeric: tabular-nums;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
 }
 .sidebar-view-panel {
   flex: 1;
@@ -234,40 +236,145 @@
 }
 
 /* ── Rows and the keyboard ────────────────────────────────────────────────── */
+/* The phone drawer takes the focus itself when it opens, as a drawer panel
+   does (DrawerShell.css); its rows and controls draw their own rings. */
+.terminal-sidebar[tabindex='-1'] {
+  outline: none;
+}
 /* The current row (the one on screen) keeps its ⋯; the rest show it on hover
-   or when focus is in the row (index.css .row-kebab). */
+   or for keyboard focus in the row (index.css .row-kebab). */
 .terminal-sidebar .t-row-hover[aria-current='true'] > .row-kebab {
   opacity: 1;
 }
 .terminal-sidebar .t-row-hover[aria-current='true'] > .row-kebab > button {
   pointer-events: auto;
 }
-/* Rows are tabbable, so a click focuses them too. Only keyboard focus should
-   light a row: once the pointer has left, a row that holds focus from a click
-   drops the hover fill and the hover-revealed actions. */
-.terminal-sidebar .t-row-hover[tabindex]:not(.is-active):focus:not(:focus-visible):not(:hover) {
-  background: transparent !important;
+/* ── Thread selection bar (TreeSelectionBar) ──────────────────────────────── */
+/* Its actions are words, as small as when they were spans; Select all is a
+   native box with its word. Merge stays focusable while it is unavailable,
+   so its hint can be read. */
+.tree-selection-bar__action,
+.tree-selection-bar__all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--term-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab,
-.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
-.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
-  opacity: 0;
+.tree-selection-bar__all input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--term-accent);
+  cursor: pointer;
 }
-.terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab > button,
-.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
-.terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
-  pointer-events: none;
+.tree-selection-bar__action[data-strong] { color: var(--term-fg); }
+.tree-selection-bar__action[data-danger] { color: var(--term-danger-text); }
+.tree-selection-bar__action[aria-disabled='true'] {
+  color: var(--term-muted);
+  opacity: 0.5;
+  cursor: not-allowed;
 }
-@media (hover: none) {
-  /* Touch screens show these permanently (index.css); keep them. */
-  .terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab,
-  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
-  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
-    opacity: 1;
+.tree-selection-bar__action[aria-busy='true'] { cursor: progress; }
+@media (hover: hover) {
+  .tree-selection-bar__action:not([data-danger], [aria-disabled='true']):hover,
+  .tree-selection-bar__all:hover {
+    color: var(--term-fg);
   }
-  .terminal-sidebar .t-row-hover[tabindex]:not([aria-current='true']):focus:not(:focus-visible):not(:hover) > .row-kebab > button,
-  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-chevron,
-  .terminal-sidebar .t-row-hover[tabindex]:focus:not(:focus-visible):not(:hover) .ws-hover-actions {
-    pointer-events: auto;
+}
+
+/* ── Merged section (WorkspaceTree) ───────────────────────────────────────── */
+/* A row's title is a button whose ::after covers the row, so the whole row
+   opens it; the caret is a button above it. */
+.sb-row-open {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: inherit;
+}
+.sb-row-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.sb-row-open:focus-visible {
+  outline: 2px solid transparent;
+}
+.sb-row-open:focus-visible::after {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+.sb-row-caret {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* ── Carets (ST-21) ───────────────────────────────────────────────────────── */
+/* The leading › of a classic row that folds: a 24px hit area round its 12px
+   glyph. */
+.t-caret-hit {
+  position: relative;
+}
+.t-caret-hit::after {
+  content: '';
+  position: absolute;
+  inset: -6px -8px;
+}
+/* A card row's caret column (CardCaret) is finger-sized on touch. */
+@media (hover: none) and (pointer: coarse) {
+  .terminal-sidebar {
+    --sb-caret-w: 40px;
   }
+}
+/* A finger on it presses the column alone (data-own-press, lib/touchContextMenu.ts),
+   with the card rows' hover tint: it stacks on a current row's fill, where a
+   solid fill would punch a lighter hole. */
+.terminal-sidebar [data-card-caret][data-press] {
+  border-radius: var(--sb-radius, 0px);
+  background: var(--sb-card-hover);
+}
+
+/* ── Row state chips (RowAttentionChip) ───────────────────────────────────── */
+/* A row says what it needs after its title: "Needs you" in the waiting hue,
+   "Failed" in the danger one, both from the workflow chips (its colours come
+   in as --sb-attn-*). The sidebar's tighter box: 18px tall against the run
+   chip's 20, and square-ish rather than a pill, so it sits inside a 24px row
+   without lifting it. It never widens the row — the title shrinks first. */
+.sb-attn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--ui-radius-sm);
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--sb-attn-fg);
+  background: var(--sb-attn-bg);
+}
+/* On a workspace row the chip is the last thing in the name line, so it goes
+   to the row's end — its threads' chips line up under it. */
+.ws-head__name > .sb-attn {
+  margin-left: auto;
 }

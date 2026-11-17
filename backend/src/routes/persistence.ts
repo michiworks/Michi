@@ -8,15 +8,17 @@ import { log } from '../services/logger';
 import { getDb, runInTransaction } from '../services/db';
 import { readPrefs, writePrefs, migrateFromSqlite } from '../services/prefsConfig';
 import { readChatPermissionSettings, writeChatPermissionSettings, writeNodePermissionMode, resolveChatPermissionMode, resolveChatApproveForMe } from '../services/chatPermissions';
+import { writeNodeServiceTier } from '../services/chatServiceTier';
 import { writeNodeUltracode } from '../services/chatUltracode';
-import { ATTENTION_PROTOCOL, LEAN_NODE_FIELDS, isChatPermissionMode, isChatPermissionSettings, isCheckinNodeId } from 'michi-shared';
+import { ATTENTION_PROTOCOL, LEAN_NODE_FIELDS, isChatPermissionMode, isChatPermissionSettings, isCheckinNodeId, isServiceTierId } from 'michi-shared';
 import { getNode } from '../services/dbRepository';
 import {
   listWorkspaces, getWorkspace, saveWorkspace, deleteWorkspace,
   listTrees, saveTree, listNodes, saveNode, updateNodeTitle,
   listEdges, saveEdge, listMessages, saveMessage, getMessageCount,
   listContexts, saveContext, loadFullWorkspace, loadAllWorkspaces,
-  loadAllWorkspacesMeta, loadWorkspaceMeta, loadTreeMessageSnapshot, loadTreeMessagePage,
+  loadAllWorkspacesMeta, loadWorkspaceMeta, loadTreeMessageSnapshot, loadTreeMessagePage, MAX_PAGE_MESSAGES,
+  loadMessageToolCalls, MAX_TOOL_CALL_MESSAGES,
   deleteEdge, deleteTree, moveTreeToWorkspace, softDeleteNode, restoreNode, deleteContext,
   getAiGlobalContext, setAiGlobalContext,
   emptyWorkspaceTrash, purgeWorkspaceNodes,
@@ -31,7 +33,7 @@ import { DomainError } from '../services/domainErrors';
 import { recordStructureChange, runWithStructureOrigin, structureEvents, structureOriginOf } from '../services/structureEvents';
 import { domainErrorResponse } from './domainErrorResponse';
 import { ensureRequestedGraphNode } from './graphPrerequisite';
-import { projectMessagesForTransport } from './toolOutputTransport';
+import { projectMessageRowForDisplay, projectMessageRowForTransport, projectMessagesForTransport } from './toolOutputTransport';
 import { loadProfileActivity } from '../services/profileActivity';
 import { extractNodeTree, planNodeExtraction } from '../services/extractNodeTree';
 import { acquireSessionRestoreLock } from '../services/nativeResume';
@@ -208,6 +210,25 @@ export function setupPersistenceRoutes(): express.Router {
     res.json({ enabled, ...(session?.getSessionState ? { sessionState: session.getSessionState() } : {}) });
   });
 
+  // A chat's speed tier (null: standard). Sessions read it at every turn, so
+  // saving it is all a change takes.
+  router.put('/nodes/:nodeId/service-tier', refuseReservedNodeParam, requireNodeOwner, async (req, res) => {
+    if (process.env.MICHI_CLOUD === '1' && !req.user?.id) return res.status(401).json({ error: 'unauthorized' });
+    const { nodeId } = req.params;
+    if (refuseReservedNodeId(res, reservedNodeIdIn(req.body?.graphPrerequisite))) return;
+    const serviceTier = req.body?.serviceTier;
+    if (serviceTier !== null && !isServiceTierId(serviceTier)) return res.status(400).json({ error: 'serviceTier must be a tier id or null' });
+    const missing = await ensureRequestedGraphNode(req, nodeId, req.body?.graphPrerequisite);
+    if (missing) return res.status(missing.status).json(missing.body);
+    try {
+      writeNodeServiceTier(nodeId, serviceTier, req.user?.id);
+    } catch (err) {
+      const failure = domainErrorResponse(err);
+      return res.status(failure.status).json({ error: failure.error });
+    }
+    res.json({ serviceTier });
+  });
+
   router.get('/persistence/capabilities', (_req, res) => {
     res.json({
       protocolVersion: 2,
@@ -306,6 +327,10 @@ export function setupPersistenceRoutes(): express.Router {
     }
   });
 
+  // A turn page's byte budget (maxBytes): from one small turn to more than any page carries.
+  const MIN_PAGE_BYTES = 1024;
+  const MAX_PAGE_BYTES = 32 * 1024 * 1024;
+
   // Lazy-load: all message bodies for ONE tree. Fetched when a tree is
   // activated / opened and its nodes are still unloaded placeholders.
   router.get('/workspaces/:id/trees/:treeId/messages', requireWorkspaceOwner, (req, res) => {
@@ -316,19 +341,46 @@ export function setupPersistenceRoutes(): express.Router {
         const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined;
         const beforeSeq = req.query.beforeSeq === undefined ? undefined : Number(req.query.beforeSeq);
         const beforeId = typeof req.query.beforeId === 'string' ? req.query.beforeId : undefined;
-        if (typeof req.query.limit !== 'string' || !Number.isSafeInteger(limit) || limit < 1 || limit > 200
+        const maxBytes = req.query.maxBytes === undefined ? undefined : Number(req.query.maxBytes);
+        if (typeof req.query.limit !== 'string' || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_PAGE_MESSAGES
           || (req.query.nodeId !== undefined && (!nodeId || nodeId.length > 256))
           || ((beforeSeq !== undefined || req.query.beforeId !== undefined)
             && (!nodeId || typeof req.query.beforeSeq !== 'string' || !Number.isSafeInteger(beforeSeq)
-              || beforeSeq! < 0 || !beforeId || beforeId.length > 256))) {
+              || beforeSeq! < 0 || !beforeId || beforeId.length > 256))
+          || (maxBytes !== undefined && (typeof req.query.maxBytes !== 'string' || !Number.isSafeInteger(maxBytes)
+            || maxBytes < MIN_PAGE_BYTES || maxBytes > MAX_PAGE_BYTES))
+          || (req.query.toolCalls !== undefined && req.query.toolCalls !== 'lean')) {
           return res.status(400).json({ error: 'Invalid message page parameters' });
         }
         res.setHeader('Cache-Control', 'no-store');
-        return res.json(projectMessagesForTransport(loadTreeMessagePage(req.params.id, req.params.treeId,
-          { limit, nodeId, before: beforeSeq === undefined ? undefined : { seq: beforeSeq, id: beforeId! } }, userId)));
+        // maxBytes (turn pages) counts the rows as projected here. toolCalls=lean
+        // leaves finished calls' bodies for GET …/tool-calls.
+        return res.json(loadTreeMessagePage(req.params.id, req.params.treeId, {
+          limit, nodeId, before: beforeSeq === undefined ? undefined : { seq: beforeSeq, id: beforeId! },
+          maxBytes, project: req.query.toolCalls === 'lean' ? projectMessageRowForDisplay : projectMessageRowForTransport,
+        }, userId));
       }
       // Tool outputs travel without inline images and, when long, as head + tail; the rows stay whole.
       res.json(projectMessagesForTransport(loadTreeMessageSnapshot(req.params.id, req.params.treeId, userId)));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // The tool calls a display page deferred (toolCalls=lean), for one node's
+  // messages: `messageId` repeated. Transport-projected like any page.
+  router.get('/workspaces/:id/trees/:treeId/tool-calls', requireWorkspaceOwner, (req, res) => {
+    try {
+      const nodeId = typeof req.query.nodeId === 'string' ? req.query.nodeId : undefined;
+      const raw = req.query.messageId;
+      const messageIds = typeof raw === 'string' ? [raw] : Array.isArray(raw) ? raw : [];
+      if (!nodeId || nodeId.length > 256 || messageIds.length === 0 || messageIds.length > MAX_TOOL_CALL_MESSAGES
+        || messageIds.some((id) => typeof id !== 'string' || !id || id.length > 256)) {
+        return res.status(400).json({ error: 'Invalid tool call parameters' });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      const rows = loadMessageToolCalls(req.params.id, req.params.treeId, nodeId, messageIds as string[], requestOwnerUserId(req));
+      res.json({ messages: rows.map(projectMessageRowForTransport) });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

@@ -80,11 +80,11 @@ describe('temporary chats', () => {
     assert.equal(memoryMode('n-learn-child'), null);
   });
 
-  test('the user\'s search finds it; an agent\'s search does not', () => {
+  test('the user\'s search finds it; an agent\'s search does not', async () => {
     assert.deepEqual(new Set(keywordSearch('heron').map((row) => row.node_id)), new Set(['n-learn', 'n-temp']));
     assert.deepEqual(new Set(nodeGroupedSearch('heron').map((row) => row.nodeId)), new Set(['n-learn', 'n-temp']));
     assert.deepEqual(new Set(keywordSearch('heron', undefined, 20, undefined, { excludeTemporaryChats: true }).map((row) => row.node_id)), new Set(['n-learn']));
-    const agent = searchMessages('ws', null, 'heron', 'all');
+    const agent = await searchMessages('ws', null, 'heron', 'all');
     assert.match(agent.text, /n-learn/);
     assert.doesNotMatch(agent.text, /n-temp/);
     assert.equal(agent.matchCount, 2, 'the learning chat\'s question and answer');

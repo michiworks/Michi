@@ -7,7 +7,7 @@ import { ARTIFACT_TOOL_NAMES, type ArtifactToolName } from "./artifactToolNames"
 import type { AgentRunToolName } from './runToolBridge';
 import { PAGE_TOOL_NAMES } from './pageToolNames';
 import {
-    MEMORY_BODY_MAX_CHARS, MEMORY_KINDS, MICHI_DB_OPTION_COLORS, pageBlockFieldsDoc, SCHEDULED_JOB_DEFAULTS, SCHEDULED_JOB_LIMITS,
+    CHAT_BLOCK_LIMITS, chatBlockFieldsDoc, MEMORY_BODY_MAX_CHARS, MEMORY_KINDS, MICHI_DB_OPTION_COLORS, pageBlockFieldsDoc, SCHEDULED_JOB_DEFAULTS, SCHEDULED_JOB_LIMITS,
     SCHEDULED_ONLY_KEPT_DAYS, SCHEDULED_ONLY_RETENTION, TASK_LIST_LIMITS, PAGE_LIMITS,
 } from 'michi-shared';
 
@@ -66,6 +66,7 @@ export type BuiltinToolName = "open_url"
     | "save_artifact"
     | "update_artifact"
     | "show_image"
+    | "show_blocks"
     | "list_threads"
     | "search_messages"
     | "web_search"
@@ -576,6 +577,26 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         },
     },
     {
+        name: "show_blocks",
+        description:
+            "Show rich blocks to the USER inline in your reply. Use them to collect a structured answer (a form, a poll, a choice, action buttons) " +
+            "or to show results compactly (stats, a chart, key-values, a status, a stepper, a gauge). " +
+            "When the user submits a form, votes in a poll, picks a choice or presses a button, the answer comes back to this conversation as their next message: " +
+            "the block's prompt or question with the values (a form sends its prompt, a blank line and the values as JSON by field key). " +
+            "After showing an interactive block, end your turn and wait for that message. Each block is answered once. " +
+            "Not for long documents, plans or reports: those belong in Pages. " +
+            `${CHAT_BLOCK_LIMITS.min}-${CHAT_BLOCK_LIMITS.max} blocks, drawn in order. Block content, by type: ${chatBlockFieldsDoc()}.`,
+        parameters: {
+            object: {
+                blocks: f({ array: { object: { type: f("string") }, additionalProperties: true } }, {
+                    minItems: CHAT_BLOCK_LIMITS.min,
+                    description: `${CHAT_BLOCK_LIMITS.min}-${CHAT_BLOCK_LIMITS.max} blocks, each an object with its type and that type's fields; no id.`,
+                }),
+                title: f("string", { optional: true, description: `Optional heading above the blocks, at most ${CHAT_BLOCK_LIMITS.title} characters.` }),
+            },
+        },
+    },
+    {
         name: "list_threads",
         description:
             "List threads (trees) and their nodes in this workspace as JSON. Use when user references prior work outside this thread. Not speculatively. Each thread has its own id (\"t-...\") and a nodes[] array; only node ids (\"n-...\") are valid input to read_node.",
@@ -593,7 +614,7 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
             "'all' leaves out workspaces in Trash and those the user keeps from AI navigation.",
         parameters: {
             object: {
-                query: f("string", { minLength: 1, description: "Words to find, case-insensitive. Matches whole words: a Chinese word is found only where it stands between spaces or punctuation." }),
+                query: f("string", { minLength: 1, description: "Words to find, case-insensitive; every word must occur. A query with Chinese, Japanese or Korean characters finds each word anywhere in the text, also inside longer words; other queries match whole words." }),
                 scope: f("string", { optional: true, enum: ["current", "all"] }),
                 limit: f("integer", { optional: true, minimum: 1, maximum: 50, description: "1..50, default 10." }),
                 includeScheduledRuns: f("boolean", { optional: true, description: SCHEDULED_RUNS_OPT_IN }),

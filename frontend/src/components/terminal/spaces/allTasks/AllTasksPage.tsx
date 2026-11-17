@@ -8,10 +8,12 @@ import { undoPageBatches } from '../../../../state/pages/pageUndo';
 import { recordUndo } from '../../../../state/undoStack';
 import { openConversationFromSpaces, openThreadCard } from '../../../../state/sourceNav/sourceNav';
 import { DatabaseView } from '../../content/db/DatabaseView';
+import { Button } from '../../../ui/controls';
 import { LiveThreadsContext, type LiveThreads } from '../../content/db/liveThreads';
 import { pageViewOps } from '../../content/db/nativeDatabaseAdapter';
 import { TaskActivityContext, type TaskActivityView } from '../../content/db/taskActivity';
 import type { DbEditOptions } from '../../content/db/views/viewTypes';
+import type { MichiNoticeTone } from '../../content/page/editorTypes';
 import { workspaceConversations } from '../taskConversations';
 import { useThreadStates } from '../useThreadStates';
 import { allTasksBoard, conversationsInTaskWorkspaces, planAllTasksEdit, replaceSource, splitAllTasksRowId } from './allTasksDb';
@@ -39,7 +41,8 @@ export default function AllTasksPage() {
   dtoRef.current = dto;
   const db = useMemo(() => (dto ? allTasksBoard(dto) : null), [dto]);
   const [viewId, setViewId] = useState<string | null>(TASK_VIEW.board);
-  const [notice, setNotice] = useState<string | null>(null);
+  // A save that failed says so as an alert; a refused edit says why as plain information.
+  const [notice, setNotice] = useState<{ text: string; tone: MichiNoticeTone } | null>(null);
 
   const linked = useMemo(() => (dto ? dto.rows.flatMap(({ row }) => taskThreadIds(row.values[TASK_COLUMN.threads])) : []), [dto]);
   const states = useThreadStates(LOCAL_BACKEND_CONNECTION_ID, linked, !!dto);
@@ -107,7 +110,7 @@ export default function AllTasksPage() {
     setNotice(null);
     const plan = planAllTasksEdit(current, ops);
     if (!plan.ok) {
-      setNotice(plan.reason);
+      setNotice({ text: plan.reason, tone: 'info' });
       return false;
     }
     const written: WrittenBatch[] = [];
@@ -128,7 +131,7 @@ export default function AllTasksPage() {
       }
     } catch (cause) {
       const conflict = pageEditFailure(cause) === 'stale';
-      setNotice(conflict ? 'All tasks just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save that just now.");
+      setNotice({ text: conflict ? 'All tasks just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save that just now.", tone: 'error' });
       if (written.length) recordUndo({ label: 'Only part of it was saved', undo: undoWritten(written), toast: true });
       refresh();
       return false;
@@ -139,7 +142,7 @@ export default function AllTasksPage() {
   }, [refresh, replace, saveViews, undoWritten]);
 
   const services = useMemo(() => ({
-    notice: (message: string) => setNotice(message),
+    notice: (text: string, tone: MichiNoticeTone = 'info') => setNotice({ text, tone }),
   }), []);
 
   return (
@@ -160,12 +163,17 @@ export default function AllTasksPage() {
         </header>
         {!db || !live ? (
           error
-            ? <p className="michi-doc-unknown" role="alert">{error}</p>
+            ? (
+              <div className="michi-doc-retry">
+                <p className="michi-doc-unknown" role="alert">{error}</p>
+                <Button variant="ghost" size="sm" onClick={refresh}>Retry</Button>
+              </div>
+            )
             : <p className="michi-doc-unknown" role="status">Reading every workspace's tasks…</p>
         ) : (
           <TaskActivityContext.Provider value={activity}>
             <LiveThreadsContext.Provider value={live}>
-              {notice && <p className="michi-doc-unknown" role="alert">{notice}</p>}
+              {notice && <p className="michi-doc-unknown" role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.text}</p>}
               {error && <p className="all-tasks__hint" role="status">Couldn't read the tasks again just now; these are from the last read.</p>}
               {dto?.sources.length === 0 && (
                 <p className="all-tasks__hint">No tasks yet. Add a Task board to a page, or ask the assistant to gather a workspace's tasks from its conversations.</p>

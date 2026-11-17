@@ -122,6 +122,32 @@ describe('InterruptedTurnsNotice', () => {
     await waitFor(() => expect(screen.queryByRole('region', { name: 'Interrupted tasks' })).toBeNull());
   });
 
+  it.each([
+    ['the next notice', true],
+    ['the focused pane\'s composer', false],
+  ])('hands the keyboard to %s once Dismiss all takes the card away', async (_target, withNotice) => {
+    vi.mocked(api.fetchInterruptedTurns).mockResolvedValue([
+      item('n1', 't1', 'Refactor the drawer'),
+      item('n2', 't2', 'Deploy the stack'),
+    ]);
+    vi.mocked(chatStore.useChatProjects).mockReturnValue({ projects: [project], activeProject: project, focusedNodeId: 'n1' } as never);
+    render(
+      <>
+        <div className="shell-notices">
+          {withNotice && <section className="shell-notice"><h3 tabIndex={-1} className="shell-notice-title">Question</h3></section>}
+          {bar()}
+        </div>
+        <div className="terminal-pane" data-node-id="n1">
+          <div className="terminal-composer"><div role="textbox" aria-label="Message" contentEditable suppressContentEditableWarning tabIndex={0} /></div>
+        </div>
+      </>,
+    );
+    const dismissAll = await screen.findByRole('button', { name: 'Dismiss all' });
+    dismissAll.focus();
+    fireEvent.click(dismissAll);
+    expect(document.activeElement).toBe(withNotice ? screen.getByText('Question') : screen.getByRole('textbox', { name: 'Message' }));
+  });
+
   it('moves the keyboard to the next task when one is dismissed', async () => {
     vi.mocked(api.fetchInterruptedTurns).mockResolvedValue([
       item('n1', 't1', 'Refactor the drawer'),

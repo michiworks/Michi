@@ -1,6 +1,17 @@
 import React, { useState } from "react";
 import { authClient } from "../services/auth";
+import { DEFAULT_PREFS } from "../state/prefs";
+import { BranchIcon } from "./terminal/icons";
+import { cssVarsFor, PALETTES } from "./terminal/tokens";
 import "./LandingPage.css";
+
+/* The landing renders without TerminalShell, which is what mirrors the
+   palette onto <html>, so its root carries the default palette itself:
+   --term-*, the --landing-* set built on them, and --focus-ring. */
+const PALETTE_VARS = cssVarsFor(
+    DEFAULT_PREFS.terminalPalette,
+    PALETTES[DEFAULT_PREFS.terminalPalette].accent,
+) as React.CSSProperties;
 
 /**
  * Pre-auth landing. Shown when the backend reports requireAuth:true and no
@@ -30,7 +41,7 @@ export function LandingPage() {
     };
 
     return (
-        <main className="landing-root">
+        <main className="landing-root" style={PALETTE_VARS}>
             <section className="landing-hero">
                 <div className="landing-paper" aria-hidden="true" />
 
@@ -148,7 +159,7 @@ function ChainViz() {
                     foot={
                         <>
                             <span className="landing-nc__chip">
-                                <span>⎇</span>3 branches
+                                <BranchIcon size="sm" />3 branches
                             </span>
                         </>
                     }
@@ -171,7 +182,7 @@ function ChainViz() {
                     }
                     foot={
                         <>
-                            <span className="landing-nc__chip">⎇ 2</span>
+                            <span className="landing-nc__chip"><BranchIcon size="sm" />2</span>
                         </>
                     }
                 />
@@ -192,7 +203,7 @@ function ChainViz() {
                     }
                     foot={
                         <>
-                            <span className="landing-nc__chip">⎇ 1</span>
+                            <span className="landing-nc__chip"><BranchIcon size="sm" />1</span>
                         </>
                     }
                 />
@@ -212,7 +223,7 @@ function ChainViz() {
                     }
                     foot={
                         <>
-                            <span className="landing-nc__chip">⎇ 1</span>
+                            <span className="landing-nc__chip"><BranchIcon size="sm" />1</span>
                         </>
                     }
                 />

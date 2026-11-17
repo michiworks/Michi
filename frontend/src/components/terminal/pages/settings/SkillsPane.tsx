@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, CircleAlert, Plus, RotateCw, Search } from 'lucide-react';
+import { ErrorIcon, PlusIcon, RetryIcon, SearchIcon, SkillIcon } from '../../icons';
 import { toast } from 'sonner';
 import { joinAnd, type SkillCatalogResponse, type SkillSummary } from 'michi-shared';
 import { useChatProjects } from '../../../../state/chatStore';
@@ -234,7 +234,7 @@ export function SkillsPane() {
   });
   const back = (id: string | null) => { setLevel(null); focusRow(id); };
   const openNew = useCallback(() => setLevel({ kind: 'new' }), []);
-  useSettingsHeaderAction(!level && libraryAvailable ? 'New skill' : null, openNew, { short: 'New', icon: Plus });
+  useSettingsHeaderAction(!level && libraryAvailable ? 'New skill' : null, openNew, { short: 'New', icon: PlusIcon });
   const upsert = (saved: SkillSummary, previousId = saved.id) =>
     update((current) => [...current.filter((skill) => skill.id !== previousId && skill.id !== saved.id), saved]);
 
@@ -309,7 +309,7 @@ export function SkillsPane() {
   const showLibrary = (shownSource === ALL || shownSource === LIBRARY) && (!searching || libraryRows.length > 0 || !libraryCatalog || !!unavailable);
   const showBuiltins = (shownSource === ALL || shownSource === BUILTIN) && !unavailable && builtinRows.length > 0;
 
-  const row = (skill: SkillSummary) => <HistoryRow key={skill.id} id={skill.id} icon={BookOpen} title={skill.name} query={query}
+  const row = (skill: SkillSummary) => <HistoryRow key={skill.id} id={skill.id} icon={SkillIcon} title={skill.name} query={query}
     meta={[
       ...(skill.origin === 'runtime' && scopeLabel(skill) ? [scopeLabel(skill)] : []),
       <span key="description"><SearchHighlight text={skill.description || 'No description.'} query={query} /></span>,
@@ -319,7 +319,7 @@ export function SkillsPane() {
 
   let libraryBody: React.ReactNode;
   if (unavailable) {
-    libraryBody = <HistoryEmpty icon={BookOpen} title="Skills aren’t available here">
+    libraryBody = <HistoryEmpty icon={SkillIcon} title="Skills aren’t available here">
       {unavailable.code === 'skills_unavailable' ? 'This Michi server keeps no skill library.' : 'This Michi backend doesn’t support Skills yet.'}
     </HistoryEmpty>;
   } else if (!libraryCatalog) {
@@ -327,8 +327,8 @@ export function SkillsPane() {
   } else if (!libraryAvailable) {
     libraryBody = <p className="settings-history__note">This Michi server keeps no skill library.</p>;
   } else if (library.length === 0) {
-    libraryBody = <HistoryEmpty icon={BookOpen} title="No skills in your library"
-      action={<Button onClick={openNew}><Plus size={13} aria-hidden="true" />New skill</Button>}>
+    libraryBody = <HistoryEmpty icon={SkillIcon} title="No skills in your library"
+      action={<Button onClick={openNew}><PlusIcon aria-hidden="true" />New skill</Button>}>
       {`Skills you create here reach every runtime Michi runs. Each one is a folder with a SKILL.md${folder ? ` in ${folder}` : ''}.`}
     </HistoryEmpty>;
   } else if (libraryRows.length > 0) {
@@ -352,7 +352,7 @@ export function SkillsPane() {
     <ul className="settings-history__card">{builtinRows.map(row)}</ul>
   </section>;
 
-  const noMatch = nothing && <HistoryEmpty icon={Search} title="No matching skills"
+  const noMatch = nothing && <HistoryEmpty icon={SearchIcon} title="No matching skills"
     action={<Button size="sm" onClick={() => { setQuery(''); setSource(ALL); search.current?.focus(); }}>Show all skills</Button>}>
     {`Nothing matches “${query.trim()}”.`}
   </HistoryEmpty>;
@@ -378,7 +378,7 @@ export function SkillsPane() {
           {stalled && <Button size="sm" onClick={() => void load()}>Try again</Button>}
         </li>}
         {failed.map((entry, index) => <li key={`failed-${index}`} className="skills-error">
-          <CircleAlert size={14} aria-hidden="true" /><span role="alert">Couldn’t list {runtime.label} skills: {entry.message.replace(/\.$/, '')}.</span>
+          <ErrorIcon aria-hidden="true" /><span role="alert">Couldn’t list {runtime.label} skills: {entry.message.replace(/\.$/, '')}.</span>
           <Button size="sm" onClick={() => void load()}>Try again</Button>
         </li>)}
         {rows.map(row)}
@@ -421,8 +421,8 @@ export function SkillsPane() {
         {builtins.length > 0 && <option value={BUILTIN}>Built-in · {builtins.length}</option>}
         {shown.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.label}{catalog ? ` · ${countText(runtime.id)}` : ''}</option>)}
       </select>
-      <TrashIconButton icon={RotateCw} tooltip="Check the runtimes for new skills" aria-label="Check the runtimes for new skills"
-        aria-busy={loading || undefined} onClick={() => void load({ refresh: true, confirm: true })} />
+      <TrashIconButton icon={RetryIcon} tooltip="Check the runtimes for new skills" aria-label="Check the runtimes for new skills"
+        aria-busy={loading || undefined} aria-disabled={loading || undefined} onClick={() => { if (!loading) void load({ refresh: true, confirm: true }); }} />
     </HistoryToolbar>
     {error && !errorInSection && loadError(error)}
     {nothing ? !runtimeSection && noMatch : <>{librarySection}{builtinSection}</>}

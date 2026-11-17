@@ -7,16 +7,20 @@ import {
   BranchesIcon,
   ChatIcon,
   ClockIcon,
+  CloseIcon,
   DigestIcon,
   ExportIcon,
   HomeIcon,
+  ICON_PX,
   MapIcon,
+  PagesIcon,
+  PauseIcon,
+  PlayIcon,
   PlusIcon,
   SettingsIcon,
   ShieldIcon,
   ShieldOffIcon,
   SkillIcon,
-  StopIcon,
   ThreadIcon,
   TrashIcon,
   UserIcon,
@@ -31,6 +35,7 @@ const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.Rea
   branches: BranchesIcon,
   map: MapIcon,
   digest: DigestIcon,
+  pages: PagesIcon,
   workspace: WorkspacesIcon,
   trash: TrashIcon,
   archive: ArchiveIcon,
@@ -42,7 +47,9 @@ const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.Rea
   thread: ThreadIcon,
   weave: WeaveIcon,
   export: ExportIcon,
-  close: StopIcon,
+  close: CloseIcon,
+  pause: PauseIcon,
+  play: PlayIcon,
   chat: ChatIcon,
   threads: AllThreadsIcon,
   clock: ClockIcon,
@@ -51,7 +58,7 @@ const COMMAND_ICONS: Record<CommandIcon, (props: { size?: number }) => React.Rea
 };
 
 /** The house SVG for a command palette row, sized to the menu icon slot. */
-export function CommandIconGlyph({ name, size = 14 }: { name: CommandIcon; size?: number }) {
+export function CommandIconGlyph({ name, size = ICON_PX.md }: { name: CommandIcon; size?: number }) {
   const Icon = COMMAND_ICONS[name];
   return <Icon size={size} />;
 }

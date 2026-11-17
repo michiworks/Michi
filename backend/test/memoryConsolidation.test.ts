@@ -24,6 +24,7 @@ import {
 } from '../src/services/memory/extractionRun';
 import { installMemoryExtractionHooks, memoryExtractionStatus, type MemoryExtractionScheduler } from '../src/services/memory/extractionService';
 import { stageMemoryAnswer } from '../src/services/memory/extractionTools';
+import { advanceTopicPass } from '../src/services/memory/memoryTopics';
 import { activeMichiNoteCount, consolidationRows, storedMemories } from '../src/services/memory/memoryRepository';
 import { memoryRef } from '../src/services/memory/memoryRefs';
 import {
@@ -317,6 +318,7 @@ describe('the batch', () => {
     note('Cello lessons every Tuesday.');
     note('Mochi is a tabby.');
     const before = readConsolidationState(ME).cursor;
+    advanceTopicPass(ME, Number.MAX_SAFE_INTEGER); // the topic pass has filed them (memoryTopics.ts)
     const { planned } = plan('job-a');
     assert.equal(planned.kind, 'skip');
     assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM memory_extraction_runs WHERE kind = 'consolidate'").get()!.n, 0);
@@ -375,7 +377,7 @@ describe('the batch', () => {
     assert.match(buildConsolidationPrompt(batch, START, 'memory_consolidate'), /Call memory_consolidate once with the decisions, then stop\.$/u);
     assert.match(CONSOLIDATION_INSTRUCTIONS(null), /^You tidy Michi Memory/u);
     assert.match(CONSOLIDATION_INSTRUCTIONS(null), /Reply with only one JSON object/u);
-    assert.match(CONSOLIDATION_INSTRUCTIONS('memory_consolidate'), /Call memory_consolidate exactly once with \{ decisions \}/u);
+    assert.match(CONSOLIDATION_INSTRUCTIONS('memory_consolidate'), /Call memory_consolidate exactly once with \{ decisions, guesses \}/u);
   });
 });
 

@@ -25,7 +25,7 @@ describe('MetaAgentGuardAlert', () => {
   it('says what stopped for the toolset that failed: pages for Pages upkeep, check-ins for the check-ins', () => {
     const body = () => screen.getByRole('alert').querySelector('p')!.textContent;
     const view = render(<MetaAgentGuardAlert failures={[failure]} onRetry={vi.fn()} onChangeRuntime={vi.fn()} />);
-    expect(body()).toContain('so this run did not start and pages won’t update.');
+    expect(body()).toContain('couldn’t turn these off, so this run did not start and pages won’t update.');
     view.unmount();
     const checkins = render(<MetaAgentGuardAlert failures={[{ ...failure, toolset: 'chat' }]} onRetry={vi.fn()} onChangeRuntime={vi.fn()} />);
     expect(body()).toContain('so this run did not start and check-ins won’t run.');

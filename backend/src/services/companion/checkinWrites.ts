@@ -16,7 +16,7 @@
  * In memory, per process: a crash loses it, and the boot cleanup (§3.7)
  * reads what a run changed from page_changes and companion_run_changes
  * instead. Bounded, so a turn nobody forgets cannot grow it for ever.
- * Notes, goal readings, briefs and cards are the agent's own state and are
+ * Notes, goal readings and cards are the agent's own state and are
  * never noted (§3.4: no post needed for them).
  */
 

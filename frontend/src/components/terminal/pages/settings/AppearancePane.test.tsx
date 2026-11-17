@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_PREFS, type Prefs } from '../../../../state/prefs';
 import { settingsSearchIndex } from '../../rail/settingsSearch';
 import { AppearancePane } from './AppearancePane';
-import { SettingsLayoutContext, SettingsTargetContext } from './settingsPhone';
+import { SettingsAsideContext, SettingsLayoutContext, SettingsTargetContext } from './settingsPhone';
 
 const setPref = vi.fn();
 const state = vi.hoisted(() => ({ prefs: null as Prefs | null }));
@@ -30,26 +30,27 @@ describe('Appearance at a glance', () => {
   it('shows the few decisions as rows under their groups, and keeps everything else in a closed Advanced', () => {
     render(<AppearancePane />);
     expect(groups()).toEqual(['Theme', 'Reading', 'Panes', 'Home', 'Features', 'Advanced']);
-    expect(rowNames()).toEqual(['Palette', 'Accent', 'Density', 'Text size', 'Dim unfocused panes', 'Single-page mode', 'Reduce motion', 'Pages recommendations', 'Digest']);
+    expect(rowNames()).toEqual(['Palette', 'Accent', 'Density', 'Text size', 'Show thoughts',
+      'Dim unfocused panes', 'Single-page mode', 'Reduce motion', 'Pages recommendations', 'Digest']);
     expect(advanced().getAttribute('aria-expanded')).toBe('false');
     expect(advanced().getAttribute('aria-controls')).toBeNull();
     // One row under the Advanced label says what it holds, and names itself by both.
-    expect(advanced().textContent).toBe('Fonts, code blocks, glass, corner radius and 12 more');
+    expect(advanced().textContent).toBe('Fonts, code blocks, glass, corner radius and 9 more');
     expect(advanced().closest('.settings-section')!.querySelector('.settings-section__title')!.textContent).toBe('Advanced');
     fireEvent.click(advanced());
     expect(advanced().getAttribute('aria-expanded')).toBe('true');
     expect(document.getElementById(advanced().getAttribute('aria-controls')!)).toBeTruthy();
-    expect(rowNames().slice(9)).toEqual(['Interface font', 'Message font', 'Composer size', 'Code blocks', 'Code wrap', 'Agent blocks',
-      'Corner radius', 'Sidebar row style', 'Sidebar edge padding', 'Sidebar timestamps', 'Sidebar glass', 'Glass blur',
-      'Glass saturation', 'Glass defaults', 'Dim strength', 'Pane width mode', 'Pane animation', 'Default pane width',
+    expect(rowNames().slice(10)).toEqual(['Interface font', 'Message font', 'Composer size', 'Code blocks', 'Code wrap',
+      'Corner radius', 'Sidebar row style', 'Sidebar timestamps', 'Sidebar glass',
+      'Glass defaults', 'Dim strength', 'Pane width mode', 'Default pane width',
       'Single-pane reading width', 'Chrome rules']);
     fireEvent.click(advanced());
-    expect(rowNames()).toHaveLength(9);
+    expect(rowNames()).toHaveLength(10);
   });
 
   it('counts in its "N more" the Advanced rows its line does not name', () => {
-    const named = new Set(['Interface font', 'Message font', 'Code blocks', 'Corner radius', 'Window glass', 'Sidebar glass', 'Glass blur',
-      'Glass saturation', 'Sidebar material', 'Glass defaults']);
+    const named = new Set(['Interface font', 'Message font', 'Code blocks', 'Corner radius', 'Window glass', 'Sidebar glass',
+      'Glass defaults']);
     for (const layout of ['window', 'phone'] as const) {
       const { unmount } = render(<SettingsLayoutContext.Provider value={layout}><AppearancePane /></SettingsLayoutContext.Provider>);
       const shown = rowNames().length;
@@ -60,43 +61,36 @@ describe('Appearance at a glance', () => {
     }
   });
 
-  it('picks the code and agent block styles under Advanced', () => {
+  it('picks the code block style under Advanced', () => {
     render(<AppearancePane />);
     fireEvent.click(advanced());
     const code = screen.getByRole('radiogroup', { name: 'Code blocks' });
     expect((within(code).getByRole('radio', { name: 'Hairline' }) as HTMLInputElement).checked).toBe(DEFAULT_PREFS.codeBlockStyle === 'hairline');
     fireEvent.click(within(code).getByRole('radio', { name: 'Header' }));
     expect(setPref).toHaveBeenCalledWith('codeBlockStyle', 'header');
-    const agent = screen.getByRole('radiogroup', { name: 'Agent blocks' });
-    expect(within(agent).getAllByRole('radio').map((radio) => radio.getAttribute('value'))).toEqual(['line', 'plain', 'card', 'terminal']);
-    expect((within(agent).getByRole('radio', { name: 'Line' }) as HTMLInputElement).checked).toBe(DEFAULT_PREFS.agentBlockStyle === 'line');
-    fireEvent.click(within(agent).getByRole('radio', { name: 'Terminal' }));
-    expect(setPref).toHaveBeenCalledWith('agentBlockStyle', 'terminal');
   });
 
   it('tunes the glass and puts it back to its defaults, leaving Window glass as set', () => {
-    state.prefs = { ...DEFAULT_PREFS, glassBlur: 30, sidebarTranslucency: 20, windowGlass: false };
+    state.prefs = { ...DEFAULT_PREFS, sidebarTranslucency: 20, windowGlass: false };
     window.electron = { hasVibrancy: true } as unknown as typeof window.electron;
     render(<AppearancePane />);
     fireEvent.click(advanced());
-    expect((screen.getByRole('slider', { name: 'Glass blur' }) as HTMLInputElement).value).toBe('30');
-    fireEvent.change(screen.getByRole('slider', { name: 'Glass saturation' }), { target: { value: '180' } });
-    expect(setPref).toHaveBeenCalledWith('glassSaturate', 180);
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sidebar material' }), { target: { value: 'hud' } });
-    expect(setPref).toHaveBeenCalledWith('sidebarVibrancy', 'hud');
+    const sidebarGlass = screen.getByRole('slider', { name: 'Sidebar glass' }) as HTMLInputElement;
+    expect(sidebarGlass.value).toBe('20');
+    fireEvent.change(sidebarGlass, { target: { value: '40' } });
+    expect(setPref).toHaveBeenCalledWith('sidebarTranslucency', 40);
+    expect(screen.queryByRole('combobox', { name: 'Sidebar material' })).toBeNull();
     setPref.mockClear();
     fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
     expect(Object.fromEntries(setPref.mock.calls)).toEqual({
-      sidebarTranslucency: DEFAULT_PREFS.sidebarTranslucency, glassBlur: DEFAULT_PREFS.glassBlur, glassSaturate: DEFAULT_PREFS.glassSaturate,
-      sidebarVibrancy: DEFAULT_PREFS.sidebarVibrancy,
+      sidebarTranslucency: DEFAULT_PREFS.sidebarTranslucency,
     });
   });
 
-  it('offers no glass reset while the glass is as tuned, and no material picker without vibrancy', () => {
+  it('offers no glass reset while the glass is as tuned', () => {
     render(<AppearancePane />);
     fireEvent.click(advanced());
     expect((screen.getByRole('button', { name: 'Reset' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByRole('combobox', { name: 'Sidebar material' })).toBeNull();
   });
 
   it('keeps Window glass under Advanced where the window can be see-through', () => {
@@ -108,7 +102,7 @@ describe('Appearance at a glance', () => {
     expect(setPref).toHaveBeenCalledWith('windowGlass', !DEFAULT_PREFS.windowGlass);
   });
 
-  it('sets the sidebar density and the message text size', () => {
+  it('sets the density and the message text size', () => {
     render(<AppearancePane />);
     const density = screen.getByRole('radiogroup', { name: 'Density' });
     expect((within(density).getByRole('radio', { name: 'Comfortable' }) as HTMLInputElement).checked).toBe(DEFAULT_PREFS.sidebarDensity === 'comfortable');
@@ -135,6 +129,16 @@ describe('Appearance at a glance', () => {
     expect(setPref).toHaveBeenCalledWith('reduceMotion', !DEFAULT_PREFS.reduceMotion);
     fireEvent.click(screen.getByRole('switch', { name: 'Pages recommendations on Home' }));
     expect(setPref).toHaveBeenCalledWith('homeRecommendations', !DEFAULT_PREFS.homeRecommendations);
+  });
+
+  it('turns thoughts back on where this device had them off', () => {
+    expect(DEFAULT_PREFS.showThoughts).toBe(true);
+    state.prefs = { ...DEFAULT_PREFS, showThoughts: false };
+    render(<AppearancePane />);
+    const thoughts = screen.getByRole('switch', { name: 'Show thoughts' });
+    expect(thoughts.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(thoughts);
+    expect(setPref).toHaveBeenCalledWith('showThoughts', true);
   });
 });
 
@@ -252,6 +256,33 @@ describe('Appearance swatches', () => {
   });
 });
 
+describe('Appearance preview beside the Settings window', () => {
+  let aside: HTMLDivElement;
+  const screenHasRoom = (matches: boolean) => vi.spyOn(window, 'matchMedia').mockImplementation((media) => (
+    { matches, media, addEventListener: () => {}, removeEventListener: () => {} } as unknown as MediaQueryList));
+  const withAside = () => {
+    aside = document.createElement('div');
+    document.body.append(aside);
+    return render(<SettingsAsideContext.Provider value={aside}><AppearancePane /></SettingsAsideContext.Provider>);
+  };
+  afterEach(() => { vi.restoreAllMocks(); aside.remove(); });
+
+  it('sits in the panel beside the window when the screen has room, leaving the settings the page', () => {
+    screenHasRoom(true);
+    const view = withAside();
+    expect(within(aside).getByRole('complementary', { name: 'Preview' })).toBeTruthy();
+    expect(within(view.container).queryByRole('complementary', { name: 'Preview' })).toBeNull();
+    expect(view.container.querySelector('.appearance-pane')!.hasAttribute('data-preview')).toBe(false);
+  });
+
+  it('stays under its settings without that room', () => {
+    screenHasRoom(false);
+    const view = withAside();
+    expect(aside.childElementCount).toBe(0);
+    expect(within(view.container).getByRole('complementary', { name: 'Preview' })).toBeTruthy();
+  });
+});
+
 describe('Appearance on a phone', () => {
   const phone = () => render(<SettingsLayoutContext.Provider value="phone"><AppearancePane /></SettingsLayoutContext.Provider>);
 
@@ -260,7 +291,7 @@ describe('Appearance on a phone', () => {
     expect(screen.queryByText('Dim unfocused panes')).toBeNull();
     expect(screen.queryByText('Single-page mode')).toBeNull();
     expect(screen.queryByText('theme.palette')).toBeNull();
-    expect(advanced().textContent).toBe('Fonts, code blocks, glass, corner radius and 5 more');
+    expect(advanced().textContent).toBe('Fonts, code blocks, glass, corner radius and 3 more');
     fireEvent.click(advanced());
     expect(screen.queryByRole('slider', { name: 'Default pane width' })).toBeNull();
     expect(screen.queryByRole('slider', { name: 'Single-pane reading width' })).toBeNull();
@@ -283,7 +314,7 @@ describe('Appearance on a phone', () => {
 
   it('offers its own Text size instead of the desktop text, composer and sidebar sizes', () => {
     phone();
-    expect(rowNames()).toEqual(['Palette', 'Accent', 'Text size', 'Reduce motion', 'Pages recommendations', 'Digest']);
+    expect(rowNames()).toEqual(['Palette', 'Accent', 'Text size', 'Show thoughts', 'Reduce motion', 'Pages recommendations', 'Digest']);
     const size = screen.getByRole('radiogroup', { name: 'Text size' });
     expect(within(size).getAllByRole('radio').map((radio) => (radio as HTMLInputElement).checked)).toEqual([true, false, false]);
     fireEvent.click(within(size).getByRole('radio', { name: 'Large' }));

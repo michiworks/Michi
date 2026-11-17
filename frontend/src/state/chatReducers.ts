@@ -1,6 +1,6 @@
 import { uniqueContextName } from '../lib/sanitizeContextName';
-import type { ChatAction, ChatNodeState, ArtifactEntry, Project, ProjectAction, Tree } from './chatTypes';
-import { parseCompanionTurnMetadata } from 'michi-shared';
+import type { ChatAction, ChatMessage, ChatNodeState, ArtifactEntry, Project, ProjectAction, Tree } from './chatTypes';
+import { parseCompanionTurnMetadata, turnEndMarkOf } from 'michi-shared';
 import { applyTreeMessages, mapMessageRow, settleDeferredNodeFields } from './chatHydration';
 import { deriveTitleFromUserText } from './assistantParsing';
 import { classifiedErrorKind } from './turnInterruption';
@@ -282,6 +282,30 @@ export function reduceProject(p: Project, a: ProjectAction): Project {
   }
 }
 
+/** The bubble and the reply's placeholder a send adds, and shows while it waits (sendPreview.ts). */
+export function sentMessages(action: Extract<ChatAction, { type: 'user-send' }>): [ChatMessage, ChatMessage] {
+  const now = Date.now();
+  return [
+    {
+      id: userMessageIdFor(action.assistantId),
+      role: 'user',
+      text: action.userText,
+      toolCalls: [],
+      createdAt: now,
+      quotedText: action.quotedText,
+      ...(action.quotedText && action.quoteSource ? { quoteSource: action.quoteSource } : {}),
+      attachments: action.attachments,
+      comments: action.comments,
+      mentions: action.mentions,
+      ...(action.skill ? { skill: action.skill } : {}),
+      ...(action.metaAgentContext !== undefined ? { metaAgentContext: action.metaAgentContext } : {}),
+      ...(action.metaAgentContext?.refs?.length ? { companionRefs: action.metaAgentContext.refs } : {}),
+      ...(action.blockAnswer ? { blockAnswer: action.blockAnswer } : {}),
+    },
+    { id: action.assistantId, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: now },
+  ];
+}
+
 export function reduceNodes(
   nodes: Record<string, ChatNodeState>,
   action: ChatAction,
@@ -296,6 +320,11 @@ export function reduceNodes(
       const node = nodes[action.nodeId];
       return node && (node.ultracode === true) !== action.enabled
         ? { ...nodes, [action.nodeId]: { ...node, ultracode: action.enabled ? true : undefined } } : nodes;
+    }
+    case 'set-service-tier': {
+      const node = nodes[action.nodeId];
+      return node && (node.serviceTier ?? null) !== action.serviceTier
+        ? { ...nodes, [action.nodeId]: { ...node, serviceTier: action.serviceTier ?? undefined } } : nodes;
     }
     case 'create': {
       // A branch of a temporary chat is one too, marked before the backend
@@ -378,25 +407,7 @@ export function reduceNodes(
           subagents: undefined,
           usageSummary: undefined,
           mcpServerError: undefined,
-          messages: [
-            ...n.messages,
-            {
-              id: userMessageIdFor(action.assistantId),
-              role: 'user',
-              text: action.userText,
-              toolCalls: [],
-              createdAt: Date.now(),
-              quotedText: action.quotedText,
-              ...(action.quotedText && action.quoteSource ? { quoteSource: action.quoteSource } : {}),
-              attachments: action.attachments,
-              comments: action.comments,
-              mentions: action.mentions,
-              ...(action.skill ? { skill: action.skill } : {}),
-              ...(action.metaAgentContext !== undefined ? { metaAgentContext: action.metaAgentContext } : {}),
-              ...(action.metaAgentContext?.refs?.length ? { companionRefs: action.metaAgentContext.refs } : {}),
-            },
-            { id: action.assistantId, role: 'assistant', text: '', toolCalls: [], blocks: [], streaming: true, createdAt: Date.now() },
-          ],
+          messages: [...n.messages, ...sentMessages(action)],
         },
       };
     }
@@ -675,6 +686,24 @@ export function reduceNodes(
       );
       return { ...nodes, [action.nodeId]: { ...n, messages: msgs, streamingIdleMs: undefined } };
     }
+    case 'chat-blocks': {
+      const n = nodes[action.nodeId];
+      if (!n) return nodes;
+      const msgs = n.messages.map((m) =>
+        m.id === action.assistantId
+          ? projectAssistantStreamEvent(m, n.projectId, {
+              event: CHAT_STREAM_EVENTS.blocks,
+              data: {
+                blocks: action.blocks,
+                ...(action.title !== undefined ? { title: action.title } : {}),
+                fallbackText: action.fallbackText,
+                ...(action.observedAt !== undefined ? { observedAt: action.observedAt } : {}),
+              },
+            })
+          : m,
+      );
+      return { ...nodes, [action.nodeId]: { ...n, messages: msgs, streamingIdleMs: undefined } };
+    }
     case 'tool-call-update': {
       const n = nodes[action.nodeId];
       if (!n) return nodes;
@@ -708,16 +737,20 @@ export function reduceNodes(
       let extractedTitle: string | null = null;
       let extractedBranchOverview: string | null = null;
       let extractedFollowUps: string[] = [];
+      // Only the server's stop reason marks the answer: a Stop this window
+      // asked for shows nothing until the server confirms it (cancel-recovery).
+      const turnEnd = turnEndMarkOf(action.stopReason);
       const msgs = n.messages.map((m) => {
         if (m.id !== action.assistantId) return m;
         const meta = assistantMetadata(m);
         extractedTitle = meta.title;
         extractedBranchOverview = meta.branchOverview;
         extractedFollowUps = meta.followUps;
-        return projectAssistantStreamEvent(m, n.projectId, {
+        const ended = projectAssistantStreamEvent(m, n.projectId, {
           event: CHAT_STREAM_EVENTS.done,
           data: { stopReason: action.aborted ? 'cancelled' : 'end_turn', persisted: true, completedAt: action.completedAt },
         });
+        return turnEnd ? { ...ended, turnEnd } : ended;
       });
       // A new user turn may start while the previous turn drains its hidden
       // overview tail. Finalize only that older assistant message; its late
@@ -942,6 +975,29 @@ export function reduceNodes(
         historyBefore: action.before ?? undefined, messagesLoaded: !action.before,
         olderMessageCount: action.before ? Math.max(0, action.total - messages.length) : undefined,
         messageCount: Math.max(action.total, messages.length) } };
+    }
+    case 'tool-calls-loaded': {
+      // Backend-authored bodies, never written back (like messages-loaded).
+      // Only a call still deferred is replaced: a live update owns the rest.
+      const node = nodes[action.nodeId];
+      if (!node) return nodes;
+      let changed = false;
+      const messages = node.messages.map((message) => {
+        const loaded = action.byMessage[message.id];
+        if (!loaded || !message.toolCalls.some((tool) => tool.deferred)) return message;
+        const byId = new Map(loaded.map((tool) => [tool.id, tool]));
+        let replaced = false;
+        const toolCalls = message.toolCalls.map((tool) => {
+          const whole = tool.deferred ? byId.get(tool.id) : undefined;
+          if (!whole) return tool;
+          replaced = true;
+          return whole;
+        });
+        if (!replaced) return message;
+        changed = true;
+        return { ...message, toolCalls };
+      });
+      return changed ? { ...nodes, [action.nodeId]: { ...node, messages } } : nodes;
     }
     case 'retry-trim': {
       const n = nodes[action.nodeId];
@@ -1192,7 +1248,24 @@ export function reduceNodes(
     case 'node-viewed': {
       const n = nodes[action.nodeId];
       if (!n) return nodes;
-      return { ...nodes, [action.nodeId]: { ...n, viewedAt: action.viewedAt, ...(action.seen ? seenAllCompletions(n) : {}) } };
+      const seen = action.seen ? seenAllCompletions(n) : {};
+      // What this view marks seen, a pane has yet to show (unreadOnOpen).
+      const marked = seen.seenCompletionSeq === undefined ? 0 : seen.seenCompletionSeq - (n.seenCompletionSeq ?? 0);
+      return {
+        ...nodes,
+        [action.nodeId]: {
+          ...n,
+          viewedAt: action.viewedAt,
+          ...seen,
+          ...(marked > 0 ? { unreadOnOpen: (n.unreadOnOpen ?? 0) + marked } : {}),
+        },
+      };
+    }
+    case 'unread-on-open-shown': {
+      const n = nodes[action.nodeId];
+      if (!n || n.unreadOnOpen === undefined) return nodes;
+      const { unreadOnOpen: _unreadOnOpen, ...rest } = n;
+      return { ...nodes, [action.nodeId]: rest };
     }
     case 'mark-all-read': {
       // Clear unread on every chat node with a completion the user has not
@@ -1413,7 +1486,7 @@ export function reduceNodes(
       if (next.length === n.pendingQueued.length) return nodes;
       const updated = { ...n };
       // The pause ends with the queue it paused.
-      if (next.length === 0) { delete updated.pendingQueued; delete updated.queueErrored; }
+      if (next.length === 0) { delete updated.pendingQueued; delete updated.queueErrored; delete updated.queueStopped; }
       else updated.pendingQueued = next;
       return { ...nodes, [action.nodeId]: updated };
     }
@@ -1424,6 +1497,15 @@ export function reduceNodes(
       const updated = { ...n };
       delete updated.pendingQueued;
       delete updated.queueErrored;
+      delete updated.queueStopped;
+      return { ...nodes, [action.nodeId]: updated };
+    }
+    case 'resume-queue': {
+      const n = nodes[action.nodeId];
+      if (!n?.queueErrored) return nodes;
+      const updated = { ...n };
+      delete updated.queueErrored;
+      delete updated.queueStopped;
       return { ...nodes, [action.nodeId]: updated };
     }
     case 'mark-queue-errored': {
@@ -1433,7 +1515,7 @@ export function reduceNodes(
       // the spec's "error preserves a non-empty queue" semantics.
       if (!n.pendingQueued || n.pendingQueued.length === 0) return nodes;
       if (n.queueErrored) return nodes;
-      return { ...nodes, [action.nodeId]: { ...n, queueErrored: true } };
+      return { ...nodes, [action.nodeId]: { ...n, queueErrored: true, ...(action.stopped ? { queueStopped: true } : {}) } };
     }
     case 'set-current-mode': {
       const n = nodes[action.nodeId];
@@ -1549,7 +1631,7 @@ export function reduceNodes(
     }
     case 'context-usage': {
       const n = nodes[action.nodeId];
-      if (!n) return nodes;
+      if (!n || n.contextUsagePercentage === action.contextUsagePercentage) return nodes;
       return { ...nodes, [action.nodeId]: { ...n, contextUsagePercentage: action.contextUsagePercentage } };
     }
     case 'usage-summary': {
@@ -1622,8 +1704,11 @@ export function reduceNodes(
           message: action.detail ?? 'Cancellation cleanup failed. Retry to check the original session.',
         });
       }
+      // The Stop is confirmed: the answer says how its turn ended.
+      const turnEnd = action.state === 'settled' ? turnEndMarkOf(action.stopReason) : undefined;
       return { ...nodes, [action.nodeId]: { ...n,
         runtimeActivity: action.state === 'pending' ? action.detail : undefined,
+        ...(turnEnd ? { messages: n.messages.map((m) => (m.id === action.assistantId ? { ...m, turnEnd } : m)) } : {}),
       } };
     }
     case 'warning': {

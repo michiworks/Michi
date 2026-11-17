@@ -22,12 +22,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useRef, useState } from 'react';
 import type { ChatNodeState, Project } from './chatTypes';
 import type { BackendConnectionSummary } from '../config/backendConnections';
+import type { TreeMessagePage } from '../services/api';
 
 const apiMocks = vi.hoisted(() => ({
   fetchPersistenceCapabilities: vi.fn(),
   fetchAllWorkspacesMeta: vi.fn(),
   fetchTreeMessageSnapshot: vi.fn(async () => ({ messages: [] })),
-  fetchTreeMessagePage: vi.fn(async () => ({ messages: [] })),
+  fetchTreeMessagePage: vi.fn(async (..._args: unknown[]): Promise<TreeMessagePage> => ({ messages: [] })),
   fetchWorkspaces: vi.fn(),
   fetchWorkspace: vi.fn(),
   applyWorkspaceCommands: vi.fn(async () => {}),
@@ -730,6 +731,31 @@ describe('cold-start hydration barrier', () => {
 
       expect(apiMocks.fetchTreeMessageSnapshot).toHaveBeenCalledWith('ws-1', 't-1', undefined);
       expect(result.current.hydrated).toBe(true);
+    });
+
+    it.each([
+      ['in the phone layout', 2, 390],
+      ['when it is long', 301, 1024],
+    ])('reads a local tree\'s first page %s and keeps it partial', async (_label, count, width) => {
+      const innerWidth = window.innerWidth;
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+      try {
+        apiMocks.fetchAllWorkspacesMeta.mockResolvedValue([{ ...rowWithTree, nodes: [{ ...rowWithTree.nodes[0], message_count: count }] }]);
+        apiMocks.fetchTreeMessageSnapshot.mockClear();
+        apiMocks.fetchTreeMessagePage.mockClear().mockResolvedValue({
+          messages: [{ id: 'm1', node_id: 'n1', role: 'user', content: 'Newest', seq: 1, created_at: 1 }],
+          pages: [{ nodeId: 'n1', total: count, before: { seq: 1, id: 'm1' } }],
+        });
+        const { result } = renderHook(() => useHarness());
+        await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+
+        expect(apiMocks.fetchTreeMessageSnapshot).not.toHaveBeenCalled();
+        expect(apiMocks.fetchTreeMessagePage).toHaveBeenCalledWith('ws-1', 't-1', undefined, undefined, expect.objectContaining({ limit: 15 }));
+        expect(result.current.hydrated).toBe(true);
+        expect(result.current.nodes.n1).toMatchObject({ messagesLoaded: false, historyBefore: { seq: 1, id: 'm1' }, messageCount: count });
+      } finally {
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: innerWidth });
+      }
     });
   });
 

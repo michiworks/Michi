@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
-import { ChevronRight, EyeOff, FileText, Home, Kanban, Plus, Settings2, Table2 } from 'lucide-react';
+import { ChevronRightIcon, DocIcon, EyeOffIcon, HomeIcon, KanbanIcon, PlusIcon, SettingsIcon, TableIcon } from '../icons';
 import type { FirstRunProgressDto, PageSummaryDto, SpaceSummaryDto, WorkspaceHomeSummaryDto } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
 import { useChatProjects } from '../../../state/chatStore';
@@ -22,6 +22,7 @@ import type { OpenNativePageRoute } from './SpacesPage';
 import { WorkspaceFirstRunBadge } from './home/MetaAgentSidebarStatus';
 import ContextMenu, { MenuPresence, menuOpenKey } from '../../ContextMenu';
 import { RowKebab } from '../primitives';
+import { Button } from '../../ui/controls';
 import '../rail/rail.css';
 import './spacesSidebar.css';
 import { pageIsWithin, usePageActions } from './usePageActions';
@@ -93,7 +94,7 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
   const localGroups = useMemo(() => groups.filter(([connectionId]) => spacesSupportsConnection(connectionId)), [groups]);
   const databases = useWorkspaceDatabases(localGroups);
   // All tasks counts the tasks in every local workspace's task database.
-  const taskCount = databases.reduce((sum, database) => sum + (database.role === 'tasks' ? database.rowCount : 0), 0);
+  const taskCount = databases.items.reduce((sum, database) => sum + (database.role === 'tasks' ? database.rowCount : 0), 0);
   const allTasksCurrent = current.kind === 'all-tasks' && !settingsOpen;
   const homeCurrent = current.kind === 'home' && !settingsOpen;
   const localFirstRun = useSpacesFirstRun(LOCAL_BACKEND_CONNECTION_ID);
@@ -106,19 +107,19 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
     <div className="area-side spaces-side" aria-label="Pages navigation">
       <SidebarScroller className="area-side__grow">
         <div className="area-side__row is-strong is-nav" role="button" tabIndex={0} aria-current={homeCurrent ? 'page' : undefined} onClick={openHome} onKeyDown={keys(openHome)}>
-          <Home size={15} strokeWidth={1.5} aria-hidden="true" />
+          <HomeIcon aria-hidden="true" />
           <span className="area-side__label">Home</span>
           {homeReading && <span className="agent-spinner" role="img" aria-label={`${name} is reading`} />}
         </div>
         {onOpenAllTasks && (
           <div className="area-side__row is-strong is-nav" role="button" tabIndex={0} aria-current={allTasksCurrent ? 'page' : undefined} onClick={openAllTasks} onKeyDown={keys(openAllTasks)}>
-            <Kanban size={15} strokeWidth={1.5} aria-hidden="true" />
+            <KanbanIcon aria-hidden="true" />
             <span className="area-side__label">All tasks</span>
             {taskCount > 0 && <span className="area-side__count" aria-label={`${taskCount} tasks`}>{taskCount}</span>}
           </div>
         )}
         <div className="area-side__section">Pages
-          <button type="button" className="area-side__section-btn" aria-label="New page" onClick={onNewSpace}><Plus size={14} strokeWidth={1.5} aria-hidden="true" /></button>
+          <button type="button" className="area-side__section-btn" aria-label="New page" onClick={onNewSpace}><PlusIcon aria-hidden="true" /></button>
         </div>
         {groups.map(([connectionId, list]) => (
           <ConnectionWorkspaces key={connectionId} connectionId={connectionId} workspaces={list} current={current} expanded={expanded}
@@ -130,7 +131,7 @@ export function SpacesSidebar({ current, onOpenHome, onOpenWorkspace, onOpenPage
       </SidebarScroller>
       <div className="area-side__foot spaces-side__footer">
         <button type="button" className="area-side__row is-strong is-nav" aria-label="Pages settings" aria-current={settingsOpen ? 'page' : undefined} onClick={onOpenSettings}>
-          <Settings2 size={15} strokeWidth={1.5} aria-hidden="true" /><span className="area-side__label">Settings</span>
+          <SettingsIcon aria-hidden="true" /><span className="area-side__label">Settings</span>
         </button>
       </div>
     </div>
@@ -154,7 +155,7 @@ function ConnectionWorkspaces({ connectionId, workspaces, current, expanded, onT
   onOpenWorkspace: (target: WorkspaceTarget) => void;
   onOpenPage: (route: OpenNativePageRoute) => void;
 }) {
-  const { spaces } = useSpaces(connectionId);
+  const { spaces, status: spacesStatus, refresh: refreshSpaces } = useSpaces(connectionId);
   const firstRun = useSpacesFirstRun(connectionId);
   const workspaceHomes = useSpacesHomeWorkspaces(connectionId);
   const homes = useMemo(() => {
@@ -194,12 +195,20 @@ function ConnectionWorkspaces({ connectionId, workspaces, current, expanded, onT
   const shown = available.filter((workspace) => (homes.get(workspace.id)?.hiddenAt ?? null) === null);
   const hidden = available.filter((workspace) => (homes.get(workspace.id)?.hiddenAt ?? null) !== null);
   const toggleHidden = () => setShowHidden((value) => !value);
+  // The list is known once both its reads have answered: until then nothing listed is loading, not empty.
+  const homesRead = workspaceHomes.data !== null || firstRun.data !== null;
+  const status = spaces !== null && homesRead ? 'ready' : spacesStatus === 'error' || workspaceHomes.status === 'error' ? 'error' : 'loading';
+  const retry = () => { refreshSpaces(); workspaceHomes.refresh(); };
   return <>
     {shown.map((workspace) => row(workspace, false))}
-    {available.length === 0 && spacesSupportsConnection(connectionId) && <div className="area-side__note">No pages yet.</div>}
+    {available.length === 0 && spacesSupportsConnection(connectionId) && (status === 'ready'
+      ? <div className="area-side__note">No pages yet.</div>
+      : status === 'loading'
+        ? <div className="area-side__note" role="status">Loading pages…</div>
+        : <div className="area-side__note" role="alert">Couldn’t read the pages. <Button variant="ghost" size="sm" onClick={retry}>Retry</Button></div>)}
     {hidden.length > 0 && <>
       <div className="area-side__row spaces-side__hidden" role="button" tabIndex={0} aria-expanded={showHidden} onClick={toggleHidden} onKeyDown={keys(toggleHidden)}>
-        <EyeOff size={14} strokeWidth={1.5} aria-hidden="true" />
+        <EyeOffIcon aria-hidden="true" />
         <span className="area-side__label">Hidden from Pages</span>
         <span className="area-side__count" aria-label={`${hidden.length} hidden`}>{hidden.length}</span>
       </div>
@@ -244,7 +253,7 @@ function WorkspaceRow({ workspace, connectionId, spaces, tone, open, run, propos
       data-hidden={hidden || undefined} data-menu-open={menu ? '' : undefined} data-context-target=""
       onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }}>
       {hasChildren
-        ? <button type="button" className="area-side__twist" aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${workspace.name}`} onClick={onToggle}><ChevronRight size={11} strokeWidth={1.6} aria-hidden="true" /></button>
+        ? <button type="button" className="area-side__twist" aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${workspace.name}`} onClick={onToggle}><ChevronRightIcon size="sm" aria-hidden="true" /></button>
         : <span className="area-side__twist" aria-hidden="true" />}
       <button type="button" className="area-side__main" onClick={() => onOpenWorkspace({ workspaceId: workspace.id, backendConnectionId: connectionId })}>
         <span className="area-side__dot" data-tone={tone} aria-hidden="true" />
@@ -300,7 +309,7 @@ function WorkspacePages({ workspaceId, connectionId, spaces, current, onOpenPage
           aria-current={isCurrent ? 'page' : undefined}
           onContextMenu={event => { event.preventDefault(); setMenu({ page, x: event.clientX, y: event.clientY }); }}>
           <button type="button" className="area-side__main" aria-current={isCurrent ? 'page' : undefined} onClick={open}>
-            <FileText size={14} strokeWidth={1.5} aria-hidden="true" />
+            <DocIcon aria-hidden="true" />
             <span className="area-side__label">{page.title || 'Untitled page'}</span>
           </button>
           <ProposalCount count={page.pendingProposals} />
@@ -324,10 +333,18 @@ function WorkspacePages({ workspaceId, connectionId, spaces, current, onOpenPage
   </>;
 }
 
+interface WorkspaceDatabases {
+  /** Loading until the first read answers; error when no workspace's databases could be read. */
+  status: 'loading' | 'ready' | 'error';
+  items: PageDatabaseSummary[];
+  retry: () => void;
+}
+
 /** The databases of the workspaces listed, read again when a page changes: the Databases list and All tasks' count. */
-function useWorkspaceDatabases(groups: ReadonlyArray<readonly [string, Project[]]>): PageDatabaseSummary[] {
-  const [databases, setDatabases] = useState<PageDatabaseSummary[]>([]);
+function useWorkspaceDatabases(groups: ReadonlyArray<readonly [string, Project[]]>): WorkspaceDatabases {
+  const [databases, setDatabases] = useState<Pick<WorkspaceDatabases, 'status' | 'items'>>({ status: 'loading', items: [] });
   const [version, setVersion] = useState(0);
+  const retry = useCallback(() => setVersion((value) => value + 1), []);
   const signature = groups.map(([connectionId, list]) => `${connectionId}:${list.map((item) => item.id).join(',')}`).join('|');
   useEffect(() => {
     const unsubscribe = groups.map(([backendConnectionId]) => subscribePageChanges({ backendConnectionId }, () => setVersion((value) => value + 1)));
@@ -341,21 +358,29 @@ function useWorkspaceDatabases(groups: ReadonlyArray<readonly [string, Project[]
       listWorkspaceDatabases(workspace.id, { backendConnectionId, workspaceId: workspace.id, signal: controller.signal })));
     void Promise.allSettled(requests).then((results) => {
       if (controller.signal.aborted) return;
-      setDatabases(results.flatMap((result) => result.status === 'fulfilled' ? result.value : []));
+      const failedAll = results.length > 0 && results.every((result) => result.status === 'rejected');
+      // A read that fails keeps what an earlier one listed.
+      setDatabases((current) => failedAll
+        ? (current.status === 'ready' ? current : { status: 'error', items: [] })
+        : { status: 'ready', items: results.flatMap((result) => result.status === 'fulfilled' ? result.value : []) });
     });
     return () => controller.abort();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, version]);
-  return databases;
+  return { ...databases, retry };
 }
 
-function DatabaseRows({ databases }: { databases: readonly PageDatabaseSummary[] }) {
+function DatabaseRows({ databases }: { databases: WorkspaceDatabases }) {
   // A workspace's task database is not listed: All tasks stands for them.
-  const shown = databases.filter((database) => database.role !== 'tasks');
-  if (shown.length === 0) return <div className="area-side__note">No databases yet.</div>;
+  const shown = databases.items.filter((database) => database.role !== 'tasks');
+  if (shown.length === 0) {
+    if (databases.status === 'loading') return <div className="area-side__note" role="status">Loading databases…</div>;
+    if (databases.status === 'error') return <div className="area-side__note" role="alert">Couldn’t read the databases. <Button variant="ghost" size="sm" onClick={databases.retry}>Retry</Button></div>;
+    return <div className="area-side__note">No databases yet.</div>;
+  }
   return <>{[...shown].sort((a, b) => a.title.localeCompare(b.title)).map((database) => (
     <div key={`${database.workspaceId}:${database.id}`} className="area-side__row is-strong" aria-disabled="true">
-      <Table2 size={15} strokeWidth={1.5} aria-hidden="true" />
+      <TableIcon aria-hidden="true" />
       <span className="area-side__label">{database.title || 'Untitled database'}</span>
       <span className="area-side__count">{database.rowCount}</span>
     </div>

@@ -1,8 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import type { MichiPageBlock } from 'michi-shared';
 import { MichiBlock, rendererFor } from './MichiBlock';
 import type { MichiBlockCtx } from './blockTypes';
+import { TICKED_HOLD_MS } from './blocks/data';
 
 // Markdown rendering is MarkdownContent's own concern.
 vi.mock('../../../MarkdownContent', () => ({ default: ({ text }: { text: string }) => <div data-testid="md">{text}</div> }));
@@ -59,6 +61,13 @@ describe('MichiBlock dispatcher', () => {
     expect(screen.getByText('Gauge · CPU')).toBeTruthy();
     const { container } = renderBlock({ type: 'hologram', id: 'x', caption: 'Spinning cube' });
     expect(container.querySelector('[data-michi-block="unknown"]')?.textContent).toBe('hologram · Spinning cube');
+  });
+
+  it("names a code block's language once, in the code's own header", () => {
+    const { container } = renderBlock({ type: 'code', title: 'Rollout', lang: 'ts', code: 'rollout(0.1)' });
+    expect(screen.getByRole('heading', { name: 'Rollout' })).toBeTruthy();
+    expect([...container.querySelectorAll('span')].filter((el) => el.textContent === 'ts')).toHaveLength(1);
+    expect(container.querySelector('.michi-code-language')?.textContent).toBe('ts');
   });
 
   it('names a wordless unknown block by its kind', () => {
@@ -289,9 +298,126 @@ describe('page editing hooks in renderers', () => {
     expect(toggleItem).toHaveBeenCalledWith(block, 0);
   });
 
+  describe('a checklist item ticked on the page', () => {
+    type Item = { text: string; done: boolean };
+    /** A page that saves the tick, as NativePageDocument does. */
+    function LiveChecklist({ items }: { items: Item[] }) {
+      const [block, setBlock] = useState<MichiPageBlock>({ type: 'checklist', id: 'cl', title: 'Before', items });
+      const toggleItem = (shown: MichiPageBlock, index: number) => setBlock({
+        ...shown,
+        items: (shown.items as Item[]).map((it, i) => (i === index ? { ...it, done: !it.done } : it)),
+      });
+      return <MichiBlock block={block} ctx={ctx({ toggleItem })} />;
+    }
+    const ITEMS: Item[] = [{ text: 'Book', done: true }, { text: 'Pack', done: false }, { text: 'Go', done: false }];
+    const boxes = () => screen.getAllByRole('checkbox').map((b) => `${b.getAttribute('aria-label')}:${b.getAttribute('aria-checked')}`);
+    const wait = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('keeps its place, ticked and struck through, then joins the done ones', () => {
+      const { container } = render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      // The tick is saved at once; only the row's move waits.
+      expect(boxes()).toEqual(['Pack:true', 'Go:false']);
+      expect(screen.getByText('2/3')).toBeTruthy();
+      expect(container.querySelector('li[data-done="true"]')?.textContent).toBe('Pack');
+      expect(screen.getByRole('button', { name: 'Show 1 done' })).toBeTruthy();
+      wait(TICKED_HOLD_MS - 1);
+      expect(boxes()).toEqual(['Pack:true', 'Go:false']);
+      wait(1);
+      expect(boxes()).toEqual(['Go:false']);
+      expect(screen.getByRole('button', { name: 'Show 2 done' })).toBeTruthy();
+    });
+
+    it('stays open when it is unticked before the wait ends', () => {
+      render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      wait(TICKED_HOLD_MS / 2);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      expect(boxes()).toEqual(['Pack:false', 'Go:false']);
+      wait(TICKED_HOLD_MS);
+      expect(boxes()).toEqual(['Pack:false', 'Go:false']);
+      expect(screen.getByRole('button', { name: 'Show 1 done' })).toBeTruthy();
+    });
+
+    it('waits again when another is ticked, and both leave together', () => {
+      render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      wait(TICKED_HOLD_MS - 100);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Go' }));
+      // Past the first item's own wait: nothing moves while the person is still ticking.
+      wait(200);
+      expect(boxes()).toEqual(['Pack:true', 'Go:true']);
+      wait(TICKED_HOLD_MS);
+      expect(screen.queryByRole('checkbox')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Show 3 done' })).toBeTruthy();
+    });
+
+    it('moves at once when a done item is unticked', () => {
+      render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Show 1 done' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Book' }));
+      expect(boxes()).toEqual(['Book:false', 'Pack:false', 'Go:false']);
+      expect(screen.queryByRole('button', { name: /done/ })).toBeNull();
+    });
+
+    it('does not hold another item written into the same place', () => {
+      const block: MichiPageBlock = { type: 'checklist', id: 'cl', title: 'Before', items: ITEMS };
+      const c = ctx({ toggleItem: vi.fn() });
+      const { rerender } = render(<MichiBlock block={block} ctx={c} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      rerender(<MichiBlock block={{ ...block, items: [ITEMS[0], { text: 'Fly', done: true }, ITEMS[2]] }} ctx={c} />);
+      expect(boxes()).toEqual(['Go:false']);
+      expect(screen.getByRole('button', { name: 'Show 2 done' })).toBeTruthy();
+    });
+
+    it("ticks from its words as from its mark, but not when they are being selected", () => {
+      render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByText('Pack'));
+      expect(boxes()).toEqual(['Pack:true', 'Go:false']);
+      const selection = vi.spyOn(window, 'getSelection').mockReturnValue({ toString: () => 'Go' } as Selection);
+      fireEvent.click(screen.getByText('Go'));
+      selection.mockRestore();
+      expect(boxes()).toEqual(['Pack:true', 'Go:false']);
+    });
+
+    it('hands the keyboard to the done toggle when the row it was on folds away', () => {
+      render(<LiveChecklist items={ITEMS} />);
+      const box = screen.getByRole('checkbox', { name: 'Pack' });
+      box.focus();
+      fireEvent.click(box);
+      expect(document.activeElement).toBe(box);
+      wait(TICKED_HOLD_MS);
+      // The row is gone with its mark; without this the page body would hold the keyboard.
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Show 2 done' }));
+    });
+
+    it('leaves the keyboard where it is when the row folds under no focus of its own', () => {
+      render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      const other = screen.getByRole('checkbox', { name: 'Go' });
+      other.focus();
+      wait(TICKED_HOLD_MS);
+      expect(document.activeElement).toBe(other);
+    });
+
+    it('leaves no timer behind when the block goes away', () => {
+      const { unmount } = render(<LiveChecklist items={ITEMS} />);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Pack' }));
+      expect(vi.getTimerCount()).toBe(1);
+      unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   it('keeps a checklist without an id read-only', () => {
-    renderBlock({ type: 'checklist', title: 'Before', items: [{ text: 'Pack', done: false }] }, ctx({ toggleItem: vi.fn() }));
+    const toggleItem = vi.fn();
+    renderBlock({ type: 'checklist', title: 'Before', items: [{ text: 'Pack', done: false }] }, ctx({ toggleItem }));
     expect(screen.getByRole('checkbox', { name: 'Pack' }).getAttribute('aria-readonly')).toBe('true');
+    fireEvent.click(screen.getByText('Pack'));
+    expect(toggleItem).not.toHaveBeenCalled();
   });
 
   it('shows Pick this on compare options, off until Michi takes the choice', () => {

@@ -1,7 +1,8 @@
 /* A database shown as a block of a Space page (NativeDatabase presentation="page"):
    its title and view kind head the block and the view shows bare. The view's bar
    rides over the heading's right side, and the row controls show, while the
-   pointer or focus is in the database, as a block's toolbar does. Tokens only. */
+   pointer or the keyboard is in the database or a menu of its bar is open, as a
+   block's toolbar does; a touch screen always shows them. Tokens only. */
 
 [data-native-database][data-presentation='page'] { position: relative; }
 /* The bar is placed against the whole block, heading included. */
@@ -23,12 +24,16 @@
   border: 0;
   background: var(--term-bg);
 }
-[data-presentation='page'] :is(.michi-db__bar, .michi-db-th--check, .michi-db-td--check, .michi-db-th--add, .michi-db-new-row) {
-  opacity: 0;
-  transition: opacity var(--t-quick) ease;
-}
-[data-presentation='page']:is(:hover, :focus-within) :is(.michi-db__bar, .michi-db-th--check, .michi-db-td--check, .michi-db-th--add, .michi-db-new-row) {
-  opacity: 1;
+@media (hover: hover) {
+  [data-presentation='page'] :is(.michi-db__bar, .michi-db-th--check, .michi-db-td--check, .michi-db-th--add, .michi-db-new-row) {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--t-quick) ease;
+  }
+  [data-presentation='page']:is(:hover, :has(:focus-visible), :has([aria-expanded='true'])) :is(.michi-db__bar, .michi-db-th--check, .michi-db-td--check, .michi-db-th--add, .michi-db-new-row) {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 /* A task board's head counts its tasks; its notes sit above the view. */

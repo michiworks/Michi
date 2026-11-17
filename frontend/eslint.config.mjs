@@ -1,11 +1,8 @@
-import { readFileSync } from 'node:fs';
 import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 
-// Files copied unchanged from the upstream block renderer snapshot.
+// Michi's block renderers that started as a copy of Agent Desk's (see its README.md).
 const VENDOR_BLOCKS = 'src/components/terminal/content/page/vendor-blocks';
-const vendorVerbatim = JSON.parse(readFileSync(new URL(`./${VENDOR_BLOCKS}/manifest.json`, import.meta.url), 'utf8'))
-  .verbatim.filter((path) => /\.tsx?$/.test(path)).map((path) => `${VENDOR_BLOCKS}/${path}`);
 
 export default tseslint.config(
   {
@@ -81,7 +78,7 @@ export default tseslint.config(
         },
         {
           selector: "Property[key.name=/^(transition|animation)$/] Literal[value=/\\d(ms|s)\\b/]",
-          message: "Use a motion token: var(--t-quick|soft|enter|decay|slow) or var(--t-loop-fast|loop|loop-slow).",
+          message: "Use a motion token: var(--t-quick|soft|brief|dismiss|enter|exit|move|collapse|scrim-exit|decay|slow) or var(--t-loop-fast|loop|loop-slow).",
         },
         {
           selector: "Property > Literal[value=/^#[0-9a-fA-F]{3,8}$/]",
@@ -104,14 +101,15 @@ export default tseslint.config(
     },
   },
   {
-    // Agent Desk's block code, mirrored verbatim so Desk's diffs apply to it
-    // (`${VENDOR_BLOCKS}/README.md`). It keeps Desk's style; the hooks and
-    // safety rules above still apply. Michi's own shims there are linted as usual.
-    files: vendorVerbatim,
+    // One icon set: everything takes its icons from components/terminal/icons.tsx,
+    // the only file that wraps Lucide (at Michi's sizes and 1.25px stroke).
+    // The block renderers that started as Agent Desk's keep their own imports.
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: ['src/components/terminal/icons.tsx', `${VENDOR_BLOCKS}/**`],
     rules: {
-      'prefer-const': 'off',
-      'no-restricted-syntax': 'off',
-      '@typescript-eslint/no-use-before-define': 'off',
+      'no-restricted-imports': ['error', {
+        paths: [{ name: 'lucide-react', message: 'Import icons from components/terminal/icons.tsx (add a fromLucide export there if one is missing).' }],
+      }],
     },
   },
 );

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PageBlock } from 'michi-shared';
 import { PAGE_HELPER_DRAFT_EVENT, type PageHelperDraftRequest } from '../../../state/pages/pageHelperDraft';
 
-const mocks = vi.hoisted(() => ({ edit: vi.fn(), readComponent: vi.fn(), layoutRules: vi.fn(), openTasks: vi.fn(), slotInsert: vi.fn() }));
+const mocks = vi.hoisted(() => ({ edit: vi.fn(), readComponent: vi.fn(), layoutRules: vi.fn(), openTasks: vi.fn(), slotInsert: vi.fn(), loading: false }));
 
 vi.mock('../../../state/chatStore', () => ({
   useChatActions: () => ({ openPagePane: vi.fn(), revealBackendNode: vi.fn() }),
@@ -13,8 +13,8 @@ vi.mock('../../../state/chatStore', () => ({
 }));
 vi.mock('../../../state/pages/useSpaceTree', () => ({ useSpaceTree: () => ({ pages: [{ id: 'page-1', workspaceId: 'workspace-1', parentId: null, position: 0, title: 'Project Space' }], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/usePage', () => ({ usePage: () => ({
-  page: { id: 'page-1', workspaceId: 'workspace-1', parentId: null, position: 0, title: 'Project Space', color: null, updatedAt: 1, updatedBy: 'user', pendingProposals: 0, helperNodeId: null, revision: 1, viewVersion: 1, blocks: [{ id: 'md-1', rev: 1, type: 'markdown', text: 'Hello' }] },
-  changes: [], status: 'ready', error: null, stale: false, refresh: vi.fn(), edit: mocks.edit, accept: vi.fn(), dismiss: vi.fn(), reopen: vi.fn(), revert: vi.fn(), redo: vi.fn(), revertBatch: vi.fn(),
+  page: mocks.loading ? null : { id: 'page-1', workspaceId: 'workspace-1', parentId: null, position: 0, title: 'Project Space', color: null, updatedAt: 1, updatedBy: 'user', pendingProposals: 0, helperNodeId: null, revision: 1, viewVersion: 1, blocks: [{ id: 'md-1', rev: 1, type: 'markdown', text: 'Hello' }] },
+  changes: [], status: mocks.loading ? 'loading' : 'ready', error: null, stale: false, refresh: vi.fn(), edit: mocks.edit, accept: vi.fn(), dismiss: vi.fn(), reopen: vi.fn(), revert: vi.fn(), redo: vi.fn(), revertBatch: vi.fn(),
 }) }));
 vi.mock('../../../state/pages/useSpaces', () => ({ useSpaces: () => ({ spaces: [], status: 'ready', error: null, refresh: vi.fn() }) }));
 vi.mock('../../../state/pages/revealSource', () => ({ revealPageSource: vi.fn() }));
@@ -44,6 +44,7 @@ describe('SpaceView components', () => {
   });
 
   beforeEach(() => {
+    mocks.loading = false;
     mocks.edit.mockReset().mockResolvedValue(undefined);
     mocks.openTasks.mockReset().mockResolvedValue({ database: { id: 'db-tasks' }, created: true });
     mocks.slotInsert.mockReset();
@@ -67,16 +68,40 @@ describe('SpaceView components', () => {
     }]));
   });
 
+  it('hands a page skeleton watched on screen over to the page as Home does', () => {
+    mocks.loading = true;
+    const route = { type: 'space', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-1' } as const;
+    const { rerender } = render(<SpaceView route={route} onBack={vi.fn()} onOpenPage={vi.fn()} />);
+    expect(screen.getByRole('status').textContent).toBe('Loading page…');
+    mocks.loading = false;
+    rerender(<SpaceView route={route} onBack={vi.fn()} onOpenPage={vi.fn()} />);
+    const main = screen.getByRole('main', { name: 'Project Space' });
+    expect(main.hasAttribute('data-arriving')).toBe(true);
+    expect(main.querySelector('.spaces-arrival-ghost .michi-doc-skeleton')).toBeTruthy();
+  });
+
   it('opens a menu panel above the page and closes it out of reach while it goes', async () => {
     render(<SpaceView route={{ type: 'space', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-1' }} onBack={vi.fn()} onOpenPage={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Page actions' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /Activity/ }));
     const panel = screen.getByRole('region', { name: 'Activity' });
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    const close = screen.getByRole('button', { name: 'Close' });
+    close.focus();
+    fireEvent.click(close);
     // Closing: no longer a region to reach while it collapses, then gone.
     expect(screen.queryByRole('region', { name: 'Activity' })).toBeNull();
     expect(panel.closest('[inert]') ?? panel.closest('[aria-hidden="true"]')).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Page actions' }));
     await waitFor(() => expect(panel.isConnected).toBe(false));
+  });
+
+  it('starts focus on Back in the settings that replace the page, and gives it to the gear when they close', () => {
+    render(<SpaceView route={{ type: 'space', pageId: 'page-1', workspaceId: 'workspace-1', backendConnectionId: 'backend-1' }} onBack={vi.fn()} onOpenPage={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Page settings' }));
+    const back = screen.getByRole('button', { name: '← Back to page' });
+    expect(document.activeElement).toBe(back);
+    fireEvent.click(back);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Page settings' }));
   });
 
   it('lists the page\'s layout rules from the Page actions menu', async () => {

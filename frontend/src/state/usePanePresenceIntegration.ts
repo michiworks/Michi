@@ -45,7 +45,7 @@ import type { SurfacePaneKind } from 'michi-shared';
 import type { Project } from './chatTypes';
 import type { PaneItem, PaneItemKind } from './paneItems';
 import { usePanePresenceDashboardVisible } from './panePresenceVisibility';
-import { panesShownInWindow } from './attention/targetVisibility';
+import { panesShownInWindow, watchPaneStrip } from './attention/targetVisibility';
 import {
   fetchPersistenceCapabilities,
   supportsPaneInspection,
@@ -135,12 +135,6 @@ export interface UsePanePresenceIntegrationArgs {
   displayedPanes?: readonly string[];
 }
 
-/** The pane strip settles (scrolling, a resize) for this long before presence measures what it
- *  shows, so a scroll fling sends at most one presence update. */
-export const PRESENCE_ON_SCREEN_SETTLE_MS = 300;
-/** A second look after the displayed panes change, once the strip's open/close motion is over. */
-const PRESENCE_ON_SCREEN_RECHECK_MS = 1_000;
-
 function sameIds(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
 }
@@ -151,9 +145,9 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
  * paints the pane with at least 60% of it inside — not a background single-page tab, not a pane
  * scrolled out of the strip. A pane that stops being displayed (closed, another tab, another
  * tree) leaves at once; a newly displayed one counts as on screen until the strip has settled and
- * it is measured. Strip scrolls (`michi:dashboard-scroll`), window resizes and size changes of the
- * strip or its panes (a dragged pane width) re-measure, debounced. Measures only while `enabled`
- * (presence is on).
+ * it is measured. It measures on watchPaneStrip's beats: after the strip settles, and again after
+ * strip scrolls, window resizes and size changes of the strip or its panes, debounced, so a scroll
+ * fling sends at most one presence update. Measures only while `enabled` (presence is on).
  */
 function useOnScreenPanes(
   displayed: readonly string[] | undefined,
@@ -181,30 +175,7 @@ function useOnScreenPanes(
       const next = panesShownInWindow(displayedRef.current ?? []);
       setOnScreen((shown) => (sameIds(shown, next) ? shown : next));
     };
-    const timers = [
-      setTimeout(measure, PRESENCE_ON_SCREEN_SETTLE_MS),
-      setTimeout(measure, PRESENCE_ON_SCREEN_RECHECK_MS),
-    ];
-    let settling: ReturnType<typeof setTimeout> | null = null;
-    const moved = () => {
-      if (settling) clearTimeout(settling);
-      settling = setTimeout(() => { settling = null; measure(); }, PRESENCE_ON_SCREEN_SETTLE_MS);
-    };
-    window.addEventListener('michi:dashboard-scroll', moved);
-    window.addEventListener('resize', moved);
-    const strip = document.querySelector<HTMLElement>('[data-pane-strip]');
-    const resizes = strip && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(moved) : null;
-    if (strip && resizes) {
-      resizes.observe(strip);
-      for (const pane of Array.from(strip.children)) resizes.observe(pane);
-    }
-    return () => {
-      for (const timer of timers) clearTimeout(timer);
-      if (settling) clearTimeout(settling);
-      window.removeEventListener('michi:dashboard-scroll', moved);
-      window.removeEventListener('resize', moved);
-      resizes?.disconnect();
-    };
+    return watchPaneStrip(measure);
   }, [displayedKey, dashboardVisible, enabled]);
 
   return displayed ? onScreen : undefined;

@@ -7,7 +7,7 @@ const api = vi.hoisted(() => ({ fetchPrefs: vi.fn(), savePrefs: vi.fn(async () =
 vi.mock('../../services/api', () => api);
 
 function Split() {
-  const side = useSideColumn('files-tree');
+  const side = useSideColumn('files-tree', 'Resize file tree');
   return (
     <div data-testid="grid" style={{ display: 'grid', gridTemplateColumns: side.columns }}>
       <main />
@@ -21,7 +21,7 @@ function drag(from: number, to: number) {
   const column = screen.getByTestId('column');
   column.getBoundingClientRect = () => ({ width: 300 } as DOMRect);
   Object.defineProperty(screen.getByTestId('grid'), 'clientWidth', { configurable: true, value: 900 });
-  const handle = screen.getByTitle('Drag to resize · Double-click to reset');
+  const handle = screen.getByRole('separator', { name: 'Resize file tree' });
   handle.setPointerCapture = vi.fn();
   fireEvent(handle, new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: from }));
   act(() => {
@@ -45,13 +45,13 @@ describe('useSideColumn', () => {
     expect(columns()).toContain('min(660px,');
     drag(600, 900);
     expect(columns()).toContain('min(220px,');
-    fireEvent.doubleClick(screen.getByTitle('Drag to resize · Double-click to reset'));
+    fireEvent.doubleClick(screen.getByRole('separator', { name: 'Resize file tree' }));
     expect(columns()).toBe('minmax(0, 1fr) minmax(220px, 31%)');
   });
 
   it('has no handle outside a PrefsProvider', () => {
     render(<Split />);
-    expect(screen.queryByTitle('Drag to resize · Double-click to reset')).toBeNull();
+    expect(screen.queryByRole('separator')).toBeNull();
     expect(columns()).toBe('minmax(0, 1fr) minmax(220px, 31%)');
   });
 });

@@ -1,4 +1,4 @@
-import React, { useId, useMemo, useState } from 'react';
+import React, { useId, useMemo, useRef, useState } from 'react';
 import {
   isWorkflowRunTerminal,
   isWorkflowWorkNode,
@@ -9,11 +9,14 @@ import {
   type WorkflowNodeDto,
   type WorkflowRunDtoV1,
   type WorkflowRuntime,
+  WORKFLOW_LIMITS,
 } from 'michi-shared';
 import MarkdownContent from '../../MarkdownContent';
 import { modelDisplayLabel } from '../../../lib/modelLabel';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
-import { useOptionalWorkflowDomain, useWorkflowRun, useWorkflowRunDetail } from '../../../state/workflowDomain';
+import { useOptionalWorkflowDomain, useRefetchPartialWorkflowRun, useWorkflowRun, useWorkflowRunDetail, type LocatedWorkflowRun } from '../../../state/workflowDomain';
+import { useSeenOnScreen } from '../../../hooks/useSeenOnScreen';
+import { buttonAt, useFocusAfterAction } from '../../../hooks/useFocusAfterAction';
 import '../workflows/runChip.css';
 import './WorkflowWorkCard.css';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
@@ -38,6 +41,10 @@ import {
   type CardSection,
 } from './workflowCardModel';
 import { INNER_RADIUS, SegmentStrip, StateGlyph, WORK_CARD, WORK_CARD_CLASS } from './workCardParts';
+import { CheckIcon, CloseIcon, WorkflowIcon } from '../icons';
+import { DisclosureChevron } from '../primitives';
+import { readResultValue } from './resultValue';
+import { ResultValueView } from './ResultValueView';
 
 /**
  * A workflow run in the Background work drawer, as one card: what it is
@@ -67,12 +74,13 @@ const STATE_WORD: Record<CardLeafState, string> = {
   completed: 'done', failed: 'failed', cancelled: 'stopped', skipped: 'skipped',
 };
 
-const button: React.CSSProperties = {
-  height: 24, padding: '0 10px', border: '1px solid var(--term-line-s)', borderRadius: 'var(--ui-radius)',
-  background: 'transparent', color: 'var(--term-mid)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)',
-  cursor: 'pointer', whiteSpace: 'nowrap',
-};
-const quietButton: React.CSSProperties = { border: 0, padding: 0, background: 'transparent', font: 'inherit', cursor: 'pointer' };
+/** Where a stored result ends early, why. */
+const CUT_NOTE = {
+  run: `The run keeps the first ${WORKFLOW_LIMITS.runResult.toLocaleString('en-US')} characters of its result.`,
+  claudeAgent: "Claude shares a preview of each agent's result.",
+  step: `The run keeps the first ${WORKFLOW_LIMITS.result.toLocaleString('en-US')} characters of each result.`,
+} as const;
+
 /** Text shown as written: the run's script, an agent's JSON result. */
 const codePanel: React.CSSProperties = {
   margin: 0, maxHeight: 320, overflow: 'auto', border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius)', background: 'var(--term-alt)', padding: '8px 10px',
@@ -98,14 +106,21 @@ export function FullRun({ identity }: { identity: AgentResourceIdentity }) {
   return null;
 }
 
+/** A card the snapshot sent as a summary reads its run whole once on screen. */
+function ReadWhole({ backendConnectionId, id, resource }: { backendConnectionId: string; id: string; resource: LocatedWorkflowRun }) {
+  const identity = useMemo(() => ({ backendConnectionId, id }), [backendConnectionId, id]);
+  useRefetchPartialWorkflowRun(identity, resource);
+  return null;
+}
+
 function StatusChip({ run, now }: { run: WorkflowRunDtoV1; now: number }) {
   const waits = (run.approvals?.length ?? 0) > 0;
   const chip = waits ? WORKFLOW_NEEDS_YOU_CHIP : WORKFLOW_CHIP[run.status];
   return (
     <span data-testid="background-workflow-status" className="run-chip" style={{ background: chip.fill, color: chip.color }}>
       {run.status === 'running' && <span aria-hidden className={waits ? 'term-dot-i' : 'term-dot-i term-dot-i--run'} />}
-      {run.status === 'completed' && <span aria-hidden>✓</span>}
-      {run.status === 'failed' && <span aria-hidden>×</span>}
+      {run.status === 'completed' && <CheckIcon size="sm" />}
+      {run.status === 'failed' && <CloseIcon size="sm" />}
       {chip.label}
       <span className="run-chip__time">{workflowElapsedLabel(run, now)}</span>
     </span>
@@ -184,7 +199,7 @@ function PhaseGroups({ id, run, sections, waiting, isOpen, onTogglePhase, openNo
         const nameless = progress.total === 1 && section.leaves.length === 1 && leafLabel(section.leaves[0], section.node).toLowerCase() === title.trim().toLowerCase();
         const head = (
           <>
-            <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: progress.clean ? 'var(--term-digest)' : 'var(--term-faint)', textAlign: 'center' }}>{progress.clean ? '✓' : index + 1}</span>
+            <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: progress.clean ? 'var(--term-digest)' : 'var(--term-faint)', display: 'flex', justifyContent: 'center' }}>{progress.clean ? <CheckIcon size="sm" /> : index + 1}</span>
             <span style={{ ...ellipsis, fontSize: 'var(--fs-md)', fontWeight: section.state === 'queued' ? 500 : 600, color: section.state === 'running' ? 'var(--term-fg)' : section.state === 'done' ? 'var(--term-mid)' : 'var(--term-muted)' }}>{title}</span>
             {hasAgents && section.state !== 'queued' ? <Segments leaves={section.leaves} waiting={waiting} fixed /> : <span />}
             <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: progress.color, whiteSpace: 'nowrap', textAlign: 'right' }}>{progress.text}</span>
@@ -201,7 +216,7 @@ function PhaseGroups({ id, run, sections, waiting, isOpen, onTogglePhase, openNo
               <button type="button" data-testid="background-workflow-phase" data-phase-state={section.state} aria-expanded={open} aria-controls={open ? listId : undefined}
                 aria-label={`${title}, ${progress.label}`} onClick={() => onTogglePhase(section, index)} className="workflow-phase-band" style={band}>
                 {head}
-                <span aria-hidden style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-faint)', textAlign: 'right' }}>{open ? '▾' : '▸'}</span>
+                <DisclosureChevron open={open} style={{ justifySelf: 'end', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
               </button>
             ) : (
               <div data-testid="background-workflow-phase" data-phase-state={section.state} className="workflow-phase-band" style={band}>{head}</div>
@@ -236,10 +251,10 @@ function ProgressStrip({ run, leaves, waiting }: { run: WorkflowRunDtoV1; leaves
   );
 }
 
-function optionButton(kind: string | undefined, primary: boolean): React.CSSProperties {
-  if (kind?.startsWith('reject')) return { ...button, borderColor: 'transparent', color: 'var(--term-muted)' };
-  if (primary) return { ...button, borderColor: 'var(--term-select)', background: 'color-mix(in srgb, var(--term-select) 20%, transparent)', color: 'var(--term-fg)', fontWeight: 600 };
-  return button;
+/** An answer's weight: the first is the one to give, a rejection stays quiet. */
+function optionVariant(kind: string | undefined, primary: boolean): 'reject' | 'primary' | undefined {
+  if (kind?.startsWith('reject')) return 'reject';
+  return primary ? 'primary' : undefined;
 }
 
 function CardApproval({ run, approval, busy, onAnswer }: { run: WorkflowRunDtoV1; approval: WorkflowApprovalDto; busy: boolean; onAnswer?: (approvalId: string, optionId: string) => void }) {
@@ -260,8 +275,8 @@ function CardApproval({ run, approval, busy, onAnswer }: { run: WorkflowRunDtoV1
       {onAnswer && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {approval.options.map((option, index) => (
-            <button key={option.optionId} type="button" disabled={busy} className="t-hover-bg-alt" onClick={() => onAnswer(approval.id, option.optionId)}
-              style={{ ...optionButton(option.kind, index === 0), opacity: busy ? 0.6 : 1 }}>
+            <button key={option.optionId} type="button" disabled={busy} className="workflow-card-btn" data-variant={optionVariant(option.kind, index === 0)}
+              onClick={() => onAnswer(approval.id, option.optionId)}>
               {option.name}
             </button>
           ))}
@@ -333,7 +348,7 @@ function jsonResult(text: string | undefined): string | undefined {
 }
 
 function leafSummary(node: WorkflowNodeDto, state: CardLeafState): { text: string; color: string } | { tool: string } | undefined {
-  if (state === 'waiting') return { text: 'Waiting for your approval', color: 'var(--term-select)' };
+  if (state === 'waiting') return { text: 'Waiting for your approval', color: 'var(--term-waiting-text)' };
   if (state === 'running' || state === 'paused') {
     if (node.currentTool) return { tool: node.currentTool };
     return node.statusMessage ? { text: node.statusMessage, color: 'var(--term-mid)' } : undefined;
@@ -354,6 +369,7 @@ function leafSummary(node: WorkflowNodeDto, state: CardLeafState): { text: strin
 function LeafDetail({ id, node, runtime, model, now }: { id: string; node: WorkflowNodeDto; runtime: WorkflowRuntime; model?: string; now: number }) {
   const duration = nodeDurationMs(node, now);
   const json = jsonResult(node.result);
+  const value = useMemo(() => readResultValue(node.result), [node.result]);
   const meta = [
     node.agentName && node.agentName !== node.title ? node.agentName : undefined,
     node.model && node.model !== model ? modelDisplayLabel(runtime, node.model, []) : undefined,
@@ -382,9 +398,11 @@ function LeafDetail({ id, node, runtime, model, now }: { id: string; node: Workf
       {running && node.currentTool && row('Now', <code style={{ display: 'block', fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-fg)', background: 'var(--term-alt)', padding: '5px 8px', borderRadius: 'var(--ui-radius)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{node.currentTool}</code>)}
       {node.statusMessage && !(running && !node.currentTool) && row('Status', node.statusMessage)}
       {node.error && row('Error', <pre style={{ margin: 0, fontFamily: MONO, fontSize: 'var(--fs-xs)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--term-danger-text)' }}>{node.error}</pre>, 'var(--term-danger-text)')}
-      {node.result && row('Result', json !== undefined
-        ? <pre className="term-scrollbar" style={codePanel}>{json}</pre>
-        : <MarkdownContent text={node.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-md)', lineHeight: 1.55 }} />)}
+      {node.result && row('Result', value !== undefined
+        ? <ResultValueView result={value} compact cutNote={runtime === 'claude' ? CUT_NOTE.claudeAgent : CUT_NOTE.step} />
+        : json !== undefined
+          ? <pre className="term-scrollbar" style={codePanel}>{json}</pre>
+          : <MarkdownContent text={node.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-md)', lineHeight: 1.55 }} />)}
       {meta.length > 0 && row('', <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{meta.join(' · ')}</span>)}
     </dl>
   );
@@ -425,8 +443,8 @@ function LeafRow({ runId, runtime, node, section, state, open, onToggle, model, 
     <li data-testid="workflow-node" data-node-id={node.id} data-node-status={state} style={{ listStyle: 'none', minWidth: 0 }}>
       <button type="button" aria-expanded={open} aria-controls={open ? id : undefined}
         aria-label={`${label}, ${STATE_WORD[state]}${summaryText ? `: ${summaryText}` : ''}`}
-        onClick={() => onToggle(node.id)} className="t-hover-bg-alt"
-        style={{ display: 'flex', flexDirection: stacked ? 'column' : 'row', alignItems: stacked ? 'stretch' : 'center', gap: stacked ? 3 : BAND_ROW.gap, width: '100%', minWidth: 0, padding: stacked ? `8px ${BAND_ROW.padRight}px 8px 8px` : `6px ${BAND_ROW.padRight}px 6px 8px`, border: 0, borderRadius: 'var(--ui-radius)', background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
+        onClick={() => onToggle(node.id)} className="t-hover-bg-alt background-work-row"
+        style={{ display: 'flex', flexDirection: stacked ? 'column' : 'row', alignItems: stacked ? 'stretch' : 'center', gap: stacked ? 3 : BAND_ROW.gap, width: '100%', minWidth: 0, padding: stacked ? `8px ${BAND_ROW.padRight}px 8px 8px` : `6px ${BAND_ROW.padRight}px 6px 8px` }}>
         {bare ? (
           <span style={{ display: 'flex', alignItems: 'center', gap: BAND_ROW.gap, minWidth: 0, flex: 1 }}><StateGlyph state={state} />{summaryNode}</span>
         ) : stacked ? (
@@ -496,12 +514,12 @@ function AgentsZone({ run, sections, waiting, openNodes, onToggleNode, openSecti
           return (
             <div key={key} id={id} data-testid="background-workflow-section">
               {rest.length > 0 && (
-                <button type="button" aria-expanded={open} onClick={() => onToggleSection(key)} className="t-hover-bg-alt"
-                  style={{ display: 'flex', alignItems: 'center', gap: BAND_ROW.gap, width: '100%', padding: '6px 8px', border: 0, borderRadius: 'var(--ui-radius)', background: 'transparent', color: 'var(--term-muted)', font: 'inherit', fontSize: 'var(--fs-sm)', textAlign: 'left', cursor: 'pointer' }}>
+                <button type="button" aria-expanded={open} onClick={() => onToggleSection(key)} className="t-hover-bg-alt background-work-row" data-quiet=""
+                  style={{ display: 'flex', alignItems: 'center', gap: BAND_ROW.gap, width: '100%', padding: '6px 8px', fontSize: 'var(--fs-sm)' }}>
                   <StateGlyph state="completed" />
                   <span style={{ fontSize: 'var(--fs-md)', fontWeight: 600, color: 'var(--term-mid)' }}>{section.node.title}</span>
                   <span>{rest.length} done{duration !== undefined ? ` · ${formatDurationMs(duration)}` : ''}</span>
-                  <span aria-hidden style={{ marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>
+                  <DisclosureChevron open={open} style={{ marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
                 </button>
               )}
               {open && rows(section, rest)}
@@ -534,7 +552,7 @@ function zoneSummary(run: WorkflowRunDtoV1, sections: readonly CardSection[], wa
   const running = leaves.filter((leaf, index) => states[index] === 'running');
   const parts: React.ReactNode[] = [];
   if (running.length > 0) parts.push(<span key="r">{running.length} working</span>);
-  if (count('waiting') > 0) parts.push(<span key="w" style={{ color: 'var(--term-select)' }}>{count('waiting')} waiting</span>);
+  if (count('waiting') > 0) parts.push(<span key="w" style={{ color: 'var(--term-waiting-text)' }}>{count('waiting')} waiting</span>);
   if (count('failed') > 0) parts.push(<span key="f" style={{ color: 'var(--term-danger-text)' }}>{count('failed')} failed</span>);
   if (parts.length === 0) parts.push(<span key="q">{count('queued') > 0 ? `${count('queued')} queued` : 'none yet'}</span>);
   const [only] = running;
@@ -565,6 +583,15 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
   const [phaseChoices, setPhaseChoices] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const [panel, setPanel] = useState<'script' | 'log' | null>(null);
   const [fullResult, setFullResult] = useState(false);
+  const [resultAsJson, setResultAsJson] = useState(false);
+  const cardRef = useRef<HTMLElement>(null);
+  const actionsRef = useRef<HTMLDivElement>(null);
+  // Pause swaps for Resume, Stop may leave no control: focus goes to what took its place, else the card.
+  const focusAfter = useFocusAfterAction(!!pending);
+  const seen = useSeenOnScreen(cardRef, run?.partial === true);
+  const result = run?.result;
+  const resultValue = useMemo(() => readResultValue(result), [result]);
+  const resultJson = useMemo(() => jsonResult(result), [result]);
   const nodes = run?.nodes;
   const sections = useMemo(() => workflowCardSections(nodes ?? []), [nodes]);
   const leaves = useMemo(() => workflowCardLeaves(nodes ?? []), [nodes]);
@@ -621,27 +648,31 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
   };
   const longResult = (run.result?.length ?? 0) > 700;
   const footerLink = (target: 'script' | 'log', label: string) => (
-    <button type="button" aria-expanded={panel === target} onClick={() => setPanel((current) => (current === target ? null : target))} className="t-hover-fg"
-      style={{ ...quietButton, fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-mid)', textDecoration: 'underline', textDecorationColor: 'var(--term-line-s)', textUnderlineOffset: 2 }}>
+    <button type="button" aria-expanded={panel === target} onClick={() => setPanel((current) => (current === target ? null : target))} className="t-hover-fg workflow-card-link"
+      style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', textDecoration: 'underline', textDecorationColor: 'var(--term-line-s)', textUnderlineOffset: 2 }}>
       {label}
     </button>
   );
 
   return (
     <article
+      ref={cardRef}
       data-testid="background-workflow-row"
       data-background-work-key={rowKey}
       data-run-key={runKey}
       data-active={live ? 'true' : undefined}
       aria-label={`Workflow ${run.name}, ${approvals.length > 0 ? 'needs approval' : WORKFLOW_CHIP[run.status].label.toLowerCase()}`}
+      tabIndex={-1}
       className={WORK_CARD_CLASS}
       style={WORK_CARD}
     >
-      {(expanded || panel !== null) && <FullRun identity={identity} />}
+      {expanded || panel !== null
+        ? <FullRun identity={identity} />
+        : seen && run.partial && <ReadWhole backendConnectionId={resource.backendConnectionId} id={run.id} resource={resource} />}
       <div style={{ padding: '14px 16px 14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', minWidth: 0 }}>
-            <span aria-hidden style={{ color: 'var(--term-mauve)', fontSize: 'var(--fs-xs)' }}>⧉</span>
+            <WorkflowIcon size="sm" style={{ color: 'var(--term-mauve)', flexShrink: 0 }} />
             <span style={ellipsis}>Workflow · {RUNTIME_LABEL[run.runtime]}</span>
           </span>
           <StatusChip run={run} now={now} />
@@ -651,12 +682,12 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
           <p style={{ margin: '4px 0 0', fontSize: 'var(--fs-md)', lineHeight: 1.55, color: 'var(--term-mid)' }}>{run.description}</p>
         )}
         {run.statusDetail && run.status !== 'running' && (
-          <p style={{ margin: '8px 0 0', fontSize: 'var(--fs-sm)', color: run.status === 'failed' ? 'var(--term-danger-text)' : run.status === 'paused' ? 'var(--term-select)' : 'var(--term-muted)' }}>{run.statusDetail}</p>
+          <p style={{ margin: '8px 0 0', fontSize: 'var(--fs-sm)', color: run.status === 'failed' ? 'var(--term-danger-text)' : run.status === 'paused' ? 'var(--term-waiting-text)' : 'var(--term-muted)' }}>{run.statusDetail}</p>
         )}
         {error && <p role="alert" style={{ margin: '8px 0 0', fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>{error}</p>}
         {approvals.length > 0 && (
           <div data-testid="workflow-approvals" style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10, padding: '10px 12px', borderRadius: INNER_RADIUS, border: '1px solid color-mix(in srgb, var(--term-select) 45%, transparent)', background: 'color-mix(in srgb, var(--term-select-f) 70%, transparent)' }}>
-            <div style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-select)' }}>Needs your approval</div>
+            <div style={{ fontSize: 'var(--fs-sm)', fontWeight: 600, color: 'var(--term-waiting-text)' }}>Needs your approval</div>
             {approvals.map((approval) => <CardApproval key={approval.id} run={run} approval={approval} busy={pending === 'answer'} onAnswer={onAnswer} />)}
           </div>
         )}
@@ -664,27 +695,42 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
           <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', borderRadius: INNER_RADIUS, background: 'color-mix(in srgb, var(--term-danger) 11%, transparent)', fontSize: 'var(--fs-sm)', minWidth: 0 }}>
             <span style={{ flexShrink: 0, fontWeight: 600, color: 'var(--term-danger-text)' }}>× {failed.length} {failed.length === 1 ? 'agent' : 'agents'} failed</span>
             <span style={{ ...ellipsis, color: 'var(--term-mid)' }}>{leafLabel(failed[0], sections.find((section) => section.leaves.includes(failed[0]))?.node)}{firstPlainLine(failed[0].error) ? ` · ${firstPlainLine(failed[0].error)}` : ''}</span>
-            <button type="button" onClick={() => showFailure(failed[0])} className="t-hover-fg" style={{ ...quietButton, marginLeft: 'auto', flexShrink: 0, color: 'var(--term-fg)', fontSize: 'var(--fs-sm)', textDecoration: 'underline', textUnderlineOffset: 2 }}>View</button>
+            <button type="button" onClick={() => showFailure(failed[0])} className="t-hover-fg workflow-card-link" style={{ marginLeft: 'auto', flexShrink: 0, fontSize: 'var(--fs-sm)', textDecoration: 'underline', textUnderlineOffset: 2 }}>View</button>
           </div>
         )}
         {run.result && (
           <div style={{ marginTop: 12, padding: '10px 12px', borderRadius: INNER_RADIUS, border: '1px solid color-mix(in srgb, var(--term-digest) 30%, var(--term-line))', background: 'var(--term-surface)' }}>
             <div data-testid="workflow-result" style={longResult && !fullResult ? { maxHeight: 220, overflow: 'hidden', maskImage: 'linear-gradient(to bottom, #000 75%, transparent)', WebkitMaskImage: 'linear-gradient(to bottom, #000 75%, transparent)' } : undefined}>
-              <MarkdownContent text={run.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-lg)', lineHeight: 1.55 }} />
+              {resultValue && !resultAsJson
+                ? <ResultValueView result={resultValue} cutNote={CUT_NOTE.run} preview={run.partial} />
+                : resultJson !== undefined
+                  // The card's clamp and "Show full result" bound it, not a scroll box.
+                  ? <pre className="term-scrollbar" style={{ ...codePanel, maxHeight: 'none' }}>{resultJson}</pre>
+                  : <MarkdownContent text={run.result} size="sm" style={{ ...resultProseVars, fontSize: 'var(--fs-lg)', lineHeight: 1.55 }} />}
             </div>
-            {longResult && (
-              <button type="button" onClick={() => setFullResult((value) => !value)} className="t-hover-fg" style={{ ...quietButton, marginTop: 6, fontSize: 'var(--fs-sm)', color: 'var(--term-mid)' }}>
-                {fullResult ? 'Show less' : 'Show full result'}
-              </button>
+            {(longResult || resultValue) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 6 }}>
+                {longResult && (
+                  <button type="button" onClick={() => setFullResult((value) => !value)} className="t-hover-fg workflow-card-link" style={{ fontSize: 'var(--fs-sm)' }}>
+                    {fullResult ? 'Show less' : 'Show full result'}
+                  </button>
+                )}
+                {resultValue && (
+                  <button type="button" aria-pressed={resultAsJson} onClick={() => setResultAsJson((value) => !value)} className="t-hover-fg workflow-card-link"
+                    style={{ marginLeft: 'auto', padding: '1px 6px', borderRadius: 'var(--ui-radius)', fontFamily: MONO, fontSize: 'var(--fs-xs)' }}>
+                    JSON
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}
         {!phased && <ProgressStrip run={run} leaves={leaves} waiting={waiting} />}
         {(onAction && run.actions.length > 0) || tokens || run.usage?.toolUses ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, minWidth: 0 }}>
-            {onAction && run.actions.map((action) => (
-              <button key={action} type="button" disabled={!!pending} onClick={() => onAction(action)} aria-label={`${ACTION_LABEL[action]} workflow ${run.name}`} className="t-hover-bg-alt"
-                style={{ ...button, opacity: pending && pending !== action ? 0.5 : 1 }}>
+          <div ref={actionsRef} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, minWidth: 0 }}>
+            {onAction && run.actions.map((action, index) => (
+              <button key={action} type="button" disabled={!!pending} aria-busy={pending === action || undefined} className="workflow-card-btn"
+                onClick={() => { focusAfter(() => buttonAt(actionsRef.current, index) ?? cardRef.current); onAction(action); }} aria-label={`${ACTION_LABEL[action]} workflow ${run.name}`}>
                 {pending === action ? `${ACTION_LABEL[action]}…` : ACTION_LABEL[action]}
               </button>
             ))}
@@ -700,11 +746,11 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
           openNodes={openNodes} onToggleNode={onToggleNode} model={model} now={now} stacked={stacked} />
       ) : (
         <div style={{ borderTop: '1px solid var(--term-line)' }}>
-          <button type="button" aria-expanded={expanded} aria-controls={expanded ? zoneId : undefined} onClick={() => onToggle(rowKey)} className="t-hover-bg-alt"
-            style={{ display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', minWidth: 0, padding: '9px 16px', border: 0, background: 'transparent', color: 'inherit', font: 'inherit', textAlign: 'left', cursor: 'pointer' }}>
+          <button type="button" aria-expanded={expanded} aria-controls={expanded ? zoneId : undefined} onClick={() => onToggle(rowKey)} className="t-hover-bg-alt background-work-row" data-band=""
+            style={{ display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', minWidth: 0, padding: '9px 16px' }}>
             <span style={{ fontSize: 'var(--fs-md)', fontWeight: 600, color: 'var(--term-fg)' }}>{runNounTitle(run.runtime)}</span>
             <span style={{ ...ellipsis, fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}>{zoneSummary(run, sections, waiting)}</span>
-            <span aria-hidden style={{ marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }}>{expanded ? '▾' : '▸'}</span>
+            <DisclosureChevron open={expanded} style={{ marginLeft: 'auto', fontSize: 'var(--fs-xs)', color: 'var(--term-faint)' }} />
           </button>
           {expanded && (
             <div id={zoneId} data-testid="background-workflow-agents" style={{ padding: '0 8px 8px' }}>
@@ -738,7 +784,7 @@ export const WorkflowWorkCard = React.memo(function WorkflowWorkCard({ runKey, r
                 {formatClockTime(entry.at)}
               </span>
               {entry.nodeId && <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{entry.nodeId}</span>}
-              <span style={{ color: entry.severity === 'error' ? 'var(--term-danger-text)' : entry.severity === 'warning' ? 'var(--term-select)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
+              <span style={{ color: entry.severity === 'error' ? 'var(--term-danger-text)' : entry.severity === 'warning' ? 'var(--term-waiting-text)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
             </li>
           ))}
         </ol>

@@ -43,3 +43,23 @@ describe('ComposerModelTrigger — Ultracode', () => {
     expect(other.container.querySelector('[data-ultracode]')).toBeNull();
   });
 });
+
+describe('ComposerModelTrigger — speed tier', () => {
+  beforeEach(() => { vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+  const models = [{ id: 'opus', label: 'Opus', serviceTiers: [{ id: 'ultrafast', name: 'Ultrafast' }] }];
+
+  it("marks the chip while the chat's model runs the chosen tier, and names it in the label", () => {
+    const on = trigger({ providerModels: models, serviceTier: 'ultrafast' });
+    expect(screen.getByRole('button').getAttribute('aria-label')).toMatch(/High effort, Ultrafast on/);
+    expect(on.container.querySelector('.composer-model-trigger-tier')).not.toBeNull();
+    on.unmount();
+    // Standard, or a tier the model does not list (it runs at standard).
+    for (const props of [{ providerModels: models, serviceTier: null }, { serviceTier: 'ultrafast' }]) {
+      const view = trigger(props);
+      expect(screen.getByRole('button').getAttribute('aria-label')).not.toMatch(/Ultrafast/);
+      expect(view.container.querySelector('.composer-model-trigger-tier')).toBeNull();
+      view.unmount();
+    }
+  });
+});

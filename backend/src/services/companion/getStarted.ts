@@ -92,7 +92,7 @@ export function parseGetStartedInput(body: Record<string, unknown>): CompanionGe
 function markMet(now: number): void {
   markCompanionWelcomeDone(now);
   const seq = latestEventSeq();
-  for (const key of ['companion:wake_cursor', 'companion:heartbeat_cursor', 'companion:brief_cursor'] as const) {
+  for (const key of ['companion:wake_cursor', 'companion:heartbeat_cursor'] as const) {
     if (seq > (getCompanionMetaNumber(key) ?? -1)) setCompanionMetaNumber(key, seq);
   }
   setCompanionMetaNumber('companion:last_heartbeat_at', Math.floor(now));

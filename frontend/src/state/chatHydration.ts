@@ -1,4 +1,4 @@
-import { isChatPermissionMode, parseWorkspaceSettings, selectWindowComposerDraft, workspaceSystemOf } from 'michi-shared';
+import { isChatPermissionMode, isServiceTierId, parseAutoContinueSource, parseTurnEndMark, parseWorkspaceSettings, selectWindowComposerDraft, workspaceSystemOf } from 'michi-shared';
 import { WINDOW_ID } from '../config/windowIdentity';
 import { backendEntityId, mapBackendPayload, serverEntityId } from '../config/backendIdentity';
 import { finalizeAssistantBlocks, migrateAssistantToBlocks, parseAssistantBlocks } from './assistantBlocks';
@@ -29,6 +29,14 @@ import {
 } from 'michi-shared';
 import type { TreeMessagePageEntry } from '../services/api/persistence';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../config/backendConnections';
+
+/** `userMetadata.blockAnswer` (a user message that answered a reply's block); nothing when malformed. */
+export function parseBlockAnswer(raw: unknown): import('michi-shared').BlockAnswerSource | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const { messageId, blockId, title } = raw as Record<string, unknown>;
+  if (typeof messageId !== 'string' || !messageId || typeof blockId !== 'string' || !blockId) return undefined;
+  return { messageId, blockId, title: typeof title === 'string' ? title.slice(0, 200) : '' };
+}
 
 /** `userMetadata.companionRefs` (what a message to the agent referred to, F1a-review #1); nothing when malformed. */
 function parseStoredCompanionRefs(value: unknown): CompanionTurnRef[] | undefined {
@@ -166,8 +174,15 @@ function parseToolCalls(raw: unknown): ToolCallState[] {
       textOffset: asOptionalNumber(t.textOffset),
       startedAt: asOptionalNumber(t.startedAt),
       endedAt: asOptionalNumber(t.endedAt),
+      ...(t.deferred === true ? { deferred: true } : {}),
+      ...(t.hasOutput === true ? { hasOutput: true } : {}),
     }];
   });
+}
+
+/** A message's stored tool calls, as a tool-call read brings them (GET …/tool-calls). */
+export function parseStoredToolCalls(raw: unknown): ToolCallState[] {
+  return parseToolCalls(raw);
 }
 
 function parseMessageMetadata(raw: unknown): Record<string, unknown> {
@@ -647,7 +662,10 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
   const companionPost = role === 'assistant' ? parseCompanionPostMetadata(metadata.companionPost) : undefined;
   const companionTurn = role === 'user' ? parseCompanionTurnMetadata(metadata.companionTurn) : undefined;
   const companionRefs = role === 'user' ? parseStoredCompanionRefs(metadata.companionRefs) : undefined;
+  const blockAnswer = role === 'user' ? parseBlockAnswer(metadata.blockAnswer) : undefined;
   const narrationOptions = role === 'assistant' ? parseNarrationOptions(metadata.metaAgentNarration) : undefined;
+  const turnEnd = role === 'assistant' ? parseTurnEndMark(metadata.turnEnd) : undefined;
+  const autoContinue = role === 'user' ? parseAutoContinueSource(metadata.autoContinue) : undefined;
   const baseMsg: ChatMessage = {
     id: asString(row.id) ?? `${nodeId}-${asNumber(row.seq, fallbackSeq)}`,
     role,
@@ -658,7 +676,10 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
     ...(companionPost ? { companionPost } : {}),
     ...(companionTurn ? { companionTurn } : {}),
     ...(companionRefs ? { companionRefs } : {}),
+    ...(blockAnswer ? { blockAnswer } : {}),
     ...(narrationOptions ? { narrationOptions } : {}),
+    ...(turnEnd ? { turnEnd } : {}),
+    ...(autoContinue ? { autoContinue } : {}),
     ...(role === 'user' && metadata.steered === true ? { steered: true } : {}),
     ...(role === 'user' && typeof metadata.scheduledJobId === 'string' && metadata.scheduledJobId
       ? { scheduledJobId: metadata.scheduledJobId } : {}),
@@ -681,6 +702,12 @@ export function mapMessageRow(row: Record<string, unknown>, fallbackSeq = 0): Ch
     comments: Array.isArray(metadata.comments)
       ? metadata.comments as ChatMessage['comments']
       : undefined,
+    ...(role === 'user' && Array.isArray(metadata.mentions) ? { mentions: metadata.mentions.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const { kind, refId, label } = item as Record<string, unknown>;
+      return (kind === 'node' || kind === 'context') && typeof refId === 'string' && typeof label === 'string'
+        ? [{ kind, refId, label }] : [];
+    }) } : {}),
     plan: Array.isArray(metadata.plan)
       ? metadata.plan as ChatMessage['plan']
       : undefined,
@@ -802,6 +829,7 @@ export function mapNodeRowScalars(row: Record<string, unknown>): Partial<ChatNod
     permissionMode: isChatPermissionMode(row.permission_mode) ? row.permission_mode : undefined,
     permissionApproveForMe: row.permission_mode === 'ask' && (row.permission_approve_for_me === 1 || row.permission_approve_for_me === true) ? true : undefined,
     ultracode: row.ultracode === 1 || row.ultracode === true ? true : undefined,
+    serviceTier: isServiceTierId(row.service_tier) ? row.service_tier : undefined,
     paneWidth: asOptionalNumber(row.pane_width),
   };
 }

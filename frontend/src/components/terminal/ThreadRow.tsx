@@ -1,19 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
-import { useChatNode, useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
+import { useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
 import { Row, RowKebab } from './primitives';
 import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import MoveThreadDialog from '../MoveThreadDialog';
 import { buildThreadRowContextMenu } from '../../lib/threadRowContextMenu';
-import type { ProjectEdge, Tree } from '../../state/chatTypes';
+import type { ChatNodeState, ProjectEdge, Tree } from '../../state/chatTypes';
 import type { MoveTargetWorkspace } from '../../state/moveTargets';
 import type { OpenState } from '../../state/sidebarSelectors';
-import { treeHasUnread, isNodeUnread } from '../../state/sidebarSelectors';
+import { treeHasUnread, isNodeUnread, nodeAttention, subtreeAttention, type RowAttention } from '../../state/sidebarSelectors';
 import { buildBranchChildrenOf } from '../../state/tree';
 import { isVisibleConversationNode } from '../../state/conversationVisibility';
-import { rowGeom, rowPadding, caretKebabClearance, pinMarkEndMargin, CARD_FILL, CARD_FILL_SELECT, type RowGeom } from './sidebarRowStyle';
-import { UnreadDot, UNREAD_DOT_LEAD, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
+import { rowGeom, rowPadding, caretKebabClearance, CARD_FILL, CARD_FILL_SELECT, type RowGeom } from './sidebarRowStyle';
+import { UnreadDot, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
 import { SidebarOpenRail } from './RailAfterglow';
+import { RowAttentionChip, attentionLabel } from './RowAttentionChip';
 import { useNewPanePulse } from './useNewPanePulse';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
 import { exportPanelEvent } from '../../state/appEvents';
@@ -22,32 +23,45 @@ import { formatMichiAge } from './content/michiFormat';
 import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
 import { rowKeyDown } from './sidebar/rowKeyboard';
 import { TemporaryChatGlyph } from './TemporaryChat';
+import { CheckIcon, FolderIcon, StarIcon } from './icons';
 
 const EMPTY_EDGES: readonly ProjectEdge[] = [];
 
 // Card-mode row fills live with the row geometry (sidebarRowStyle); re-exported for the rows that take them from here.
 export { CARD_FILL, CARD_FILL_SELECT } from './sidebarRowStyle';
 
+/** How far left of a card row's text the pin star's left edge sits: the 9px
+ *  star and 3px of air. */
+export const PIN_MARK_LEAD = 12;
+
 /** Small star glyph marking a pinned row. Shared by ThreadRow (tree pin),
- *  BranchRow (node pin) and WorkspaceRow so every level reads identically. It goes AFTER the
- *  title: in front of it, its 15px pushed a pinned thread's title past its own
- *  branches' 12px indent, so a pinned thread read as a level deeper. */
-export function PinMark({ endMargin }: { endMargin?: string }) {
+ *  BranchRow (node pin) and WorkspaceRow so every level reads identically.
+ *  Card rows hang it in the gutter left of the text (`gutterLeft`, its left
+ *  edge), where it takes no room from the title and stays put whatever the
+ *  row's end shows. Classic rows, which have no gutter, and the workspace name
+ *  put it after the text. Never in the flow in front of the text: there its
+ *  15px pushed a pinned thread's title past its own branches' 12px indent, so a
+ *  pinned thread read as a level deeper. */
+export function PinMark({ gutterLeft }: { gutterLeft?: string | number }) {
   return (
-    <svg
+    <StarIcon
       aria-label="pinned"
-      width="9"
-      height="9"
-      viewBox="0 0 16 16"
+      size={9}
       fill="currentColor"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      style={{ color: 'var(--term-select)', flexShrink: 0, marginRight: endMargin }}
-    >
-      <path d="M8 1.5l1.9 4 4.4.5-3.3 3 .9 4.3L8 11.3 4.1 13.3 5 9 1.7 6l4.4-.5L8 1.5z" />
-    </svg>
+      style={{
+        color: 'var(--term-select)',
+        flexShrink: 0,
+        ...(gutterLeft === undefined
+          ? {}
+          : { position: 'absolute', left: gutterLeft, top: '50%', transform: 'translateY(-50%)' }),
+      }}
+    />
   );
+}
+
+/** Equality for a row's structural selector, whose result is a flat object of primitives. */
+export function sameRowFields<T extends object>(a: T, b: T): boolean {
+  return (Object.keys(a) as Array<keyof T>).every((key) => Object.is(a[key], b[key]));
 }
 
 interface Actions {
@@ -108,7 +122,6 @@ export default function ThreadRow({
   const { clearTreeSelection } = useChatActions();
   const { prefs } = usePrefs();
   const selected = treeSelection.has(tree.id);
-  const n = useChatNode(tree.rootNodeId);
   const prefetchIntent = useTreePrefetchIntent(tree.rootNodeId);
   const projectEdges = projects.find((p) => p.id === projectId)?.edges ?? EMPTY_EDGES;
   const branchChildrenOf = useMemo(
@@ -122,9 +135,46 @@ export default function ThreadRow({
     [rootNodeId, projectEdges, focusedNodeId, branchChildrenOf],
   );
   const treeUnread = useStructuralSelector(unreadSelector);
-  // The root itself vs. something in its tree: the root gets the solid dot and
-  // a brighter title; a collapsed thread hiding an unread branch gets the ring.
-  const ownUnread = !!n && isVisibleConversationNode(n) && isNodeUnread(n, focusedNodeId);
+  // What this thread needs from the user (R2): its root's own state while it is
+  // expanded (each branch then speaks for itself), the strongest in its subtree
+  // while it is collapsed — the rule its unread dot follows.
+  const attentionSelector = useCallback(
+    (nodes: Record<string, ChatNodeState>): RowAttention => {
+      const now = Date.now();
+      const perNode = (id: string) => nodeAttention(id, nodes[id], focusedNodeId, now);
+      return expanded
+        ? perNode(rootNodeId)
+        : subtreeAttention(
+            rootNodeId,
+            projectEdges,
+            (id) => !nodes[id]?.deletedAt && isVisibleConversationNode(nodes[id]),
+            perNode,
+            branchChildrenOf,
+          );
+    },
+    [rootNodeId, projectEdges, focusedNodeId, branchChildrenOf, expanded],
+  );
+  const attention = useStructuralSelector(attentionSelector);
+  const treeName = tree.name;
+  // What the row shows of its root, as primitives: a streamed chunk replaces
+  // the node but leaves these fields and the structure version alone, so it
+  // re-renders no row.
+  const rootSelector = useCallback((nodes: Record<string, ChatNodeState>) => {
+    const root = nodes[rootNodeId];
+    // With no title yet, an excerpt of the first message, styled as provisional.
+    // It never fills the root's title, so the main response can still provide
+    // the first durable title while the user sees a useful sidebar label.
+    const { text, provisional } = rowLabel(treeName, root);
+    return {
+      label: text,
+      provisional,
+      // The root itself vs. something in its tree: the root gets the solid dot and
+      // a brighter title; a collapsed thread hiding an unread branch gets the ring.
+      ownUnread: !!root && isVisibleConversationNode(root) && isNodeUnread(root, focusedNodeId),
+      temporary: root?.temporary === true,
+    };
+  }, [rootNodeId, treeName, focusedNodeId]);
+  const { label, provisional, ownUnread, temporary } = useStructuralSelector(rootSelector, sameRowFields);
   const unreadMark: UnreadMark = ownUnread
     ? 'self'
     : treeUnread && hasBranches && !expanded ? 'within' : 'none';
@@ -132,18 +182,11 @@ export default function ThreadRow({
   const [moveOpen, setMoveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
-  // With no title yet, an excerpt of the first message, styled as provisional.
-  // It never fills n.title, so the main response can still provide the first
-  // durable title while the user sees a useful sidebar label.
-  const { text: label, provisional } = rowLabel(tree.name, n);
-  const temporary = n?.temporary === true;
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   // The current row keeps its ⋯ showing; its right padding keeps its title and
   // workspace lines from running under it. (A caret, when there is one,
   // already keeps that room.)
   const paddingClearsKebab = geom.isCard && isActive && !!subtitle && !hasBranches;
-  // The star ends the row and takes the caret's place, so it clears the ⋯.
-  const pinTakesEnd = !!tree.pinnedAt && geom.isCard && !hasBranches && !prefs.showSidebarTimestamps && !selected;
   const newPanePulse = useNewPanePulse(tree.rootNodeId);
   // Same rule in every mode: the rail is a SUMMARY for a collapsed subtree, so
   // it's suppressed once the row is expanded and each branch speaks for itself.
@@ -199,7 +242,7 @@ export default function ThreadRow({
         tabIndex={0}
         className="t-row-focus"
         // Its title (and workspace), not the ⋯ inside it.
-        aria-label={[label, subtitle, temporary && 'temporary chat'].filter(Boolean).join(', ')}
+        aria-label={attentionLabel([label, subtitle, temporary && 'temporary chat'], attention)}
         aria-current={isActive ? 'true' : undefined}
         aria-expanded={hasBranches ? expanded : undefined}
         active={isActive || selected}
@@ -284,15 +327,14 @@ export default function ThreadRow({
               : { display: 'contents' }
           }
         >
-        {/* Card modes: anchored to this title line, so the dot centres on it
-            and sits in the gutter just left of the title. Classic: the line is
-            display:contents, so the
-            dot anchors to the Row and lands in its left padding, before the
-            chevron. */}
-        <UnreadDot
-          mark={unreadMark}
-          left={geom.isCard ? -UNREAD_DOT_LEAD : 'calc(1px + var(--sb-inset, 0px))'}
-        />
+        {/* Card modes: the star hangs in the gutter just left of the title,
+            anchored to this title line so it centres on it; unread is the
+            rail's (SidebarOpenRail). Classic: the line is display:contents, so
+            the dot anchors to the Row and lands in its left padding, before
+            the chevron. */}
+        {geom.isCard
+          ? !!tree.pinnedAt && <PinMark gutterLeft={-PIN_MARK_LEAD} />
+          : <UnreadDot mark={unreadMark} left="calc(1px + var(--sb-inset, 0px))" />}
         {geom.chevronLeading && (
           <Chevron
             expanded={expanded}
@@ -321,13 +363,14 @@ export default function ThreadRow({
               color: 'var(--term-fg)',
               fontFamily: 'var(--ui-font)',
               background: 'var(--term-surface)',
-              border: '1px solid var(--term-line)',
+              // Mounted only while it holds focus: the accent border is its focus cue.
+              border: '1px solid var(--term-accent)',
               outline: 'none',
               padding: '1px 4px',
             }}
           />
         ) : (<>
-          {temporary && <TemporaryChatGlyph size={13} />}
+          {temporary && <TemporaryChatGlyph />}
           <span
             data-provisional={provisional || undefined}
             style={{
@@ -344,18 +387,15 @@ export default function ThreadRow({
             {label}
           </span>
         </>)}
-        {tree.pinnedAt && (
-          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 5, paddingClearsKebab) : undefined} />
-        )}
+        <RowAttentionChip attention={attention} />
+        {!geom.isCard && !!tree.pinnedAt && <PinMark />}
         {prefs.showSidebarTimestamps && (
           <span style={{ color: 'var(--term-muted)', fontSize: 'var(--sb-ts-fs, var(--fs-sm))', marginRight: 2 }}>
             {formatMichiAge(tree.lastActiveAt)}
           </span>
         )}
         {selected && (
-          <span style={{ color: 'var(--term-select)', fontSize: 'var(--fs-sm)', fontWeight: 700 }}>
-            ✓
-          </span>
+          <CheckIcon size="sm" style={{ color: 'var(--term-select)', flexShrink: 0 }} />
         )}
         </div>
         {geom.isCard && geom.subtitleInRow && subtitle && (
@@ -410,6 +450,8 @@ export default function ThreadRow({
           state={openState === 'streaming' || showIdleMark ? openState : 'none'}
           isCard={geom.isCard}
           pulseOnce={newPanePulse}
+          unread={geom.isCard ? unreadMark : 'none'}
+          waiting={attention === 'waiting'}
         />
       </Row>
       <MenuPresence>
@@ -439,27 +481,22 @@ export default function ThreadRow({
 /** Small folder glyph that anchors the workspace-name subtitle in card modes,
  *  so the second line reads as metadata rather than another list item. */
 export function SubtitleFolder() {
-  return (
-    <svg
-      aria-hidden
-      width="10"
-      height="10"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      style={{ flexShrink: 0, opacity: 0.8 }}
-    >
-      <path d="M1.8 4.2h4l1.4 1.6h7v6.6a1 1 0 0 1-1 1H2.8a1 1 0 0 1-1-1V4.2z" />
-    </svg>
-  );
+  return <FolderIcon size="sm" style={{ flexShrink: 0, opacity: 0.8 }} />;
 }
 
-/** A card-mode row's expand caret at the row end, in thread and branch rows. */
+/**
+ * A card-mode row's expand caret, in thread and branch rows: its own column at
+ * the row end, `--sb-caret-w` square (24px with a mouse, 40px on touch,
+ * sidebar.css), so a hit on it only folds the card and the title ends before
+ * it (ST-21). A hit anywhere else on the row opens it. A finger on it presses
+ * the column alone (sidebar.css), never the row or its long press (ST-36).
+ */
 export function CardCaret({ expanded, geom, onToggle }: { expanded: boolean; geom: RowGeom; onToggle: () => void }) {
   return (
     <span
       aria-hidden
+      data-card-caret=""
+      data-own-press=""
       onClick={(e) => {
         e.stopPropagation();
         onToggle();
@@ -469,21 +506,31 @@ export function CardCaret({ expanded, geom, onToggle }: { expanded: boolean; geo
         display: 'inline-flex',
         alignItems: 'center',
         justifyContent: 'center',
-        // The phone drawer draws a larger, brighter caret (mobile.css).
-        width: 'var(--sb-caret-w, 9px)',
+        width: 'var(--sb-caret-w, 24px)',
+        height: 'var(--sb-caret-w, 24px)',
+        // Into the row's vertical padding, so the column leaves the row's height alone.
+        marginBlock: 'calc(-1 * var(--sb-row-py, 4px))',
         // Keeps clear of the hover-revealed ⋯ — see caretKebabClearance.
         marginRight: caretKebabClearance(geom),
+        // The phone drawer draws a larger, brighter › (mobile.css).
         fontSize: 'var(--sb-caret-fs, var(--fs-xs))',
         color: 'var(--sb-caret-color, var(--term-muted))',
         cursor: 'pointer',
-        // Expanded turns the same › a quarter turn, as the classic leading
-        // Chevron does, rather than drawing ⌄, whose glyph sits below the
-        // line's centre and so below the ⋯.
-        transform: expanded ? 'rotate(90deg)' : undefined,
-        transition: 'transform var(--t-soft) var(--t-ease, ease-out)',
       }}
     >
-      ›
+      {/* Expanded turns the same › a quarter turn, as the classic leading
+          Chevron does, rather than drawing ⌄, whose glyph sits below the
+          line's centre and so below the ⋯. Only the glyph turns: the column
+          keeps its box. */}
+      <span
+        style={{
+          display: 'inline-block',
+          transform: expanded ? 'rotate(90deg)' : undefined,
+          transition: 'transform var(--t-soft) var(--t-ease, ease-out)',
+        }}
+      >
+        ›
+      </span>
     </span>
   );
 }
@@ -502,6 +549,8 @@ export function Chevron({
 }) {
   return (
     <span
+      // A 24px hit area round a glyph shown (sidebar.css).
+      className={visible ? 't-caret-hit' : undefined}
       onClick={onClick}
       style={{
         width: 12,
@@ -512,7 +561,8 @@ export function Chevron({
         fontFamily: 'var(--ui-font)',
         fontSize: 'var(--fs-sm)',
         color: visible ? 'var(--term-muted)' : 'transparent',
-        cursor: visible && onClick ? 'pointer' : 'default',
+        // Without a handler it takes its row's or its button's cursor.
+        cursor: visible && onClick ? 'pointer' : undefined,
         userSelect: 'none',
         transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
         transformOrigin: 'center',

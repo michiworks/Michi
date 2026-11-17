@@ -58,13 +58,13 @@ function WatchForm({ initial, busy, submitLabel, onSubmit, onCancel }: {
   const options = INTERVALS.some((option) => option.minutes === interval) ? INTERVALS : [...INTERVALS, { minutes: interval, label: intervalLabel(interval) }];
   const ready = title.trim() !== '' && instructions.trim() !== '';
   return (
-    <form aria-label={initial ? `Edit watch ${initial.title}` : 'New watch'} style={{ marginTop: 8, padding: 9, border: '1px solid var(--term-line)', borderRadius: 5 }}
+    <form aria-label={initial ? `Edit watch ${initial.title}` : 'New watch'} style={{ marginTop: 8, padding: 9, border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius)' }}
       onSubmit={(event) => {
         event.preventDefault();
         if (ready) void onSubmit({ title: title.trim(), instructions: instructions.trim(), intervalMinutes: interval }).catch(() => undefined);
       }}>
       <label style={{ display: 'block', fontSize: 'var(--fs-sm)' }}>Name
-        <input style={field} value={title} maxLength={MAINTENANCE_WATCH_LIMITS.titleMaxLength} placeholder="For example: Sev-2 tickets"
+        <input autoFocus style={field} value={title} maxLength={MAINTENANCE_WATCH_LIMITS.titleMaxLength} placeholder="For example: Sev-2 tickets"
           onChange={(event) => setTitle(event.target.value)} />
       </label>
       <label style={{ display: 'block', marginTop: 8, fontSize: 'var(--fs-sm)' }}>What to check and where to record it
@@ -121,6 +121,9 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
   const name = useCompanionName();
   const { value, busy } = maintenance;
   const [editing, setEditing] = React.useState<string | null>(null);
+  // The form takes focus in place of Edit, and gives it back when it closes (ST-10).
+  const [edited, setEdited] = React.useState<string | null>(null);
+  const stopEditing = (id: string) => { setEdited(id); setEditing(null); };
   const [confirmingDelete, setConfirmingDelete] = React.useState<string | null>(null);
   const watches = value?.watches;
   // An older backend sends no watches: it cannot run them.
@@ -136,8 +139,8 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
           New watches can’t be added: ask {name} for a scheduled job instead.
         </p>
         {watches.map((watch) => editing === watch.id
-          ? <WatchForm key={watch.id} initial={watch} busy={busy} submitLabel="Save watch" onCancel={() => setEditing(null)}
-            onSubmit={(input) => maintenance.changeWatch(watch.id, input).then(() => setEditing(null))} />
+          ? <WatchForm key={watch.id} initial={watch} busy={busy} submitLabel="Save watch" onCancel={() => stopEditing(watch.id)}
+            onSubmit={(input) => maintenance.changeWatch(watch.id, input).then(() => stopEditing(watch.id))} />
           : <div key={watch.id} style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--term-line)' }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
               <div style={{ minWidth: 0 }}>
@@ -151,7 +154,7 @@ export function MaintenanceWatches({ maintenance }: { maintenance: PageMaintenan
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <button type="button" disabled={busy || !watch.enabled || watch.lastRun?.state === 'running'} onClick={act(() => maintenance.runWatch(watch.id))}>Check now</button>
                 <button type="button" disabled={busy} onClick={act(() => maintenance.changeWatch(watch.id, { enabled: !watch.enabled }))}>{watch.enabled ? 'Turn off' : 'Turn on'}</button>
-                <button type="button" disabled={busy} onClick={() => setEditing(watch.id)}>Edit</button>
+                <button type="button" autoFocus={edited === watch.id} disabled={busy} onClick={() => setEditing(watch.id)}>Edit</button>
                 {confirmingDelete === watch.id
                   ? <button type="button" disabled={busy} onClick={act(() => maintenance.removeWatch(watch.id).then(() => setConfirmingDelete(null)))}>Delete watch</button>
                   : <button type="button" disabled={busy} onClick={() => setConfirmingDelete(watch.id)}>Delete…</button>}

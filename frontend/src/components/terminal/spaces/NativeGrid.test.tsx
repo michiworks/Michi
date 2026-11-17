@@ -139,6 +139,6 @@ describe('native responsive grid', () => {
     const contents = screen.getByRole('navigation', { name: 'Contents' });
     fireEvent.click(within(contents).getByRole('button', { name: 'Risk' }));
     await waitFor(() => expect(container.querySelector('details')?.open).toBe(true));
-    expect(container.querySelector('[data-flash]')).toBeTruthy();
+    expect(container.querySelector('[data-reveal-flash]')).toBeTruthy();
   });
 });

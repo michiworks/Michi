@@ -81,7 +81,7 @@
   align-items: center;
   gap: 5px;
   margin-bottom: 2px;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-size: var(--fs-sm);
 }
 .source-ref-mark > svg { flex: none; }

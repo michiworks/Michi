@@ -436,7 +436,7 @@ describe('reply sources of V', () => {
       assistantText: 'Your dog is called Biscuit.', outcome: 'completed', status: 'ended', persisted: true });
     assert.deepEqual(attributed?.used.map((entry) => entry.id), [dog.id]);
     const view = replySourcesView({ ownerUserId: ME }, v.nodeId, ['a-v-1']);
-    assert.deepEqual(view.messages.map((message) => message.sources.map((source) => (source.kind === 'memory' ? source.memoryId : source.kind))), [[dog.id]]);
+    assert.deepEqual(view.messages.map((message) => message.sources.map((source) => source.memoryId)), [[dog.id]]);
 
     const app = express();
     app.use(express.json());

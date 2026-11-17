@@ -1,5 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import { ChatNodeStoreContext } from '../../state/chatStore';
 import type { ChatNodeState } from '../../state/chatTypes';
 import { DEFAULT_PREFS } from '../../state/prefs';
 import { PaneMessageList } from './PaneMessageList';
@@ -51,11 +52,27 @@ describe('PaneMessageList MCP failures', () => {
 it('shows a repeated provider warning for a different owning turn after dismissal', () => {
   const warning = { source: 'anthropic-api', category: 'provider' as const, message: 'Retrying request' };
   const warned = (id: string): ChatNodeState => ({ ...node, messages: [{ id, role: 'assistant', text: '', toolCalls: [], warnings: [warning] }] });
-  const { rerender } = render(list(warned('turn-one')));
+  // The banner reads the store's structure channel, which a warning advances.
+  let current = warned('turn-one');
+  let version = 0;
+  const listeners = new Set<() => void>();
+  const store = {
+    getNode: (id: string) => (id === current.nodeId ? current : undefined),
+    getNodes: () => ({ [current.nodeId]: current }),
+    subscribeNode: () => () => {},
+    subscribe: () => () => {},
+    getStructureVersion: () => version,
+    subscribeStructure: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+  };
+  render(<ChatNodeStoreContext.Provider value={store}>{list(current)}</ChatNodeStoreContext.Provider>);
   expect(screen.getByText('anthropic-api: Retrying request')).not.toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Dismiss warning' }));
   expect(screen.queryByText('anthropic-api: Retrying request')).toBeNull();
-  rerender(list(warned('turn-two')));
+  act(() => {
+    current = warned('turn-two');
+    version += 1;
+    for (const listener of listeners) listener();
+  });
   expect(screen.getByText('anthropic-api: Retrying request')).not.toBeNull();
   expect(screen.queryByText(/MCP server/)).toBeNull();
 });

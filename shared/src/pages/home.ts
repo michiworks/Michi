@@ -29,6 +29,7 @@ import type { ChangeSource, CompanionActor, PageDto } from './types';
 import type { BranchOverviewEntry } from '../branchOverview';
 import { finalizeTurnContent } from '../turnProjection';
 import { BACKEND_RESTARTED_ERROR } from '../turnErrors';
+import { TURN_ENDED_EARLY, turnEndMarkOf } from '../turnEnd';
 
 export const PAGE_LAYOUT_RULE_LIMITS = { text: 500, perPage: 50 } as const;
 export const PAGE_LAYOUT_PREFERENCES_LIMIT = 8_000;
@@ -367,16 +368,11 @@ export interface ConversationEnding {
 /** Why a turn a Michi restart cut short stopped. */
 export const RESTART_INTERRUPTION = 'Michi stopped while it was running';
 
-const ENDED_EARLY: Record<string, string> = {
-  max_tokens: 'Stopped early: it reached its output limit',
-  max_turn_requests: 'Stopped early: it reached its step limit',
-  refusal: 'Stopped: the agent declined to continue',
-};
-
 /** How the latest turn ended, from its durable row; null while it runs or before the first turn. */
 export function conversationEnding(turn: { status: string | null; stopReason: string | null; error: string | null }): ConversationEnding | null {
   if (turn.status === 'completed') {
-    const early = turn.stopReason ? ENDED_EARLY[turn.stopReason] : undefined;
+    const mark = turnEndMarkOf(turn.stopReason);
+    const early = mark && mark !== 'stopped' ? TURN_ENDED_EARLY[mark] : undefined;
     return early ? { outcome: 'stopped_early', note: early } : { outcome: 'done', note: null };
   }
   if (turn.status === 'cancelled') return { outcome: 'cancelled', note: 'Stopped before it finished' };

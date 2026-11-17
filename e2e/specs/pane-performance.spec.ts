@@ -640,6 +640,47 @@ test('4 pane heavy horizontal scroll, streaming isolation, and interactions', as
   });
 });
 
+test('a pane streaming off the strip renders none of its chunks until it scrolls back, then catches up', async ({ page }) => {
+  test.skip(LONG);
+  await bootHeavyWorkspace(page, 4);
+  const order = await page.$$eval('.terminal-dashboard > [data-node-id]', (panes) => panes.map((pane) => pane.getAttribute('data-node-id')!));
+  const near = order[0];
+  const far = order[order.length - 1];
+  const pane = (id: string) => page.locator(`.terminal-pane[data-node-id="${id}"]`);
+  const renders = () => page.evaluate((id) => window.__MICHI_RENDER_COUNTERS__?.counts[`PaneMessageList:${id}`] ?? 0, far);
+
+  // The last pane starts a turn, then the first does, which scrolls the last
+  // off the strip while both stream.
+  await submitToPane(page, far, 'stream while scrolled off the strip');
+  await expect(pane(far).locator('[data-streaming-tail="true"]')).toBeVisible({ timeout: 5_000 });
+  await submitToPane(page, near, 'stream on the strip beside it');
+  await expect(pane(near).locator('[data-streaming-tail="true"]')).toBeVisible({ timeout: 5_000 });
+  await expect.poll(() => page.evaluate((id) => {
+    const strip = document.querySelector('.terminal-dashboard')!.getBoundingClientRect();
+    return document.querySelector(`.terminal-dashboard > [data-node-id="${id}"]`)!.getBoundingClientRect().left >= strip.right;
+  }, far)).toBe(true);
+  await page.waitForTimeout(200);
+  const frozen = await renders();
+
+  // The first pane's turn ends after the last one's, which started earlier,
+  // so the last pane's whole turn streamed off the strip. Its chunks rendered
+  // nothing there (about 150 renders when it follows them); what is left are
+  // the turns' few tree touches, the cost MO-17 accepts, counted twice by
+  // StrictMode in a dev build.
+  await expect(pane(near).getByText('Inspect inactive panes?')).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(300);
+  const offStrip = await renders();
+  expect(offStrip - frozen).toBeLessThanOrEqual(16);
+  await expect(pane(far).getByText('Inspect inactive panes?')).toHaveCount(0);
+
+  await page.evaluate((id) => {
+    const strip = document.querySelector('.terminal-dashboard') as HTMLElement;
+    strip.scrollLeft = (document.querySelector(`.terminal-dashboard > [data-node-id="${id}"]`) as HTMLElement).offsetLeft;
+  }, far);
+  await expect(pane(far).getByText('Inspect inactive panes?')).toBeVisible({ timeout: 15_000 });
+  expect(await renders()).toBeGreaterThan(offStrip);
+});
+
 test('6 pane heavy scroll and streaming pressure', async ({ page }) => {
   test.skip(LONG);
   await bootHeavyWorkspace(page, 6);

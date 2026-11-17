@@ -6,6 +6,7 @@ import type {
   AgentReasoning,
   AgentSession,
   ChatMessage,
+  IdleReleaseVerdict,
   RuntimePermissionBroker,
   RuntimeSessionOwner,
   RuntimeToolProfile,
@@ -117,6 +118,28 @@ export class ClaudeSessionManager {
   /** A session under this id is live, opening or still being released: its native files are not to be touched. */
   holds(id: string): boolean {
     return this.active.has(id) || this.acquisitions.has(id);
+  }
+
+  /**
+   * ClaudeRuntime.idleRelease: a live chat session, not ephemeral and not
+   * being acquired, whose process has nothing to keep it (idleReleaseBlocker)
+   * and that nothing has used for limits.sessionIdleTtlMs. Warm processes
+   * are not in `active`, so they never come up here.
+   */
+  idleRelease(id: string, now: number): IdleReleaseVerdict {
+    const keep = (reason: string): IdleReleaseVerdict => ({ action: 'keep', reason });
+    const ttl = this.deps.options.limits.sessionIdleTtlMs;
+    if (!(ttl > 0)) return keep('disabled');
+    if (this.shuttingDown || this.acquisitions.has(id)) return keep('acquiring');
+    const session = this.active.get(id);
+    if (!session) return keep('unknown_session');
+    if (ownerMode(session.owner) !== 'interactive') return keep('not_chat');
+    // A check-in session has no transcript to resume; its own discard ends it.
+    if (session.ephemeral) return keep('ephemeral');
+    const blocker = session.idleReleaseBlocker();
+    if (blocker) return keep(blocker);
+    if (now - session.getIdleSince() < ttl) return keep('recent');
+    return { action: 'release' };
   }
 
   getCompatible(

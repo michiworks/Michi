@@ -74,8 +74,10 @@ describe('SourcePopover', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(document.activeElement).toBe(anchor);
+    screen.getByRole('button', { name: 'Close' }).focus();
     fireEvent.pointerDown(document.body);
     expect(onClose).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(anchor);
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalledTimes(3);
   });

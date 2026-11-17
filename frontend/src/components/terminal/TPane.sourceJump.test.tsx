@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, fireEvent } from '@testing-library/react';
 
 const focusState = vi.hoisted(() => ({ focused: null as string | null, focus: vi.fn(), scrolled: [] as string[], editorReady: true }));
 const nodeState = vi.hoisted(() => ({ status: 'idle', followUps: [] as string[] }));
@@ -15,6 +15,13 @@ const paneFind = vi.hoisted(() => ({ props: null as null | { onVisitMatch: (rang
 // scrolling a message into view puts it at 100.
 const geom = vi.hoisted(() => ({ scrollTop: 0, scroller: null as HTMLElement | null }));
 const observers = vi.hoisted(() => [] as Array<{ cb: () => void; targets: Element[] }>);
+// How much of the conversation is loaded: messages from `from` on, older ones
+// still unread; and how many replies the reader has not seen (`unread`).
+const history = vi.hoisted(() => ({
+  from: 0, unread: undefined as number | undefined, node: null as unknown,
+  loadOlderUntil: vi.fn(), ensureCompleteHistory: vi.fn(),
+}));
+const toastMock = vi.hoisted(() => Object.assign(vi.fn(), { error: vi.fn() }));
 
 if (typeof (globalThis as any).CSS === 'undefined') (globalThis as any).CSS = {};
 if (!(globalThis as any).CSS.highlights) (globalThis as any).CSS.highlights = new Map();
@@ -49,8 +56,6 @@ function stubGeometry(scroller: HTMLElement | null) {
 }
 const scrolledTo = (id: string) => () => { focusState.scrolled.push(id); geom.scrollTop = 100; };
 
-const anyFn = () => new Proxy({}, { get: () => vi.fn() });
-
 vi.mock('../../state/chatStore', async () => {
   const actual = await vi.importActual<any>('../../state/chatStore');
   const messages = Array.from({ length: 6 }, (_, i) => ({
@@ -58,14 +63,20 @@ vi.mock('../../state/chatStore', async () => {
     createdAt: (i + 1) * 100, toolCalls: [], blocks: [],
   }));
   const node = {
-    id: 'node1', nodeId: 'node1', chatId: 'chat1', projectId: 'p1', kind: 'chat', messages,
+    id: 'node1', nodeId: 'node1', chatId: 'chat1', projectId: 'p1', kind: 'chat',
+    get messages() { return messages.slice(history.from); },
+    get historyBefore() { return history.from > 0 ? { id: messages[history.from].id, seq: history.from } : undefined; },
     get status() { return nodeState.status; },
     get followUps() { return nodeState.followUps; },
+    get completionSeq() { return history.unread === undefined ? undefined : 10; },
+    get seenCompletionSeq() { return history.unread === undefined ? undefined : 10 - history.unread; },
     followUpsGenerating: false, title: 'Test thread', pendingComments: [], queuedMessages: [], injectedContexts: [],
   };
+  history.node = node;
   return {
     ...actual,
-    useChatActions: anyFn,
+    useChatActions: () => new Proxy({}, { get: (_target, key) => (
+      key === 'loadOlderUntil' ? history.loadOlderUntil : key === 'ensureCompleteHistory' ? history.ensureCompleteHistory : vi.fn()) }),
     useChatStore: () => ({ focusedPane: null }),
     useChatProjects: () => ({
       availableModes: [], agentStatus: null, refreshAgentStatus: vi.fn(),
@@ -87,7 +98,12 @@ vi.mock('./PaneMessageList', () => ({
   PaneMessageList: () => (
     <div ref={(el) => stubGeometry(el?.parentElement ?? null)}>
       {Array.from({ length: 6 }, (_, i) => (
-        <div key={i} data-msg-id={`m${i + 1}`} ref={(el) => { if (el) el.scrollIntoView = scrolledTo(`m${i + 1}`); }}>
+        <div key={i} data-msg-id={`m${i + 1}`} ref={(el) => {
+          if (!el) return;
+          el.scrollIntoView = scrolledTo(`m${i + 1}`);
+          // Message n sits n * 100px down the transcript.
+          if (history.unread !== undefined) el.getBoundingClientRect = () => ({ top: (i + 1) * 100 - geom.scrollTop } as DOMRect);
+        }}>
           {[0, 1].map((n) => <span key={n} ref={(el) => { if (el) el.scrollIntoView = scrolledTo(`m${i + 1}/${n}`); }}>msg</span>)}
         </div>
       ))}
@@ -109,7 +125,7 @@ vi.mock('../MentionEditor', () => ({ default: React.forwardRef((_p, ref) => {
 }) }));
 vi.mock('../SelectionActions', () => ({ default: () => null }));
 vi.mock('../UploadProgressBar', () => ({ default: () => null }));
-vi.mock('sonner', () => ({ toast: { error: vi.fn() } }));
+vi.mock('sonner', () => ({ toast: toastMock }));
 
 async function load() {
   vi.resetModules();
@@ -273,5 +289,116 @@ describe('TPane: jump to a message', () => {
     expect(container.querySelector('[data-msg-id="m3"]')?.classList.contains('t-msg-flash')).toBe(false);
     resize();
     expect(geom.scrollTop).toBe(100);
+  });
+});
+
+describe('TPane: jump to a message older than its loaded page', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    window.localStorage.clear();
+    history.from = 2;
+    history.loadOlderUntil.mockReset();
+    toastMock.mockClear();
+  });
+  afterEach(async () => {
+    cleanup();
+    history.from = 0;
+    focusState.scrolled = [];
+    try { await act(async () => { await vi.advanceTimersByTimeAsync(1300); }); } finally { vi.useRealTimers(); }
+  });
+
+  async function jumpTo(messageId: string) {
+    const { TPane, nav } = await load();
+    render(<TPane nodeId="node1" />);
+    await act(async () => { await vi.dynamicImportSettled(); });
+    await act(async () => { nav.requestMessageJump('node1', messageId); await vi.advanceTimersByTimeAsync(200); });
+  }
+
+  it('reads older pages until the message is there, then scrolls to it', async () => {
+    history.loadOlderUntil.mockImplementation(async () => {
+      history.from = 0;
+      return { found: true, pages: 1, more: false };
+    });
+    await jumpTo('m1');
+    expect(history.loadOlderUntil).toHaveBeenCalledWith('node1', expect.any(Function), expect.objectContaining({ maxPages: 10 }));
+    expect(focusState.scrolled[0]).toBe('m1');
+  });
+
+  it('says so when no older page has the message, and leaves the scroll where it is', async () => {
+    history.loadOlderUntil.mockResolvedValue({ found: false, pages: 3, more: false });
+    await jumpTo('m1');
+    expect(toastMock).toHaveBeenCalledWith(expect.stringContaining("Couldn't find that message"));
+    expect(focusState.scrolled).toEqual([]);
+  });
+});
+
+/**
+ * The unread replies reach past the loaded page: the pane holds the oldest
+ * loaded message while it reads back to the first of them, then lands on its
+ * question at UNSEEN_TOP_FRACTION (message n sits at n * 100px; 30% of the
+ * 500px viewport is 150px).
+ */
+describe('TPane: unread replies older than the loaded page', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    window.localStorage.clear();
+    nodeState.status = 'idle';
+    nodeState.followUps = [];
+    geom.scrollTop = 0;
+    geom.scroller = null;
+    history.from = 4;
+    history.unread = 2;
+    history.loadOlderUntil.mockReset();
+  });
+  afterEach(async () => {
+    cleanup();
+    history.from = 0;
+    history.unread = undefined;
+    focusState.scrolled = [];
+    try { await act(async () => { await vi.advanceTimersByTimeAsync(1300); }); } finally { vi.useRealTimers(); }
+  });
+
+  async function open() {
+    const { TPane, nav } = await load();
+    render(<TPane nodeId="node1" />);
+    await act(async () => { await vi.dynamicImportSettled(); });
+    return nav;
+  }
+
+  it('reads older pages until the first unread reply is there, then lands on its question', async () => {
+    history.loadOlderUntil.mockImplementation(async (_id: string, has: (node: unknown) => boolean) => {
+      history.from = 2;
+      return { found: has(history.node), pages: 1, more: true };
+    });
+    await open();
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(history.loadOlderUntil).toHaveBeenCalledExactlyOnceWith('node1', expect.any(Function), expect.objectContaining({ maxPages: 5 }));
+    await expect(history.loadOlderUntil.mock.results[0].value).resolves.toMatchObject({ found: true });
+    // m3 asked what m4, the first of the two unread replies, answers.
+    expect(geom.scrollTop).toBe(150);
+  });
+
+  it.each([
+    ['the reader scrolls the transcript meanwhile', 350, async () => { fireEvent.wheel(geom.scroller!); }],
+    ['a jump arrives meanwhile', 100, async (nav: Awaited<ReturnType<typeof open>>) => {
+      history.loadOlderUntil.mockImplementationOnce(async () => { history.from = 0; return { found: true, pages: 2, more: false }; });
+      nav.requestMessageJump('node1', 'm2');
+      await vi.advanceTimersByTimeAsync(200);
+    }],
+  ])('stays where it is when %s', async (_label, stays, interrupt) => {
+    let finishRead!: () => void;
+    history.loadOlderUntil.mockImplementationOnce(() => new Promise((resolve) => {
+      finishRead = () => {
+        history.from = Math.min(history.from, 2);
+        resolve({ found: true, pages: 1, more: true });
+      };
+    }));
+    const nav = await open();
+    // Held on m5, the oldest message loaded, while the older page comes.
+    expect(geom.scrollTop).toBe(350);
+    await act(async () => { await interrupt(nav); });
+    await act(async () => { finishRead(); await vi.advanceTimersByTimeAsync(50); });
+    expect((history.loadOlderUntil.mock.calls[0][2] as { signal: AbortSignal }).signal.aborted).toBe(true);
+    expect(geom.scrollTop).toBe(stays);
   });
 });

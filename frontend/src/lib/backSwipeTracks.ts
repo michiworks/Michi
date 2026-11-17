@@ -1,6 +1,8 @@
 import type { BackSwipePanel } from './backStack';
 import { SWIPE_COMMIT_FRACTION, type SwipeTrack } from '../hooks/useEdgeSwipe';
 import { prefersReducedMotion } from '../hooks/useReducedMotion';
+import { ICON_PX, strokeFor } from '../components/terminal/icons';
+import { EASE } from '../motion/tokens';
 import './backSwipe.css';
 
 /**
@@ -10,12 +12,14 @@ import './backSwipe.css';
  * inside a drawer). Both settle back if the swipe is released short.
  */
 
-const SETTLE_MS = 200;
-const SLIDE_MS = 180;
-const EASE = 'cubic-bezier(0.23, 1, 0.32, 1)';
+export const SETTLE_MS = 200;
+export const SLIDE_MS = 180;
+export const EASE_OUT_CSS = `cubic-bezier(${EASE.out.join(', ')})`;
 /** The arrow's whole swipe: it arms at SWIPE_COMMIT_FRACTION of this (49px). */
 const ARROW_DISTANCE = 140;
 const ARROW_SIZE = 40;
+/** ChevronLeftIcon's drawing, as markup: the arrow is built outside React. */
+const ARROW_ICON = `<svg width="${ICON_PX.lg}" height="${ICON_PX.lg}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="${strokeFor(ICON_PX.lg)}" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3L5 8l5 5"/></svg>`;
 
 /** The element follows the finger; see BackSwipePanel for how a commit leaves. */
 export function panelTrack(swipe: BackSwipePanel, back: () => void): SwipeTrack | null {
@@ -42,7 +46,7 @@ export function panelTrack(swipe: BackSwipePanel, back: () => void): SwipeTrack 
         restore();
         return;
       }
-      el.style.transition = `transform ${SLIDE_MS}ms ${EASE}`;
+      el.style.transition = `transform ${SLIDE_MS}ms ${EASE_OUT_CSS}`;
       el.style.transform = `translateX(${width}px)`;
       window.setTimeout(() => {
         back();
@@ -56,7 +60,7 @@ export function panelTrack(swipe: BackSwipePanel, back: () => void): SwipeTrack 
     },
     cancel: () => {
       if (prefersReducedMotion()) { restore(); return; }
-      el.style.transition = `transform ${SETTLE_MS}ms ${EASE}`;
+      el.style.transition = `transform ${SETTLE_MS}ms ${EASE_OUT_CSS}`;
       el.style.transform = before.transform;
       window.setTimeout(restore, SETTLE_MS);
     },
@@ -69,7 +73,7 @@ export function arrowTrack(back: () => void, y: number): SwipeTrack {
   const el = document.createElement('div');
   el.className = 'back-swipe-arrow';
   el.setAttribute('aria-hidden', 'true');
-  el.innerHTML = '<svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3L5 8l5 5"/></svg>';
+  el.innerHTML = ARROW_ICON;
   el.style.top = `${Math.max(8, Math.min(window.innerHeight - ARROW_SIZE - 8, y - ARROW_SIZE / 2))}px`;
   host.appendChild(el);
   const leave = (state: 'done' | 'cancelled') => {

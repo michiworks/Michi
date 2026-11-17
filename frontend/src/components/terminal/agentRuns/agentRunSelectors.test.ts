@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AgentRunCompletionMode, AgentRunInvocationMode, AgentRunStatus, AgentRunWaitingReason, type AgentRunDtoV1 } from 'michi-shared';
 import type { LocatedAgentResource } from '../../../state/agentIdentity';
-import { selectAgentRunActivityGroups, selectParentRunCards } from './agentRunSelectors';
+import { groupParentRunCards, selectAgentRunActivityGroups } from './agentRunSelectors';
 
 const HASH = 'c'.repeat(64);
 function located(backendConnectionId: string, id: string, status: AgentRunStatus, parentMessageId: string | null = null): LocatedAgentResource<AgentRunDtoV1> {
@@ -32,14 +32,17 @@ describe('agentRunSelectors', () => {
     expect(groups.recentlyCompleted.map((run) => run.value.id)).toEqual(['done']);
   });
 
-  it('indexes Parent cards by Backend, message, and optional tool call', () => {
+  it('groups Parent cards by Backend and message, in creation order', () => {
+    const earlier = located('remote-a', 'earlier', AgentRunStatus.Running, 'message-1');
     const runs = [
       located('remote-a', 'same-id', AgentRunStatus.Running, 'message-1'),
       located('remote-b', 'same-id', AgentRunStatus.Running, 'message-1'),
-      { ...located('remote-a', 'sibling', AgentRunStatus.Running, 'message-1'), value: { ...located('remote-a', 'sibling', AgentRunStatus.Running, 'message-1').value, parentToolCallId: 'other-tool' } },
+      { ...earlier, value: { ...earlier.value, createdAt: 50 } },
+      located('remote-a', 'other', AgentRunStatus.Running, 'message-2'),
+      located('remote-a', 'manual', AgentRunStatus.Running),
     ];
-    expect(selectParentRunCards(runs, 'remote-a', 'message-1').map((run) => run.value.id)).toEqual(['same-id', 'sibling']);
-    expect(selectParentRunCards(runs, 'remote-a', 'message-1', 'tool').map((run) => run.value.id)).toEqual(['same-id']);
-    expect(selectParentRunCards(runs, 'remote-b', 'message-1').map((run) => run.value.id)).toEqual(['same-id']);
+    const ids = (byMessage: Map<string, typeof runs>) => Object.fromEntries([...byMessage].map(([id, cards]) => [id, cards.map((run) => run.value.id)]));
+    expect(ids(groupParentRunCards(runs, 'remote-a'))).toEqual({ 'message-1': ['earlier', 'same-id'], 'message-2': ['other'] });
+    expect(ids(groupParentRunCards(runs, 'remote-b'))).toEqual({ 'message-1': ['same-id'] });
   });
 });

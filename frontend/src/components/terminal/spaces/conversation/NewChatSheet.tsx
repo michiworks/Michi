@@ -1,5 +1,6 @@
 import React from 'react';
-import { ChevronDown, Folder, GitBranch, MessageSquare, X } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { BranchIcon, ChatIcon, ChevronDownIcon, CloseIcon, FolderIcon } from '../../icons';
 import { useChatProjects } from '../../../../state/chatStore';
 import { isSystemWorkspace } from '../../../../state/assistant/systemWorkspace';
 import { backendConnectionIdForWorkspace } from '../../../../config/backendConnections';
@@ -60,10 +61,18 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
     return () => window.clearTimeout(timer);
   }, [sheet.seq]);
 
+  // Closing gives focus back to what opened the sheet, which stays (ST-10).
+  const [opener] = React.useState(() => document.activeElement);
+  const returnFocus = () => {
+    if (opener instanceof HTMLElement && opener !== document.body && opener.isConnected) opener.focus({ preventScroll: true });
+  };
+  const close = () => { returnFocus(); closeNewChatSheet(); };
+
   const text = draft.value.trim();
   const canStart = Boolean(chosen && text && scope.pageId);
   const start = () => {
     if (!chosen || !text || !scope.pageId) return;
+    returnFocus();
     requestSpaceConversation({
       text,
       workspaceId: chosen.id,
@@ -81,14 +90,14 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
       onKeyDown={(event) => {
         if (event.key !== 'Escape' || isImeComposing(event) || menuAnchor || escapeTakenBefore(event.nativeEvent)) return;
         event.preventDefault();
-        closeNewChatSheet();
+        close();
       }}
     >
       <ComposerShell
         position="static"
         preBlocks={(
           <div className="space-new-chat__head">
-            <MessageSquare size={14} strokeWidth={1.7} aria-hidden="true" />
+            <ChatIcon aria-hidden="true" />
             <b>Start a task</b>
             <span>in</span>
             <button
@@ -100,13 +109,13 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
               disabled={workspaces.length === 0}
               onClick={(event) => setMenuAnchor(menuAnchor ? null : event.currentTarget)}
             >
-              <Folder size={12} strokeWidth={1.7} aria-hidden="true" />
+              <FolderIcon size="sm" aria-hidden="true" />
               <span>{chosen?.name ?? 'No workspace'}</span>
-              <ChevronDown size={12} strokeWidth={1.7} aria-hidden="true" />
+              <ChevronDownIcon size="sm" aria-hidden="true" />
             </button>
             <span className="space-new-chat__spacer" />
-            <button type="button" className="t-icon-btn" aria-label="Close" title="Close (Esc)" onClick={closeNewChatSheet}>
-              <X size={14} strokeWidth={1.7} aria-hidden="true" />
+            <button type="button" className="t-icon-btn" aria-label="Close" title="Close (Esc)" onClick={close}>
+              <CloseIcon aria-hidden="true" />
             </button>
           </div>
         )}
@@ -119,7 +128,6 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
             className="hide-sb space-new-chat__input"
             data-testid="space-new-chat-input"
             artifacts={NONE}
-            sameTreeNodes={NONE}
             currentNodeId="__space_new_chat__"
             enableSlash={false}
             onSubmit={start}
@@ -127,7 +135,7 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
         )}
         toolbarLeft={(
           <span className="space-new-chat__runtime">
-            <GitBranch size={12} strokeWidth={1.7} aria-hidden="true" />
+            <BranchIcon size="sm" aria-hidden="true" />
             {agentStatus?.label ?? 'Default runtime'} · your global settings
           </span>
         )}
@@ -139,19 +147,20 @@ export function NewChatSheet({ sheet, scope }: { sheet: NewChatSheetState; scope
         )}
       />
       {workspaces.length === 0 && <p className="space-new-chat__error" role="alert">There is no workspace on this backend to start a chat in.</p>}
-      {menuAnchor && (
+      <AnimatePresence>{menuAnchor && (
         <ActionMenu
+          key="workspaces"
           anchor={menuAnchor}
           label="Start the chat in"
           onClose={() => setMenuAnchor(null)}
           items={workspaces.map((workspace) => ({
             id: workspace.id,
             label: workspace.name,
-            icon: <Folder size={12} strokeWidth={1.7} aria-hidden="true" />,
+            icon: <FolderIcon size="sm" aria-hidden="true" />,
             onSelect: () => { setNewChatSheetWorkspace(workspace.id); editorRef.current?.focus(); },
           }))}
         />
-      )}
+      )}</AnimatePresence>
     </section>
   );
 }

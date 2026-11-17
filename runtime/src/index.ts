@@ -46,7 +46,7 @@ export {
 // Types reachable through the session and workflow contracts.
 export { MULTI_MODEL_PHASES, MULTI_MODEL_STEP_STATUSES, MULTI_MODEL_SYNTHESIS_STATUSES } from 'michi-shared';
 export type {
-  MultiModelContext, MultiModelPermissionMode, MultiModelPhase, MultiModelRunView,
+  ModelServiceTier, MultiModelContext, MultiModelPermissionMode, MultiModelPhase, MultiModelRunView,
   MultiModelStepKind, MultiModelStepStatus, MultiModelStepView, MultiModelSynthesisStatus,
   MultiModelSynthesisView, MultiModelThreadView, SessionUltracodeState,
   WorkflowLoopDto, WorkflowNodeRoundDto, WorkflowOmittedLeaves, WorkflowWatchDto,

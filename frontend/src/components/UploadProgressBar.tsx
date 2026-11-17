@@ -46,7 +46,7 @@ export default function UploadProgressBar({ progress, compact = false }: Props) 
       <div className="t-upload-progress__track" aria-hidden>
         <div
           className={`t-upload-progress__bar${isCopying ? ' is-indeterminate' : ''}`}
-          style={isCopying ? undefined : { width: `${percent}%` }}
+          style={isCopying ? undefined : { transform: `scaleX(${percent / 100})` }}
         />
       </div>
     </div>

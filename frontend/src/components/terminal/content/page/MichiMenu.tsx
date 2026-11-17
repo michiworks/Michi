@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useIsPresent } from 'motion/react';
 import { MenuItem, PopoverSurface } from '../../../ui/Popover';
 import { isImeComposing } from '../../../../lib/ime';
 import { useBackLayer } from '../../../../lib/backStack';
@@ -64,7 +65,10 @@ export function MichiMenu({
   enabledRef.current = enabled;
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  useBackLayer(true, { back: () => onCloseRef.current(true) });
+  // Inside the caller's <AnimatePresence> a closed menu fades out for a moment
+  // (PopoverSurface); meanwhile it takes no keys, presses or Back.
+  const present = useIsPresent();
+  useBackLayer(present, { back: () => onCloseRef.current(true) });
 
   useLayoutEffect(() => {
     const box = surfaceRef.current?.getBoundingClientRect();
@@ -73,6 +77,7 @@ export function MichiMenu({
   }, [align, anchor, width]);
 
   useEffect(() => {
+    if (!present) return;
     const pick = (item: MichiMenuItem | undefined) => {
       if (!item || item.disabled) return;
       onCloseRef.current(true);
@@ -118,7 +123,7 @@ export function MichiMenu({
       window.removeEventListener('resize', dismiss);
       window.removeEventListener('scroll', dismiss, true);
     };
-  }, [anchor]);
+  }, [present, anchor]);
 
   const itemDomId = (id: string) => `${baseId}-${id}`;
 
@@ -126,7 +131,6 @@ export function MichiMenu({
     <PopoverSurface
       ref={surfaceRef}
       menuKind="context"
-      animate={false}
       width={width}
       left={position?.left ?? 0}
       top={position?.top ?? 0}

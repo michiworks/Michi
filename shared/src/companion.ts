@@ -60,7 +60,7 @@ export {
  *   external source contracts remain for persisted data and injected sources,
  *   but this build bundles no external collectors;
  * - an LLM layer speaks in the Companion's own pinned conversation only when
- *   there is new material (heartbeat, morning brief, catch-up, worker report),
+ *   there is new material (heartbeat, wake, worker report),
  *   and ends quietly with `nothing_to_do` otherwise.
  *
  * The Companion exists only in the local desktop app (never in cloud mode).
@@ -128,7 +128,7 @@ export const COMPANION_BUCKETS: readonly CompanionBucket[] = Object.freeze(['nee
 
 /**
  * now    = interrupt: a Needs you notification (services/companion/notices.ts) and an early Companion wake.
- * digest = next heartbeat / morning brief.
+ * digest = Today and the next heartbeat.
  * silent = feed only.
  */
 export type CompanionSeverity = 'now' | 'digest' | 'silent';
@@ -176,6 +176,17 @@ export interface CompanionItemDto {
   snoozedUntil: number | null;
   feedback: CompanionFeedback | null;
   feedbackReason: CompanionFeedbackReason | null;
+  /**
+   * The agent raised this version into Today's "Waiting on you" (a check-in's
+   * companion_update_item `raise`, 2026-11-17): something Michi only read,
+   * such as a mail, that asks the user for something. `reason` is the
+   * agent's one line the row shows ("Raised by <name> — …"); check-in
+   * material, never put in the agent's context. Like a rating it belongs to
+   * this version: a later version reads null. It says what waits today, so
+   * it holds until local midnight (`until`); read it with
+   * companionItemRaise. Absent from older backends.
+   */
+  raised?: CompanionItemRaise | null;
   /** When Michi first saw the object. */
   firstSeenAt: number;
   /** When the object last changed meaningfully (the current version began). */
@@ -187,12 +198,38 @@ export interface CompanionItemDto {
   resolvedAt: number | null;
 }
 
+/** CompanionItemDto.raised: why and when the agent raised the item. */
+export interface CompanionItemRaise {
+  /** One line, at most COMPANION_LIMITS.maxChangeReasonChars. */
+  reason: string;
+  at: number;
+  /** The local midnight after `at`: a raise says what waits on the user today, so tomorrow it is gone. */
+  until: number;
+}
+
+/** The local midnight after `at`, when a raise given at `at` stops holding. */
+export function companionRaiseUntil(at: number): number {
+  const midnight = new Date(at);
+  midnight.setHours(24, 0, 0, 0);
+  return midnight.getTime();
+}
+
+/** The item's raise if it still holds at `now` (the day it was given on), else null. */
+export function companionItemRaise(item: Pick<CompanionItemDto, 'raised'>, now: number): CompanionItemRaise | null {
+  const raised = item.raised ?? null;
+  return raised !== null && now < raised.until ? raised : null;
+}
+
 export type CompanionItemAction =
   | { action: 'seen' }
   | { action: 'snooze'; until: number }
   | { action: 'dismiss' }
   | { action: 'mute' }
   | { action: 'restore' }
+  /** Michi's, in a check-in: this one waits on you today, and why (CompanionItemRaise). */
+  | { action: 'raise'; reason: string }
+  /** Michi's: it no longer waits on you today. */
+  | { action: 'lower' }
   | { action: 'feedback'; feedback: CompanionFeedback | null; reason?: CompanionFeedbackReason | null };
 
 export type CompanionTab = 'chat' | 'today';
@@ -260,14 +297,11 @@ export interface CompanionSettings {
   /** The old Check every: no longer read; the polls run every COMPANION_POLL_MINUTES. Stays readable for a version. */
   pollMinutes: number;
   heartbeat: { enabled: boolean; intervalMinutes: CompanionHeartbeatMinutes };
-  /** Pulse-style morning brief at a local time `HH:MM`, on its own local weekdays (0 = Sunday; default Monday to Friday). */
-  brief: { enabled: boolean; time: string; days: number[] };
   /** Local `HH:MM` window with no notifications and no Companion turns. Wraps midnight when start > end. */
   quietHours: { enabled: boolean; start: string; end: string };
   /**
-   * The old workdays (0 = Sunday). Read once as brief.days when none is
-   * stored (backend settings.ts), and by the notice gate until it goes; no
-   * longer written by Settings.
+   * The user's workdays (0 = Sunday): the CR and pipeline sources count
+   * staleness and good news in them. No longer written by Settings.
    */
   workdays: number[];
   /**
@@ -283,6 +317,13 @@ export interface CompanionSettings {
    * W2-F2 shows it under Settings › <name> › Model.
    */
   reasoning?: RuntimeReasoning | null;
+  /**
+   * The user's own conversations also continue a turn by themselves when it
+   * stopped at a limit or failed on an error that clears up (backend
+   * services/autoContinue.ts), as the conversations Michi started always do.
+   * Off until the user turns it on; nothing continues while Michi is paused.
+   */
+  autoContinueChats: boolean;
 }
 
 // DEFAULT_COMPANION_NAME and COMPANION_LIMITS live in companionConstants.ts
@@ -313,10 +354,10 @@ export const DEFAULT_COMPANION_SETTINGS: CompanionSettings = Object.freeze({
   },
   pollMinutes: 5,
   heartbeat: { enabled: true, intervalMinutes: 60 },
-  brief: { enabled: true, time: '09:00', days: [1, 2, 3, 4, 5] },
   quietHours: { enabled: true, start: '20:00', end: '08:00' },
   workdays: [1, 2, 3, 4, 5],
   reasoning: null,
+  autoContinueChats: false,
 }) as CompanionSettings;
 
 export type CompanionSourceState = 'ok' | 'disabled' | 'unavailable' | 'error' | 'pending';
@@ -339,7 +380,6 @@ export interface CompanionStatusDto {
   lastCheckAt: number | null;
   nextCheckAt: number | null;
   nextHeartbeatAt: number | null;
-  nextBriefAt: number | null;
   turnsToday: number;
   /** True while a Companion model turn runs. */
   working: boolean;
@@ -354,28 +394,6 @@ export interface CompanionStatusDto {
    * absent from older backends, which read as before ("Working…").
    */
   firstLook?: boolean;
-}
-
-export interface CompanionBriefCard {
-  title: string;
-  body: string;
-  itemIds: string[];
-  /** Optional one-click follow-up: puts `prompt` into the Companion chat. */
-  action: { label: string; prompt: string } | null;
-}
-
-export interface CompanionBriefDto {
-  id: string;
-  /** Local date `YYYY-MM-DD`. */
-  date: string;
-  headline: string;
-  cards: CompanionBriefCard[];
-  /** Pulse-style ending, e.g. "That's all for today." */
-  closing: string;
-  /** llm = written by the Companion; fallback = assembled by Michi when no model turn ran. */
-  origin: 'llm' | 'fallback';
-  createdAt: number;
-  cardFeedback: Record<number, CompanionFeedback>;
 }
 
 export type CompanionCardKind =
@@ -651,15 +669,6 @@ export interface CompanionReminderDto {
   firedAt: number | null;
 }
 
-/** Deterministic "since you left" summary, shown without spending a model turn. */
-export interface CompanionCatchUpDto {
-  awaySince: number;
-  returnedAt: number;
-  changedItemIds: string[];
-  /** e.g. "Nothing new since 08:12." or "3 updates, 1 needs you." */
-  line: string;
-}
-
 /**
  * Michi's latest line (Q45): one line a check-in wrote about what it is doing
  * or what changed, for Home's greeting. Never how many things need the user:
@@ -680,7 +689,6 @@ export interface CompanionSnapshotDto {
   conversation: CompanionConversationDto | null;
   /** Open items (not resolved / dismissed / muted), newest change first. */
   items: CompanionItemDto[];
-  brief: CompanionBriefDto | null;
   cards: CompanionCardDto[];
   goals: CompanionGoalDto[];
   notes: string;
@@ -691,7 +699,6 @@ export interface CompanionSnapshotDto {
   reminders: CompanionReminderDto[];
   /** Subtypes the user's feedback demoted to digest (undo in Settings). */
   demotedSubtypes: CompanionItemSubtype[];
-  catchUp: CompanionCatchUpDto | null;
   activity: CompanionRunDto[];
   /** needsYou = open needs_you items; newItems = status 'new'; unreadMessages = Companion messages since the user last viewed the panel. */
   counts: { needsYou: number; newItems: number; unreadMessages: number };
@@ -769,7 +776,7 @@ export interface CompanionGetStartedInput {
   watch?: boolean;
 }
 
-/** Renderer activity beacon: the backend uses it for catch-up and to keep turns out of the user's way. */
+/** Renderer activity beacon: the backend uses it for away mode and to keep turns out of the user's way. */
 export interface CompanionPresenceInput {
   /** The Michi window is focused and the user acted recently. */
   active: boolean;
@@ -796,7 +803,7 @@ export interface CompanionChangedEvent {
   type: 'companion_changed';
   revision: number;
   /** `notifications`: the user's notification level changed (Michi's companion_set_notifications); windows read their prefs again. */
-  reason: 'items' | 'brief' | 'cards' | 'goals' | 'notes' | 'settings' | 'status' | 'activity' | 'catch_up' | 'conversation' | 'reminders' | 'rules'
+  reason: 'items' | 'cards' | 'goals' | 'notes' | 'settings' | 'status' | 'activity' | 'view' | 'conversation' | 'reminders' | 'rules'
     | 'notifications';
 }
 
@@ -1043,8 +1050,6 @@ export interface CompanionTrayDto {
   needsYou: CompanionTrayItem[];
   /** All open needs_you items ("View all in Today"). */
   needsYouTotal: number;
-  /** Today's brief exists and the user has not looked at it. */
-  briefReady: boolean;
   /** The snapshot revision it was computed from. */
   revision: number;
 }

@@ -48,6 +48,15 @@ describe('NativeDatabase', () => {
     expect(within(screen.getByRole('toolbar', { name: '1 row selected' })).queryByRole('button', { name: 'Hand to agent…' })).toBeNull();
   });
 
+  it('says a failed read as an alert and reads again on Retry', () => {
+    const refresh = vi.fn();
+    hook.mockReturnValue({ database: null, status: 'error', error: 'Connection unavailable', stale: false, refresh, edit: vi.fn() });
+    render(<NativeDatabase databaseId="db-native" workspaceId="ws-1" connectionId="local" />);
+    expect(screen.getByRole('alert').textContent).toBe('Connection unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
   it('shows a stale snapshot read-only and offers an explicit refresh', () => {
     const refresh = vi.fn();
     hook.mockReturnValue({ database, status: 'ready', error: 'Connection unavailable', stale: true, refresh, edit: vi.fn() });

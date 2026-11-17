@@ -108,7 +108,7 @@
   cursor: pointer;
 }
 .companion-icon-btn:hover { background: var(--term-alt); color: var(--term-fg); }
-.companion-icon-btn:disabled { opacity: 0.4; cursor: default; }
+.companion-icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .companion-icon-btn[aria-pressed='true'] { color: var(--term-accent); }
 .companion-head__bar {
   display: flex;
@@ -139,7 +139,7 @@
   cursor: pointer;
 }
 .companion-tab:hover { color: var(--term-fg); }
-.companion-tab[aria-selected='true'] { color: var(--term-fg); font-weight: 600; }
+.companion-tab[aria-selected='true'] { color: var(--term-fg); }
 .companion-tab[aria-selected='true']::after {
   content: '';
   position: absolute;
@@ -178,7 +178,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
@@ -234,7 +234,7 @@
   gap: 6px;
   padding: 8px 10px;
   border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-sm);
+  border-radius: var(--ui-radius);
   background: var(--term-bg);
 }
 .companion-card__summary { font-size: var(--fs-md); color: var(--term-fg); line-height: 1.45; }
@@ -271,7 +271,7 @@
 .companion-card__fields dt { color: var(--term-muted); }
 .companion-card__fields dd { margin: 0; overflow-wrap: anywhere; }
 .companion-card__diff { display: flex; flex-direction: column; }
-.companion-card__diff-line { padding: 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 2px; }
+.companion-card__diff-line { padding: 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: var(--ui-radius-sm); }
 .companion-card__diff-line[data-change='added'] { background: var(--term-digest-f); }
 .companion-card__diff-line[data-change='removed'] { background: var(--term-danger-f); color: var(--term-mid); }
 .companion-card__diff-mark { display: inline-block; width: 1.2em; color: var(--term-muted); }
@@ -284,16 +284,51 @@
   flex-direction: column;
   flex: 1 1 0;
   min-height: 0;
-  --message-body-size: calc(var(--message-body-size-base) - 1px);
 }
 .companion-conversation > .terminal-pane { flex: 1; height: auto; border-right: 0 !important; }
 .companion-conversation .terminal-composer { left: 10px !important; right: 10px !important; }
 .companion-conversation .term-scrollbar { padding-left: 14px !important; padding-right: 14px !important; }
 .companion-conversation [data-testid='turn-usage'] { display: none; }
-/* The Companion's choices: one row each, no "Explore further" heading, no Branch (it answers here). */
+/* The Companion's choices, up to three short replies: buttons on one line, no "Explore further"
+   heading, no Branch (it answers here). A line too long for the panel scrolls sideways; the end
+   padding is as wide as the fade, so a line that fits never fades and the last one ends clear. */
 .companion-conversation .t-followups-heading,
 .companion-conversation .t-followup-branch { display: none; }
-.companion-conversation .t-followup-row { grid-template-columns: minmax(0, 1fr); }
+.companion-conversation .t-followups > div:has(> .t-followup-row) {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 2px 24px 2px 0;
+  scrollbar-width: thin;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
+@media (hover: none) {
+  .companion-conversation .t-followups > div:has(> .t-followup-row) { scrollbar-width: none; }
+  .companion-conversation .t-followups > div::-webkit-scrollbar { display: none; }
+}
+.companion-conversation .t-followup-row {
+  display: flex;
+  flex: none;
+  max-width: 85%;
+  min-height: 0;
+  border: 1px solid var(--term-line-s);
+  border-radius: var(--ui-radius);
+}
+.companion-conversation .t-followup-row + .t-followup-row { border-top: 1px solid var(--term-line-s); }
+.companion-conversation .t-followup-row::before { display: none; }
+.companion-conversation .t-followup-text {
+  flex: 1 1 auto;
+  min-height: 38px;
+  padding: 7px 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (hover: hover) {
+  .companion-conversation .t-followup-row:not([data-disabled='true']):hover { background: var(--term-alt); border-color: var(--term-mid); }
+}
 .companion-conversation .terminal-message-user[data-density] { max-width: 85%; }
 .companion-speaker {
   display: inline-flex;
@@ -307,21 +342,6 @@
   height: 6px;
   border-radius: var(--ui-radius-pill);
   background: var(--term-accent);
-}
-.companion-checking {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  font-size: var(--fs-sm);
-  color: var(--term-muted);
-}
-.companion-checking__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--ui-radius-pill);
-  background: var(--term-accent);
-  animation: tpulse var(--t-loop) ease-in-out infinite;
 }
 .companion-link-text { color: inherit; }
 
@@ -344,60 +364,73 @@
 }
 .companion-section__head .michi-section-label { flex: 1; min-width: 0; }
 .companion-empty { margin: 2px 0 0; font-size: var(--fs-md); color: var(--term-muted); }
-.companion-since {
-  margin: 0 14px 8px;
-  padding: 7px 10px;
+/* Michi cannot see or cannot think: one line per cause, over everything else. */
+.companion-health {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 14px 10px;
+}
+.companion-health__line {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 8px;
   border-radius: var(--ui-radius-sm);
-  background: var(--term-alt);
+  background: var(--term-danger-f);
   font-size: var(--fs-md);
-  color: var(--term-mid);
   line-height: 1.45;
 }
-.companion-since strong { color: var(--term-fg); font-weight: 600; }
-.companion-brief__headline {
-  margin: 0 0 8px;
+.companion-health__line > svg { margin-top: 2px; color: var(--term-danger-text); }
+.companion-health__line > .ui-btn { align-self: center; }
+
+/* How many things wait: counted from the rows below it, never written ahead of them. */
+.companion-today__head {
+  margin: 0;
+  padding: 2px 14px 4px;
   font-size: var(--fs-xl);
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: var(--ls-tight);
 }
-.companion-brief__cards { display: flex; flex-direction: column; gap: 8px; }
-.companion-brief-card {
-  padding: 8px 10px;
-  border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-sm);
-  background: var(--term-bg);
-}
-.companion-brief-card__title { margin: 0; font-size: var(--fs-lg); font-weight: 600; line-height: 1.35; }
-.companion-brief-card__body { margin: 3px 0 0; font-size: var(--fs-md); color: var(--term-mid); line-height: 1.5; }
-.companion-brief-card__foot {
+
+/* A fold: what is inside, how much, and its rows in one frame (TR-18 one-frame disclosure). */
+.companion-fold__summary {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 6px;
-}
-.companion-brief-card__items { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; min-width: 0; }
-.companion-chip {
-  max-width: 100%;
-  padding: 1px 7px;
-  border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-pill);
+  width: 100%;
+  min-height: 26px;
+  padding: 4px 2px;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
-  color: var(--term-mid);
+  color: var(--term-fg);
   font: inherit;
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: var(--fs-lg);
+  text-align: left;
   cursor: pointer;
 }
-.companion-chip:hover { color: var(--term-fg); border-color: var(--term-line-s); }
-.companion-thumbs { display: inline-flex; gap: 2px; }
-.companion-brief__closing { margin: 10px 0 6px; font-size: var(--fs-md); color: var(--term-muted); }
-.companion-inline-form { display: flex; gap: 6px; margin-top: 6px; }
-.companion-inline-form .ui-input { flex: 1; min-width: 0; }
-.companion-view-all { margin-top: 6px; }
+.companion-fold__summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.companion-fold__summary > svg { flex-shrink: 0; color: var(--term-muted); transition: transform var(--t-soft) var(--t-ease); }
+.companion-fold__summary[aria-expanded='true'] > svg { transform: rotate(90deg); }
+@media (hover: hover) {
+  .companion-fold__summary:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.companion-fold__meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--term-faint);
+}
+.companion-fold__body { padding: 0 0 4px 20px; }
+/* The rows folded under "Waiting on you" are the same rows as the ones above them: no indent. */
+.companion-fold--spill > .companion-fold__body { padding-left: 0; }
+.companion-fold--spill > .companion-fold__body > .companion-row:first-child {
+  border-top: 1px solid color-mix(in srgb, var(--term-line) 60%, transparent);
+}
 
 /* ── Item rows ──────────────────────────────────────────────── */
 .companion-row {
@@ -411,9 +444,11 @@
   transition: background-color var(--t-slow) ease-out;
 }
 .companion-row + .companion-row { border-top: 1px solid color-mix(in srgb, var(--term-line) 60%, transparent); }
-.companion-row[data-focused] { background: var(--term-select-f, var(--term-alt)); transition: none; }
+.companion-row[data-focused],
+.companion-line[data-focused] { background: var(--term-select-f, var(--term-alt)); transition: none; }
 @media (prefers-reduced-motion: reduce) {
-  .companion-row { transition: none; }
+  .companion-row,
+  .companion-line { transition: none; }
 }
 .companion-row__icon { display: inline-flex; padding-top: 2px; color: var(--term-muted); }
 .companion-row__main { min-width: 0; }
@@ -445,6 +480,108 @@
 }
 .companion-row__actions .ui-btn--ghost { color: var(--term-muted); }
 .companion-row__actions .ui-btn--ghost:hover { color: var(--term-fg); }
+
+/* A swipe (useRowSwipe): the content follows the finger, and the action
+   comes in behind it, in the space it uncovers; armed (a release would act)
+   it takes its status colour. */
+.companion-row { --swipe-x: 0px; --swipe-settle: 0s; }
+.companion-row[data-swipe] { overflow: clip; }
+.companion-row[data-swipe] > .companion-row__icon,
+.companion-row[data-swipe] > .companion-row__main {
+  transform: translateX(var(--swipe-x));
+  transition: transform var(--swipe-settle);
+}
+.companion-row__reveal {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 0 16px;
+  font-size: var(--fs-md);
+  background: var(--term-alt);
+  color: var(--term-muted);
+  transition: transform var(--swipe-settle), background-color var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
+}
+.companion-row[data-swipe='right'] > .companion-row__reveal--done {
+  display: flex;
+  justify-content: flex-end;
+  transform: translateX(calc(-100% + var(--swipe-x)));
+}
+.companion-row[data-swipe='left'] > .companion-row__reveal--snooze {
+  display: flex;
+  transform: translateX(calc(100% + var(--swipe-x)));
+}
+.companion-row[data-swipe-armed] > .companion-row__reveal--done { background: var(--term-digest-f); color: var(--term-digest); }
+.companion-row[data-swipe-armed] > .companion-row__reveal--snooze { background: var(--term-waiting-f); color: var(--term-waiting-text); }
+
+/* An item that interrupts (severity now): its icon says so, nothing else changes. */
+.companion-row[data-now] .companion-row__icon { color: var(--term-danger-text); }
+
+/* A line of "On your plate" or "Everything else": what it is, when it moved, its one step. */
+.companion-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  /* A line a notice opened its fold for fades the same way a row does. */
+  transition: background-color var(--t-slow) ease-out;
+}
+.companion-line + .companion-line { border-top: 1px solid color-mix(in srgb, var(--term-line) 50%, transparent); }
+.companion-line__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.companion-line__meta {
+  justify-self: end;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--term-faint);
+}
+.companion-line__sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+}
+.companion-line__acts { justify-self: end; display: flex; align-items: center; gap: 2px; }
+
+/* Several items of one kind: their summary line opens the members in place. */
+.companion-members-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--term-muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.companion-members-toggle.companion-row__summary { margin-top: 2px; font-size: var(--fs-md); color: var(--term-mid); }
+.companion-members-toggle > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.companion-members-toggle > svg { flex-shrink: 0; color: var(--term-muted); transition: transform var(--t-soft) var(--t-ease); }
+.companion-members-toggle[aria-expanded='true'] > svg { transform: rotate(90deg); }
+@media (hover: hover) {
+  .companion-members-toggle:hover { color: var(--term-fg); }
+}
+.companion-members {
+  grid-column: 1 / -1;
+  margin: 3px 0 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--term-line);
+}
+.companion-row .companion-members { margin-top: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .companion-fold__summary > svg,
+  .companion-members-toggle > svg { transition: none; }
+}
 
 /* ── Reminders ──────────────────────────────────────────────── */
 .companion-reminder {
@@ -559,37 +696,13 @@
 .companion-activity-sheet__error { flex-basis: 100%; color: var(--term-danger-text); font-size: var(--fs-sm); }
 
 /* v2 (DESIGN-v2 §1.1–§3.8): the header menu and History, posts' receipts, the lines under a user message. */
-.companion-head__menu { position: relative; display: inline-flex; }
-.companion-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  z-index: 5;
-  min-width: 168px;
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  background: var(--term-surface);
-  border: 1px solid var(--term-line);
-  border-radius: 6px;
-}
-.companion-menu__item {
-  text-align: left;
-  padding: 5px 8px;
-  border-radius: 4px;
-  color: var(--term-fg);
-  background: transparent;
-  font-size: 12px;
-}
-.companion-menu__item:hover:not(:disabled) { background: color-mix(in srgb, var(--term-accent) 12%, transparent); }
-.companion-menu__item:disabled { color: var(--term-faint); }
 .companion-history { padding: 8px 12px; border-bottom: 1px solid var(--term-line); }
 .companion-history__head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--term-muted); }
 .companion-receipt {
   margin: 4px 0 10px;
   padding: 6px 10px;
   border: 1px solid var(--term-line);
-  border-radius: 6px;
+  border-radius: var(--ui-radius);
   font-size: 12px;
   color: var(--term-muted);
 }
@@ -611,7 +724,7 @@
   font-size: 12px;
   color: var(--term-muted);
   border: 1px solid var(--term-line);
-  border-radius: 6px;
+  border-radius: var(--ui-radius);
 }
 /* Get started (D17): the model-free introduction and its card at the start of V. */
 .companion-get-started { display: flex; flex-direction: column; gap: 8px; margin: 2px 0 14px; }

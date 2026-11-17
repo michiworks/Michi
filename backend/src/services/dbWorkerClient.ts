@@ -109,8 +109,14 @@ export function initDbWorker(dbPath: string): Promise<void> {
   return _readyPromise;
 }
 
-function rpc<T>(command: string, args: unknown): Promise<T> {
-  if (!_worker || !_ready) {
+/**
+ * `jsonFallback`: args that structured clone refuses (a function, a class
+ * the clone cannot carry) go as a JSON copy instead, as every snapshot did
+ * before; other args reject.
+ */
+function rpc<T>(command: string, args: unknown, opts: { jsonFallback?: boolean } = {}): Promise<T> {
+  const worker = _worker;
+  if (!worker || !_ready) {
     return Promise.reject(new Error('dbWorker not ready — await initDbWorker() first'));
   }
   const id = _nextId++;
@@ -119,8 +125,31 @@ function rpc<T>(command: string, args: unknown): Promise<T> {
       resolve: resolve as (v: unknown) => void,
       reject,
     });
-    _worker!.postMessage({ id, command, args });
+    try {
+      try {
+        worker.postMessage({ id, command, args });
+      } catch (error) {
+        if (!opts.jsonFallback || (error as Error | null)?.name !== 'DataCloneError') throw error;
+        worker.postMessage({ id, command, args: JSON.parse(JSON.stringify(args)) });
+      }
+    } catch (error) {
+      // Nothing was sent, so no reply will settle it.
+      _pending.delete(id);
+      reject(error);
+    }
   });
+}
+
+/**
+ * A turn snapshot goes as it is: postMessage's structured clone is the copy.
+ * Making a JSON copy here first cost 68 s of main-thread time in 18 h
+ * (11-09 performance audit P1-5), about 18 ms for a 1.8 MB snapshot. The
+ * rows written are the same: the core serializes each column to JSON
+ * itself, and durableMessageMetadata stores metadata of undefined values
+ * as none, as the JSON copy did.
+ */
+function snapshotRpc<T>(command: 'beginTurn' | 'checkpointTurn' | 'finalizeTurn', snapshot: DurableTurnSnapshot): Promise<T> {
+  return rpc<T>(command, snapshot, { jsonFallback: true });
 }
 
 export async function shutdownDbWorker(): Promise<void> {
@@ -194,17 +223,15 @@ export const dbWorker = {
    * Runs on the worker thread — does NOT block the Express event loop.
    */
   beginTurn(snapshot: DurableTurnSnapshot): Promise<void> {
-    const payload = JSON.parse(JSON.stringify(snapshot));
-    return rpc<void>('beginTurn', payload);
+    return snapshotRpc<void>('beginTurn', snapshot);
   },
 
   /**
-   * Async version of dbRepository.checkpointTurn().
-   * Typically fire-and-forget — caller does not need to await.
+   * Async version of dbRepository.checkpointTurn(), resolving the bytes it
+   * rewrote (turnPersistence.core coreCheckpointTurn) for checkpoint pacing.
    */
-  checkpointTurn(snapshot: DurableTurnSnapshot): Promise<void> {
-    const payload = JSON.parse(JSON.stringify(snapshot));
-    return rpc<void>('checkpointTurn', payload);
+  checkpointTurn(snapshot: DurableTurnSnapshot): Promise<{ payloadBytes: number | null }> {
+    return snapshotRpc<{ payloadBytes: number | null }>('checkpointTurn', snapshot);
   },
 
   /**
@@ -212,7 +239,6 @@ export const dbWorker = {
    * Must await — the caller needs the durability guarantee before broadcasting done.
    */
   finalizeTurn(snapshot: DurableTurnSnapshot): Promise<void> {
-    const payload = JSON.parse(JSON.stringify(snapshot));
-    return rpc<void>('finalizeTurn', payload);
+    return snapshotRpc<void>('finalizeTurn', snapshot);
   },
 };

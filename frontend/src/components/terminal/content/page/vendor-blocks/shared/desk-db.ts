@@ -239,7 +239,8 @@ const place=(list:{id:string}[],after:string|null|undefined)=>{if(after===undefi
  * changed rows and the database get `updatedAt = now`. Rows and views come back in position order; columns are in array order. */
 export function applyDbOps(db:Database,ops:DbEditOp[],now:number,newId:()=>string):DbEditResult{
   const threads=db.kind==='threads',skipped:DbEditResult['skipped']=[];
-  let columns=db.columns.slice(),rows=db.rows.slice(),views=db.views.slice(),applied=0,converted=0,index=0;
+  const rows=db.rows.slice();
+  let columns=db.columns.slice(),views=db.views.slice(),applied=0,converted=0,index=0;
   const note=(reason:string)=>{skipped.push({index,reason})},no=(reason:string)=>{note(reason);return false};
   const colAt=(id:string)=>columns.findIndex(c=>c.id===id),rowAt=(id:string)=>rows.findIndex(r=>r.id===id);
   const fresh=(taken:(id:string)=>boolean)=>{for(let i=0;i<20;i++){const id=newId();if(id&&!RESERVED.has(id)&&!taken(id))return id}return null};

@@ -84,7 +84,7 @@ export function MessagesLoadingPlaceholder({ nodeId, connectionId, reduceMotion 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 24, color: 'var(--term-mid)', fontSize: 'var(--fs-sm)' }}>
         <span role="status" aria-live="polite">{status}</span>
         {stillLoading && !reconnectingTo && ensureNodeMessages && (
-          <Button variant="ghost" size="sm" aria-disabled={retrying || undefined} onClick={retry}>
+          <Button variant="ghost" size="sm" aria-disabled={retrying || undefined} aria-busy={retrying || undefined} onClick={retry}>
             {retrying ? 'Retrying…' : 'Retry'}
           </Button>
         )}

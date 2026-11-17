@@ -75,7 +75,9 @@ export function RemoteUpdateNotice({ connectionId, name, onUpdated, unreachable 
       if (result) { settled.current = true; setStatus(result); setCheckError(''); }
       onUpdatedRef.current?.();
     } else if (next.diagnostic?.authentication) {
-      requestRemoteAuthentication({ key: `update:${connectionId}`, target: next.diagnostic.authentication, connectionId });
+      // The dialog opens for an update the user started here; one this view
+      // only followed asks from the notice corner.
+      requestRemoteAuthentication({ key: `update:${connectionId}`, target: next.diagnostic.authentication, connectionId }, started.current);
     }
   }, [connectionId]);
 

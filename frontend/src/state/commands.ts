@@ -37,9 +37,9 @@ export type CommandGroup = 'recent' | 'nav' | 'action' | 'workspace' | 'chat' | 
  *  components/terminal/icons.tsx (see commandIcons.tsx); this module stays
  *  JSX-free. */
 export type CommandIcon =
-  | 'agent' | 'home' | 'branches' | 'map' | 'digest' | 'workspace' | 'trash'
+  | 'agent' | 'home' | 'branches' | 'map' | 'digest' | 'pages' | 'workspace' | 'trash'
   | 'archive' | 'settings' | 'profile' | 'plus' | 'shield' | 'shield-off'
-  | 'thread' | 'weave' | 'export' | 'close' | 'chat' | 'threads' | 'clock' | 'skill' | 'ghost';
+  | 'thread' | 'weave' | 'export' | 'close' | 'pause' | 'play' | 'chat' | 'threads' | 'clock' | 'skill' | 'ghost';
 
 export interface Command {
   id: string;
@@ -185,13 +185,13 @@ export interface CompanionCommands {
  */
 function companionCommands(companion: CompanionCommands): Command[] {
   const { name, checkIns } = companion;
-  if (checkIns?.paused) return [{ id: 'companion.pause', group: 'action', icon: 'close', label: `Turn ${name} on`, run: checkIns.togglePause }];
+  if (checkIns?.paused) return [{ id: 'companion.pause', group: 'action', icon: 'play', label: `Turn ${name} on`, run: checkIns.togglePause }];
   return [
     { id: 'companion.ask', group: 'action', icon: 'chat', label: `Ask ${name}`, keys: kbd('mod', 'J'), run: companion.ask },
     { id: 'companion.today', group: 'action', icon: 'chat', label: `${name}: Today`, keys: kbd('shift', 'mod', 'J'), run: companion.today },
     ...(checkIns ? [
       { id: 'companion.check', group: 'action', icon: 'clock', label: `${name}: Check now`, run: checkIns.checkNow },
-      { id: 'companion.pause', group: 'action', icon: 'close', label: `Turn ${name} off`, run: checkIns.togglePause },
+      { id: 'companion.pause', group: 'action', icon: 'pause', label: `Turn ${name} off`, run: checkIns.togglePause },
     ] satisfies Command[] : []),
     { id: 'companion.new', group: 'action', icon: 'plus', label: `${name}: New conversation`, run: companion.newConversation },
     { id: 'companion.settings', group: 'action', icon: 'settings', label: `${name}: Settings`, run: companion.settings },
@@ -229,7 +229,7 @@ export function buildCommands(ctx: CommandContext): Command[] {
       { id: 'nav.map',        group: 'nav', icon: 'map', label: 'Open map',              keys: kbd('mod', 'M'), run: () => ctx.setPage('map') },
       ...(ctx.digestEnabled ? [{ id: 'nav.digest', group: 'nav', icon: 'digest', label: 'Open thread digest', keys: kbd('mod', 'D'), run: () => ctx.setPage('digest') } satisfies Command] : []),
       { id: 'nav.workspaces', group: 'nav', icon: 'workspace', label: 'Switch workspace…',     keys: kbd('mod', 'O'), run: () => ctx.setPage('workspaces') },
-      { id: 'nav.spaces', group: 'nav', icon: 'digest', label: 'Open Pages', run: () => ctx.setPage('spaces') },
+      { id: 'nav.spaces', group: 'nav', icon: 'pages', label: 'Open Pages', run: () => ctx.setPage('spaces') },
       ...(ctx.openAllTasks ? [{ id: 'nav.all-tasks', group: 'nav', icon: 'threads', label: 'Go to all tasks', run: ctx.openAllTasks } satisfies Command] : []),
       { id: 'nav.scheduled',  group: 'nav', icon: 'clock', label: 'Open scheduled jobs',   run: () => ctx.setPage('scheduled') },
       { id: 'nav.trash',      group: 'nav', icon: 'trash', label: 'Open trash',            run: () => ctx.setPage('trash') },

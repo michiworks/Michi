@@ -15,8 +15,7 @@ import { onMemoryChanged } from './memoryNotifications';
  * within BATCH_MS, at most BATCH_MAX ids), answers are cached per message (an
  * empty one too) for the page's lifetime, unless something changes what they
  * would say: a memory deleted, updated or put away on this machine (the
- * change feed), a past chat no longer recalled from any footer, memory
- * turned on or off. (A temporary chat asks nothing: it uses no memory, and
+ * change feed), memory turned on or off. (A temporary chat asks nothing: it uses no memory, and
  * is one from its first message on.) Opening a footer asks again, so what it lists is
  * current even when the change happened elsewhere (another backend, the
  * agent). A backend without the route is not asked again.
@@ -55,17 +54,13 @@ interface NodeCache {
 const EMPTY: readonly ReplyMemorySource[] = Object.freeze([]);
 const caches = new Map<string, NodeCache>();
 const unsupported = new Set<string>();
-/** Items forgotten on a backend (from a footer, or the change feed): an answer asked before that never brings them back. */
+/** Memories forgotten on a backend (from a footer, or the change feed): an answer asked before that never brings them back. */
 const forgottenOn = new Map<string, Set<string>>();
 
-function sourceKey(source: ReplyMemorySource): string {
-  return source.kind === 'memory' ? `m:${source.memoryId}` : `c:${source.docId}`;
-}
-
-function noteForgotten(apiBase: string, key: string): void {
-  const keys = forgottenOn.get(apiBase) ?? new Set<string>();
-  keys.add(key);
-  forgottenOn.set(apiBase, keys);
+function noteForgotten(apiBase: string, memoryId: string): void {
+  const ids = forgottenOn.get(apiBase) ?? new Set<string>();
+  ids.add(memoryId);
+  forgottenOn.set(apiBase, ids);
 }
 /** Subscribers by cache key and message id. */
 const subscribers = new Map<string, Set<() => void>>();
@@ -113,7 +108,7 @@ async function flush(cache: NodeCache): Promise<void> {
     const answered = new Map(response.messages.map((message) => [message.messageId, message.sources]));
     const forgotten = forgottenOn.get(cache.apiBase);
     for (const id of ids) {
-      const next = (answered.get(id) ?? []).filter((item) => !forgotten?.has(sourceKey(item)));
+      const next = (answered.get(id) ?? []).filter((item) => !forgotten?.has(item.memoryId));
       // An answer asked again that says the same keeps its object, so a mounted line does not render again.
       const known = cache.answers.get(id);
       if (!known || !sameSources(known, next)) cache.answers.set(id, next);
@@ -165,24 +160,18 @@ export function refreshReplySources(target: Pick<ReplySourcesTarget, 'apiBase' |
   requestReplySources(target, messageId, true);
 }
 
-/** The footer forgot one of its items (Forget, Don't recall): it leaves that message's cached answer at once, and every other reply's of that backend. */
+/** The footer forgot one of its memories: it leaves that message's cached answer at once, and every other reply's of that backend. */
 export function removeReplySource(target: Pick<ReplySourcesTarget, 'apiBase' | 'nodeId'>, messageId: string, source: ReplyMemorySource): void {
-  noteForgotten(target.apiBase, sourceKey(source));
+  noteForgotten(target.apiBase, source.memoryId);
   const cache = caches.get(cacheKey(target.apiBase, target.nodeId));
   const answer = cache?.answers.get(messageId);
   if (cache && answer) {
-    cache.answers.set(messageId, answer.filter((item) => !sameSource(item, source)));
+    cache.answers.set(messageId, answer.filter((item) => item.memoryId !== source.memoryId));
     notify(cache.apiBase, cache.nodeId, messageId);
   }
   for (const other of caches.values()) {
-    if (other.apiBase !== target.apiBase) continue;
-    if (source.kind === 'memory') dropMemory(other, source.memoryId, 'remove');
-    else dropItems(other, (item) => item.kind === 'conversation' && item.docId === source.docId, 'remove');
+    if (other.apiBase === target.apiBase) dropMemory(other, source.memoryId, 'remove');
   }
-}
-
-function sameSource(a: ReplyMemorySource, b: ReplyMemorySource): boolean {
-  return a.kind === 'memory' ? b.kind === 'memory' && a.memoryId === b.memoryId : b.kind === 'conversation' && a.docId === b.docId;
 }
 
 function sameSources(a: readonly ReplyMemorySource[], b: readonly ReplyMemorySource[]): boolean {
@@ -201,7 +190,7 @@ function dropItems(cache: NodeCache, matches: (item: ReplyMemorySource) => boole
 
 /** A memory changed: its messages lose it (deleted) or ask again (updated, put away). */
 function dropMemory(cache: NodeCache, memoryId: string, how: 'remove' | 'refetch'): void {
-  dropItems(cache, (item) => item.kind === 'memory' && item.memoryId === memoryId, how);
+  dropItems(cache, (item) => item.memoryId === memoryId, how);
 }
 
 function dropCache(cache: NodeCache): void {
@@ -220,7 +209,7 @@ function ensureInvalidation(): void {
     onMemoryChanged((event: MemoryChangedEvent) => {
       if (event.action === 'created') return;
       const removed = event.action === 'deleted' || event.action === 'rejected';
-      if (removed) noteForgotten(API_BASE_URL, `m:${event.memoryId}`);
+      if (removed) noteForgotten(API_BASE_URL, event.memoryId);
       for (const cache of caches.values()) {
         if (cache.apiBase !== API_BASE_URL) continue;
         dropMemory(cache, event.memoryId, removed ? 'remove' : 'refetch');

@@ -14,12 +14,20 @@ const seen = new Set<string>();
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach(listener => listener());
 export const getRemoteAuthentication = () => current;
+/** Every sign-in still asked for, each a notice in the corner (RemoteSignInNotices), the dialog's included. */
+export const getPendingRemoteAuthentications = () => pending;
 
+/**
+ * `manual`: the user asked for this sign-in, or is waiting on the action that
+ * needs it. Only then does the dialog open, taking focus; a request from
+ * background work (a recovery poll, a turn's credential error) waits in the
+ * notice corner with its Sign in (RemoteSignInNotices).
+ */
 export function requestRemoteAuthentication(request: RemoteAuthenticationRequest, manual = false): void {
   if ((!manual && seen.has(request.key)) || current?.key === request.key) return;
   seen.add(request.key);
   pending = [...pending.filter(item => item.key !== request.key), request];
-  if (!current) current = request;
+  if (manual && !current) current = request;
   emit();
 }
 export function closeRemoteAuthentication(): void { current = null; emit(); }
@@ -28,7 +36,7 @@ export function completeRemoteAuthentication(key: string): void {
   pending = pending.filter(item => item.key !== key); seen.delete(key); emit();
 }
 export function usePendingRemoteAuthentications() {
-  return useSyncExternalStore(callback => { listeners.add(callback); return () => { listeners.delete(callback); }; }, () => pending, () => pending);
+  return useSyncExternalStore(callback => { listeners.add(callback); return () => { listeners.delete(callback); }; }, getPendingRemoteAuthentications, getPendingRemoteAuthentications);
 }
 export function useRemoteAuthentication() {
   return useSyncExternalStore(callback => { listeners.add(callback); return () => { listeners.delete(callback); }; }, getRemoteAuthentication, getRemoteAuthentication);

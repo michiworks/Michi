@@ -52,15 +52,6 @@ describe('summarizeTools', () => {
       summarizeTools([{ id: '1', title: 'Agent', status: 'error', kind: 'tool', detail }]),
     ).toBe('SubAgent · Explore · failed');
   });
-
-  it('a lone SubAgent takes a given status word; other summaries ignore it', () => {
-    const detail = JSON.stringify({ subagent_type: 'Explore', run_in_background: true });
-    const agent: ToolCallState = { id: '1', title: 'Agent', status: 'completed', kind: 'tool', detail };
-    expect(summarizeToolsBase([agent], 'in background')).toBe('SubAgent · Explore · in background');
-    expect(summarizeToolsBase([agent])).toBe('SubAgent · Explore · completed');
-    expect(summarizeToolsBase([agent, { ...agent, id: '2' }], 'in background')).toBe('2 SubAgents · completed');
-    expect(summarizeToolsBase([t('r', 'Read package.json', 'read')], 'stopped')).toBe('Read package.json');
-  });
 });
 
 import { subagentTitleMatches } from './toolCallGrouping';
@@ -386,15 +377,18 @@ describe('step rows', () => {
     expect(stepDetail(edit)).toBe('+2 −1 · …/src/a/b.ts');
     // Kiro's edits say oldStr / newStr.
     expect(stepDetail({ ...edit, inputJson: JSON.stringify({ path: 'x.ts', oldStr: 'a', newStr: 'a\nb' }) })).toBe('+1 · x.ts');
+    // The agent's words say what a step was for: no command beside them; an edit keeps its lines.
+    expect(stepDetail(bash('4', 'git status', 'Check the merge result'))).toBeUndefined();
+    expect(stepDetail({ ...edit, inputJson: JSON.stringify({ file_path: 'x.ts', old_string: 'a', new_string: 'a\nb', __tool_use_purpose: 'Add b' }) })).toBe('+1 · x.ts');
   });
 
   it('say how a step ended: an exit code, a rerun, a denial, a stop', () => {
     const e2e = bash('1', 'npm run test:e2e', 'Run send-scroll E2E', 'failed', 'Exit code 1\nError: http://localhost:4173 is already used\nmore');
     expect(stepView(e2e, false)).toMatchObject({ lead: 'Run send-scroll E2E', rest: 'http://localhost:4173 is already used', restKind: 'error', frag: { tone: 'danger', text: `exit${NB}1` }, loud: true });
-    expect(stepView(e2e, true)).toMatchObject({ rest: 'npm run test:e2e', restKind: 'cmd', frag: { tone: 'calm', text: 'rerun passed' }, loud: false });
+    expect(stepView(e2e, true)).toMatchObject({ rest: undefined, restKind: 'cmd', frag: { tone: 'calm', text: 'rerun passed' }, loud: false });
     // Declined: it did not run, and nothing failed.
     expect(stepView(bash('2', 'rm -rf /tmp/x', 'Remove the scratch dir', 'failed', DENIED), false))
-      .toMatchObject({ lead: 'Remove the scratch dir', rest: 'rm -rf /tmp/x', restKind: 'cmd', frag: { tone: 'calm', text: 'denied' }, loud: false });
+      .toMatchObject({ lead: 'Remove the scratch dir', rest: undefined, restKind: 'cmd', frag: { tone: 'calm', text: 'denied' }, loud: false });
     expect(stepView(bash('3', 'sleep 60', 'Wait', 'interrupted'), false).frag).toEqual({ tone: 'calm', text: 'stopped' });
     const edit = file('4', 'edit', 'frontend/src/components/terminal/MessageBlock.tsx', 'failed', 'Error: old_string not found in file');
     expect(stepView(edit, false)).toMatchObject({ lead: 'Edit MessageBlock.tsx', rest: 'old_string not found in file', frag: { tone: 'danger', text: 'failed' } });

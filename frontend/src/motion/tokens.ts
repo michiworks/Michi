@@ -10,20 +10,27 @@ import type { Transition } from 'motion/react';
  * enter/exit, layout and disclosure transitions.
  */
 export const DUR = {
-  // Mirrors --t-quick … --t-slow and --t-exit.
+  // Mirrors the eleven one-shot tokens, --t-quick … --t-slow.
   quick: 0.06,
   soft: 0.1,
+  /** Menus and popovers growing in; status cross-fades. */
+  brief: 0.12,
+  /** Menus and popovers fading out, a little faster than `brief`. */
+  dismiss: 0.08,
   enter: 0.18,
   /** Exits run a little faster than their entrances. */
   exit: 0.11,
+  /** Layout moves and settles, pane tracks opening. */
+  move: 0.22,
+  /** Disclosures, drawers, sheets and panels closing. */
+  collapse: 0.16,
+  /** A scrim clears just before the panel it dims has finished collapsing. */
+  scrimExit: 0.14,
   decay: 0.36,
   slow: 0.6,
   // motion only (no CSS counterpart).
   /** Disclosure bodies: "collapse fast, expand soft". */
   expand: 0.26,
-  collapse: 0.16,
-  /** A scrim clears just before the panel it dims has finished collapsing. */
-  scrimExit: 0.14,
 } as const;
 
 type Bezier = [number, number, number, number];
@@ -38,6 +45,9 @@ export const EASE: Record<'out' | 'drawer' | 'inOut' | 'term', Bezier> = {
   /** = --t-ease. */
   term: [0.2, 0, 0.6, 1],
 };
+
+/** A curve as a CSS easing, for inline transitions and WAAPI: built from EASE, never retyped (TK-30). */
+export const cssBezier = ([a, b, c, d]: readonly number[]): string => `cubic-bezier(${a}, ${b}, ${c}, ${d})`;
 
 export const SPRING = {
   /** Small things settling with no overshoot: icons, bubbles, chips. */

@@ -1,5 +1,9 @@
 /* Michi rules for the Desk-drawn data-time blocks (deskRenderers.tsx): excerpts of agent-desk CSS they read, and fits to Michi's page. Theme tokens only. */
 
+/* countdown: the title on its own line, then the time left and its target on one baseline. */
+[data-michi-block='countdown'] { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+[data-michi-block='countdown'] > .desk-block-title { flex-basis: 100%; }
+
 /* ring: Mantine puts the label in an absolute box but leaves its alignment to the caller. */
 .michi-mantine .mantine-RingProgress-label { text-align: center; }
 

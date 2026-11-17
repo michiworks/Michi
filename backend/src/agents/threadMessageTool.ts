@@ -78,7 +78,7 @@ import {
   type ThreadWakeRecovery,
 } from "./threadMessageWakes";
 import type { AgentSession } from "./types";
-import { askUserSingleUseApproval, declinedApprovalNext, type AskUser, type SingleUseApprovalResult } from "./singleUseApproval";
+import { approvalAnswer, askUserSingleUseApproval, declinedApprovalNext, type AskUser, type SingleUseApprovalResult } from "./singleUseApproval";
 import { CodedToolError, codedErrorResult, jsonResult, type McpTextResult } from "./tools/types";
 import { startUnderRestoreLock } from "./requestedTurnStart";
 
@@ -843,7 +843,7 @@ export function askUserThreadMessageApprover(askUser: AskUser | undefined): Thre
       multiSelect: false,
     }]);
     if (!answers) return { approved: false, reason: "no_answer" };
-    const answer = (answers[question] ?? Object.values(answers)[0] ?? "").trim();
+    const answer = approvalAnswer(answers, question);
     if (answer === APPROVE_LABEL) return { approved: true };
     if (answer === STOP_ASKING_LABEL) return { approved: true, stopAsking: true };
     if (!answer || answer === DECLINE_LABEL) return { approved: false, reason: "declined" };

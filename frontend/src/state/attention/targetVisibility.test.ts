@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { resetCompanionPanelForTests } from '../companion/companionPanel';
 import { resetCompanionStoreForTests } from '../companion/companionStore';
-import { setPanePresenceDashboardVisible } from '../panePresenceVisibility';
-import { isNodeShownInWindow, isPaneShownInWindow } from './targetVisibility';
+import { setDashboardUncovered, setPanePresenceDashboardVisible } from '../panePresenceVisibility';
+import { isNodeShownInWindow, isPaneSeenInWindow, isPaneShownInWindow } from './targetVisibility';
 
 function box(left: number, width: number): DOMRect {
   return { left, right: left + width, width, top: 0, bottom: 100, height: 100, x: left, y: 0, toJSON: () => ({}) } as DOMRect;
@@ -33,6 +33,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.innerHTML = '';
   setPanePresenceDashboardVisible(false);
+  setDashboardUncovered(false);
   resetCompanionStoreForTests();
   resetCompanionPanelForTests();
 });
@@ -62,6 +63,28 @@ describe('target visibility in this window', () => {
     expect(open.filter((id) => isPaneShownInWindow(id))).toEqual(['on', 'mostly-on', 'wide']);
     setPanePresenceDashboardVisible(false);
     expect(open.filter((id) => isPaneShownInWindow(id))).toEqual([]);
+  });
+
+  it('for a saved view mark, needs the Dashboard uncovered and the pane laid out on screen', () => {
+    paintStrip([
+      { id: 'on', left: 0 },
+      { id: 'away', left: 1200 },
+      { id: 'phone-hidden', hidden: true },
+      { id: 'unmeasured', width: 0 },
+    ]);
+    const open = ['on', 'away', 'phone-hidden', 'unmeasured', 'unpainted'];
+    expect(open.filter((id) => isPaneSeenInWindow(id, open)), 'something lies over the Dashboard').toEqual([]);
+    setDashboardUncovered(true);
+    // Unlike isPaneShownInWindow, a pane not laid out yet does not count.
+    expect(open.filter((id) => isPaneSeenInWindow(id, open))).toEqual(['on']);
+    expect(isPaneSeenInWindow('on', ['away']), 'not open in the active layout').toBe(false);
+
+    const confirm = document.createElement('div');
+    confirm.setAttribute('aria-modal', 'true');
+    document.body.appendChild(confirm);
+    expect(isPaneSeenInWindow('on', open), 'a modal the shell does not own lies over it').toBe(false);
+    confirm.setAttribute('aria-hidden', 'true');
+    expect(isPaneSeenInWindow('on', open), 'the modal is on its way out').toBe(true);
   });
 
   it('counts a conversation the assistant panel shows, whatever the Dashboard shows', () => {

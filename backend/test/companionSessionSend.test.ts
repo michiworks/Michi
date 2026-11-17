@@ -37,7 +37,7 @@ import {
 import { ChatApprovalState } from '../src/agents/chatApprovalState';
 import { ChatHub, type StartRequestedSelfTurnArgs, type StartedRequestedSelfTurn } from '../src/agents/chatHub';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
-import { resolveChatPolicy } from '../src/agents/permissionPolicy';
+import { forcedChatDecision, resolveChatPolicy } from '../src/agents/permissionPolicy';
 import { __resetRuntimeDeps, configureRuntimeDeps } from '../src/agents/runtimeDeps';
 import type { ThreadMessageApprovalRequest, ThreadMessageApprovalResult, ThreadMessagingDeps } from '../src/agents/threadMessageTool';
 import type { AgentSession } from '../src/agents/types';
@@ -556,7 +556,7 @@ describe('a check-in\'s follow-up (session.send through companion_propose)', () 
     assert.equal(started.length, 0);
   });
 
-  test('D15, D19: the cms- turn is check-in material from before it starts: Michi\'s work from it, so egress and the network ask, whatever grants or trust say', async () => {
+  test('D15, D19: the cms- turn is check-in material from before it starts: Michi\'s work from it, so a dangerous egress asks, whatever grants or trust say', async () => {
     const grants = new Set(['n-ask:bash', 'n-user:bash']);
     permissionStore(grants);
     delegated('n-ask', { mode: 'ask' });
@@ -587,12 +587,15 @@ describe('a check-in\'s follow-up (session.send through companion_propose)', () 
       assert.equal(approvals.policy(owner, null, 'Write', true, 'ask', undefined, { input: { file_path: 'a.ts' } }), 'allow', '"Trust all tools for this session": local');
       assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask', '"Trust all tools for this session" never covers a push');
     }
-    // Only the one a check-in sent from its material started from someone else's content: its network reads ask too.
+    // Only the one a check-in sent from its material started from someone else's content: its card says so; its reads run.
     for (const tool of ['send_to_thread', 'mcp____michi_internal____send_to_thread']) {
       assert.equal(resolveChatPolicy(checkinOwner, null, tool, false, 'ask'), 'allow', tool);
     }
-    assert.equal(resolveChatPolicy(userOwner, null, 'WebFetch', false, 'ask', false, { input: { url: 'https://x' } }), 'allow', 'control: WebFetch');
-    assert.equal(resolveChatPolicy(checkinOwner, null, 'WebFetch', false, 'ask', false, { input: { url: 'https://x' } }), 'ask', 'WebFetch');
+    for (const owner of [userOwner, checkinOwner]) {
+      assert.equal(resolveChatPolicy(owner, null, 'WebFetch', false, 'ask', false, { input: { url: 'https://x' } }), 'allow', 'WebFetch');
+    }
+    assert.match(forcedChatDecision(checkinOwner, 'Bash', push, true)!.reason, /someone else wrote/);
+    assert.match(forcedChatDecision(userOwner, 'Bash', push, true)!.reason, /Michi is doing this work for you/);
   });
 
   test('D15: only where Michi holds the gate of a tainted turn: a Kiro or Codex conversation in Ask, or a session that opens on one, gets the card', async () => {

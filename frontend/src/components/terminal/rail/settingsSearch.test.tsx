@@ -94,15 +94,17 @@ describe('Settings search', () => {
     expect(search('empty trash')[0]).toMatchObject({ path: 'Data › Trash › Cleanup' });
   });
 
-  it('finds the block styles and glass settings under Advanced', () => {
-    expect(search('agent block style')[0]).toMatchObject({ label: 'Agent blocks', path: 'App › Appearance › Advanced' });
-    expect(search('theme.codeBlockStyle')[0]).toMatchObject({ label: 'Code blocks' });
-    expect(search('glass').map((result) => result.label)).toEqual(expect.arrayContaining(['Sidebar glass', 'Glass blur', 'Glass saturation', 'Glass defaults']));
+  it('finds the code block style and glass settings under Advanced', () => {
+    expect(search('theme.codeBlockStyle')[0]).toMatchObject({ label: 'Code blocks', path: 'App › Appearance › Advanced' });
+    const glass = search('glass').map((result) => result.label);
+    expect(glass).toEqual(expect.arrayContaining(['Sidebar glass', 'Glass defaults']));
+    expect(glass).not.toContain('Glass blur');
+    expect(glass).not.toContain('Glass saturation');
   });
 
   it('finds the settings that need window vibrancy only where the window has it', () => {
     expect(search('vibrancy').map((result) => result.label)).toEqual([]);
-    expect(searchSettings('vibrancy', ALL_PAGES, groupOf, { vibrancy: true }).map((result) => result.label)).toEqual(['Window glass', 'Sidebar material']);
+    expect(searchSettings('vibrancy', ALL_PAGES, groupOf, { vibrancy: true }).map((result) => result.label)).toEqual(['Window glass']);
   });
 
   it('only searches the pages it is given', () => {

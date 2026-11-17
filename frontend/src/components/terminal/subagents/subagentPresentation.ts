@@ -1,12 +1,11 @@
-import type { SubagentInfo, ToolCallState } from '../../../state/chatTypes';
-import type { ConversationSubagentState } from '../../../state/backgroundWork';
+import type { ChatNodeState, SubagentInfo, ToolCallState } from '../../../state/chatTypes';
+import { conversationSubagents, type ConversationSubagentState } from '../../../state/backgroundWork';
 import {
   delegationToolInfo,
   filterSubagentRelayedTools,
   isFailedStatus,
   isHiddenInternalTool,
   isRunningStatus,
-  prettifyToolTitle,
   subagentTitleMatches,
   subagentToolInfo,
   type SubagentToolInfo,
@@ -41,8 +40,8 @@ export const SUBAGENT_TONE_LABEL: Record<SubagentTone, string> = {
 
 export const SUBAGENT_TONE_COLOR: Record<SubagentTone, string> = {
   running: 'var(--term-run)',
-  completed: 'var(--term-muted)',
-  failed: 'var(--term-danger)',
+  completed: 'var(--term-digest)',
+  failed: 'var(--term-danger-text)',
   cancelled: 'var(--term-muted)',
   background: 'var(--term-mid)',
   ended: 'var(--term-muted)',
@@ -125,15 +124,6 @@ export function subagentRowTitle(subagent: SubagentInfo): { title: string; kind?
 export function delegationName(info: SubagentToolInfo, linked: readonly SubagentInfo[]): string | undefined {
   if (info.agentType) return info.agentType;
   return linked.length === 1 ? subagentOwnName(linked[0]) : undefined;
-}
-
-/** "SubAgent · Explore", or "Spawning agent crew · 3 agents" for a crew. */
-export function delegationHeading(tool: ToolCallState, info: SubagentToolInfo, linked: readonly SubagentInfo[]): string {
-  if (!info.agentType && linked.length > 1) {
-    return `${prettifyToolTitle(tool.title) || 'SubAgents'} · ${linked.length} agents`;
-  }
-  const name = delegationName(info, linked);
-  return name ? `SubAgent · ${name}` : 'SubAgent';
 }
 
 /** The one-line "what was it asked to do". */
@@ -293,8 +283,8 @@ export function visibleGroupTools(tools: readonly ToolCallState[], roster: reado
 /**
  * A lone delegation's tool (after withDelegationStatus) with its status
  * agreeing with the tone its conversation presents the agent in
- * (useDelegationStatusLabel), so the group chrome (spinner, done count,
- * failure fragment, auto-collapse) says what the status word says:
+ * (useDelegationTone), so the group's line (spinner, failure) says what the
+ * status word says:
  * failed when the conversation says it failed; running only while both
  * its own copy and the conversation say it runs, so a background agent a
  * later turn carries does not spin after its own turn, and a completed or
@@ -324,16 +314,35 @@ export function subagentsForTool(tool: ToolCallState, roster: readonly SubagentI
   return legacy ? [legacy] : [];
 }
 
-/** Roster entries no tool call in the message claims (shown under the message). */
-export function unclaimedSubagents(
-  roster: readonly SubagentInfo[] | undefined,
-  tools: readonly ToolCallState[],
-): SubagentInfo[] {
-  if (!roster?.length) return [];
-  const toolIds = new Set(tools.map((tool) => tool.id));
-  const delegationTools = tools.filter((tool) => subagentToolInfo(tool));
-  return roster.filter((entry) => {
-    if (entry.parentToolCallId) return !toolIds.has(entry.parentToolCallId);
-    return !delegationTools.some((tool) => subagentTitleMatches(tool, entry));
-  });
+/**
+ * The conversation's one inline roster: the agents its tool chips do not
+ * show in full, each once as the conversation knows it, in first-seen
+ * order. Those are background agents, which outlive the turn their chip ran
+ * in, and agents no tool call of the conversation claims (a crew's stages,
+ * a chip on a page not loaded). It sits under the newest message that
+ * reports any of them; a copy that only repeats an end recorded earlier
+ * does not move it (ConversationSubagentEntry.reportMessageId). The
+ * Background work drawer opened from it lists the same agents.
+ */
+export function inlineSubagentRoster(node: ChatNodeState): { messageId: string; subagents: SubagentInfo[] } | undefined {
+  const entries = conversationSubagents(node);
+  if (entries.length === 0) return undefined;
+  const toolIds = new Set<string>();
+  const delegationTools: ToolCallState[] = [];
+  for (const message of node.messages) {
+    for (const tool of message.toolCalls) {
+      toolIds.add(tool.id);
+      if (subagentToolInfo(tool)) delegationTools.push(tool);
+    }
+  }
+  const claimed = (entry: SubagentInfo) => (entry.parentToolCallId
+    ? toolIds.has(entry.parentToolCallId)
+    : delegationTools.some((tool) => subagentTitleMatches(tool, entry)));
+  const listed = entries.filter((entry) => entry.backgrounded || !claimed(entry.subagent));
+  const reports = new Set(listed.map((entry) => entry.reportMessageId));
+  for (let index = node.messages.length - 1; index >= 0; index -= 1) {
+    const messageId = node.messages[index].id;
+    if (reports.has(messageId)) return { messageId, subagents: listed.map((entry) => entry.subagent) };
+  }
+  return undefined;
 }

@@ -1,7 +1,7 @@
 import { getDb } from './db';
 import { getNode, listEdges, listMessages, type EdgeRow, type MessageRow } from './dbRepository';
 import { buildCompatibleResumeContext, type TranscriptMessage } from './resumeStrategy';
-import { sessionReplayHistory } from '../agents/sessionReplayView';
+import { sessionReplayTranscript } from '../agents/sessionReplayView';
 import { getCompanionSettings } from './companion/settings';
 
 export type BranchBoundaryKind = 'exact' | 'approx' | 'legacy';
@@ -149,7 +149,7 @@ export function resolveBranchBoundary(input: ResolveBranchBoundaryInput): Branch
  * fact, never its text (agents/sessionReplayView).
  */
 export function branchBoundaryTranscript(boundary: BranchBoundary): TranscriptMessage[] {
-  return sessionReplayHistory(boundary.messages, { name: () => getCompanionSettings().displayName })
+  return sessionReplayTranscript(boundary.messages, { name: () => getCompanionSettings().displayName })
     .filter((message) => message.content.trim().length > 0);
 }
 

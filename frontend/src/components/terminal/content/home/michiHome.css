@@ -271,7 +271,7 @@
 .michi-home-row__project:focus-visible,
 .michi-home-view-all:focus-visible,
 .michi-home-footer__btn:focus-visible {
-  outline: 1px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -464,20 +464,6 @@
   align-items: center;
   gap: 10px;
 }
-.michi-home-empty__meter {
-  position: relative;
-  width: 96px;
-  height: 3px;
-  overflow: hidden;
-  border-radius: var(--ui-radius-pill);
-  background: var(--term-alt);
-}
-.michi-home-empty__meter > span {
-  display: block;
-  height: 100%;
-  background: var(--term-accent);
-  transition: width var(--t-enter) var(--t-ease);
-}
 .michi-home-empty__count {
   color: var(--term-muted);
   font-family: var(--font-mono);
@@ -508,8 +494,7 @@
   .michi-home-row__confirm,
   .michi-home-row__project,
   .michi-home-view-all,
-  .michi-home-footer__btn,
-  .michi-home-empty__meter > span {
+  .michi-home-footer__btn {
     transition: none;
   }
 }

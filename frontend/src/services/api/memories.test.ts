@@ -2,18 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MemoryRecord } from 'michi-shared';
 import {
   MemoryApiError,
+  confirmMemoryGuess,
   createMemory,
   deleteMemory,
   fetchMemoryExtractionStatus,
+  fetchMemoryGuesses,
   fetchMemoryProfile,
   fetchReplyMemorySources,
-  hideRecalledTurn,
   isMemoryNotFound,
   isMemoryUnavailable,
   isMemoryVersionConflict,
   listMemories,
   markMemoryNoticeSeen,
-  removeMemoryProfileLine,
+  rejectMemoryGuess,
   resetMemories,
   saveMemorySettings,
   setMemoryExtractionPaused,
@@ -102,11 +103,12 @@ describe('memory REST client', () => {
 describe('what a reply was based on', () => {
   const BASE = 'http://localhost:3000/api';
   const MEMORY = { kind: 'memory', memoryId: 'mem-1', text: 'Use pnpm', savedBy: 'import', importSource: 'claude', at: 5, from: null };
+  // What an older backend also listed.
   const CHAT = { kind: 'conversation', docId: 7, text: 'The launch is on March 3', at: 6, from: { nodeId: 'n-2', messageId: 'u-1', title: null } };
 
-  it('asks the conversation’s backend for its messages at once, keeping well-formed sources only', async () => {
+  it('asks the conversation’s backend for its messages at once, keeping well-formed memories only', async () => {
     answer(200, { messages: [{ messageId: 'a,1', sources: [MEMORY, CHAT, { kind: 'memory' }] }, { broken: true }] });
-    expect(await fetchReplyMemorySources(BASE, 'n/1', ['a,1', 'a-2'])).toEqual({ messages: [{ messageId: 'a,1', sources: [MEMORY, CHAT] }] });
+    expect(await fetchReplyMemorySources(BASE, 'n/1', ['a,1', 'a-2'])).toEqual({ messages: [{ messageId: 'a,1', sources: [MEMORY] }] });
     const { url } = lastCall();
     expect(url.pathname).toBe('/api/nodes/n%2F1/memory-sources');
     expect(url.search).toBe('?messages=a%2C1,a-2');
@@ -114,12 +116,7 @@ describe('what a reply was based on', () => {
     expect(isMemoryUnavailable(await fetchReplyMemorySources(BASE, 'n-1', ['a-1']).catch((error: unknown) => error))).toBe(true);
   });
 
-  it('hides a past turn, and forgets a memory, on the conversation’s backend', async () => {
-    answer(200, { hidden: true });
-    await hideRecalledTurn(BASE, 7);
-    expect(lastCall().url.pathname).toBe('/api/memory-recall/hide');
-    expect(lastCall().init?.method).toBe('POST');
-    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ docId: 7 });
+  it('forgets a memory on the conversation’s backend', async () => {
     answer(204);
     await deleteMemory('mem 1', 'http://localhost:3000/api/backend-connections/remote-1/proxy');
     expect(lastCall().url.pathname).toBe('/api/backend-connections/remote-1/proxy/memories/mem%201');
@@ -145,12 +142,20 @@ describe('the profile, reset and the notice', () => {
     expect(await fetchMemoryProfile()).toBeNull();
   });
 
-  it('removes a line at the version read, and reports a profile rebuilt since', async () => {
-    answer(409, { error: 'The profile changed since it was read', code: 'version_conflict' });
-    const conflict = await removeMemoryProfileLine(1, 2).catch((error: unknown) => error);
-    expect(isMemoryVersionConflict(conflict)).toBe(true);
-    expect(lastCall().url.pathname).toMatch(/\/memory-profile\/remove-line$/);
-    expect(JSON.parse(String(lastCall().init?.body))).toEqual({ index: 1, version: 2 });
+  it('lists guesses (well-formed ones only; none on a backend without them), confirms one into a memory and rejects one', async () => {
+    const cite = { ref: 'm:1v1', id: 'mem-1', body: 'hot pot' };
+    answer(200, { guesses: [{ id: 'mg-1', body: 'Likes spicy food', createdAt: 3, cites: [cite, { broken: true }] }, { id: 'broken' }] });
+    expect(await fetchMemoryGuesses()).toEqual([{ id: 'mg-1', body: 'Likes spicy food', createdAt: 3, cites: [cite] }]);
+    expect(lastCall().url.pathname).toMatch(/\/memory-guesses$/);
+    answer(404, '<html>Cannot GET</html>');
+    expect(await fetchMemoryGuesses()).toEqual([]);
+    answer(200, { memory: RECORD });
+    expect(await confirmMemoryGuess('mg 1')).toEqual(RECORD);
+    expect(lastCall().url.pathname).toMatch(/\/memory-guesses\/mg%201\/confirm$/);
+    expect(lastCall().init?.method).toBe('POST');
+    answer(204);
+    await rejectMemoryGuess('mg-2');
+    expect(lastCall().url.pathname).toMatch(/\/memory-guesses\/mg-2\/reject$/);
   });
 
   it('confirms a reset, and records the one-time notice as seen', async () => {

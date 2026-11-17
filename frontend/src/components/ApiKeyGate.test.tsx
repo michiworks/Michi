@@ -6,6 +6,7 @@ import type { AgentStatus } from '../services/api';
 const store = vi.hoisted(() => ({
   agentStatus: null as AgentStatus | null,
   agentStatusUnreachable: false,
+  agentStatusConnectionId: 'local',
   activeProject: null as { id: string; backendConnectionId?: string } | null,
   refreshAgentStatus: vi.fn(),
 }));
@@ -89,6 +90,7 @@ describe('ApiKeyGate', () => {
   beforeEach(() => {
     store.agentStatus = status();
     store.agentStatusUnreachable = false;
+    store.agentStatusConnectionId = 'local';
     store.activeProject = null;
   });
 
@@ -182,7 +184,7 @@ describe('ApiKeyGate', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it("shows the store's unreachable notice, and Retry asks the store to load again", async () => {
+  it("shows the store's unreachable notice, and Retry asks the store to load again, in flight until it answers", async () => {
     store.agentStatus = null;
     store.agentStatusUnreachable = true;
     view = render(<ApiKeyGate />);
@@ -190,7 +192,16 @@ describe('ApiKeyGate', () => {
     expect(await screen.findByText('Backend not reachable')).toBeTruthy();
     await act(async () => { screen.getByRole('button', { name: 'Retry' }).click(); });
     expect(store.refreshAgentStatus).toHaveBeenCalledOnce();
+    // The reload clears the flag at once; the notice stays, in flight, until the reload gives up.
+    setStore({ agentStatusUnreachable: false });
+    const retrying = screen.getByRole('button', { name: 'Retrying…' });
+    expect(retrying.getAttribute('aria-disabled')).toBe('true');
+    await act(async () => { retrying.click(); });
+    expect(store.refreshAgentStatus).toHaveBeenCalledOnce();
+    setStore({ agentStatusUnreachable: true });
+    expect(screen.getByRole('button', { name: 'Retry' }).getAttribute('aria-disabled')).toBeNull();
 
+    await act(async () => { screen.getByRole('button', { name: 'Retry' }).click(); });
     setStore({ agentStatusUnreachable: false, agentStatus: status() });
     await waitFor(() => expect(screen.queryByText('Backend not reachable')).toBeNull());
   });
@@ -198,9 +209,25 @@ describe('ApiKeyGate', () => {
   it("does not block the app on a remote backend's outage", () => {
     store.agentStatus = null;
     store.agentStatusUnreachable = true;
+    store.agentStatusConnectionId = 'remote-a';
     store.activeProject = { id: 'remote:remote-a:p1', backendConnectionId: 'remote-a' };
     view = render(<ApiKeyGate />);
 
     expect(screen.queryByText('Backend not reachable')).toBeNull();
+  });
+
+  it('judges the outage by the backend the reads went to, even before a workspace is active', () => {
+    // A window reloading onto a remote workspace: the reads go to the remote
+    // while no active project has been resolved yet.
+    store.agentStatus = null;
+    store.agentStatusUnreachable = true;
+    store.agentStatusConnectionId = 'remote-a';
+    store.activeProject = null;
+    view = render(<ApiKeyGate />);
+    expect(screen.queryByText('Backend not reachable')).toBeNull();
+
+    // And a local outage is reported whatever workspace is shown.
+    setStore({ agentStatusConnectionId: 'local', activeProject: { id: 'remote:remote-a:p1', backendConnectionId: 'remote-a' } });
+    expect(screen.getByText('Backend not reachable')).toBeTruthy();
   });
 });

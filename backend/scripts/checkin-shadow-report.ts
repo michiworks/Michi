@@ -2,9 +2,9 @@
  * Maintainer's script for P6a (unification D11): the scheduler's check-in
  * lane's shadow starts beside the check-ins the coordinator started
  * (services/companion/checkinShadow.ts reconcileCheckinShadow). Before P6b
- * flips `companion:engine`, at least seven days with five briefs should
- * agree: each start matched within a tick or so, the same counts each day,
- * the brief at the same time.
+ * flips `companion:engine`, at least seven days of heartbeats and wakes
+ * should agree: each start matched within a tick or so, the same counts each
+ * day, the first heartbeat at the same time.
  *
  * Read only: it opens data.db read-only and never migrates it, so the backend
  * may keep running. It refuses to run unless MICHI_DATA_DIR names the data
@@ -59,13 +59,13 @@ function main(): number {
       return 0;
     }
     const lines = [`Check-in shadow, last ${args.days} days (tolerance ${report.toleranceMs / 1000} s)`, '',
-      'date        wake      brief     heartbeat  worker_report  brief at (shadow / coordinator)'];
+      'date        wake      heartbeat  worker_report  first heartbeat (shadow / coordinator)'];
     for (const day of report.days) {
       const pair = (kind: keyof typeof day.counts) => `${day.counts[kind].shadow}/${day.counts[kind].coordinator}`.padEnd(kind === 'worker_report' ? 15 : kind === 'heartbeat' ? 11 : 10);
-      lines.push(`${day.date}  ${pair('wake')}${pair('brief')}${pair('heartbeat')}${pair('worker_report')}${clock(day.brief.shadow)} / ${clock(day.brief.coordinator)}`);
+      lines.push(`${day.date}  ${pair('wake')}${pair('heartbeat')}${pair('worker_report')}${clock(day.firstHeartbeat.shadow)} / ${clock(day.firstHeartbeat.coordinator)}`);
     }
-    const briefs = report.days.filter((day) => day.counts.brief.coordinator > 0).length;
-    lines.push('', `matched ${report.matched}, shadow only ${report.shadowOnly.length}, coordinator only ${report.coordinatorOnly.length}; ${briefs} days with a brief`);
+    const days = report.days.filter((day) => day.counts.heartbeat.coordinator > 0).length;
+    lines.push('', `matched ${report.matched}, shadow only ${report.shadowOnly.length}, coordinator only ${report.coordinatorOnly.length}; ${days} days with a heartbeat`);
     if (report.shadowOnly.length > 0) lines.push(`  shadow only:\n    ${starts(report.shadowOnly)}`);
     if (report.coordinatorOnly.length > 0) lines.push(`  coordinator only:\n    ${starts(report.coordinatorOnly)}`);
     process.stdout.write(`${lines.join('\n')}\n`);

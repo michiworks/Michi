@@ -4,13 +4,13 @@ import { log } from "../services/logger";
 
 /**
  * Michi's product events: what Michi's tools (spawn_branches, save_artifact,
- * update_artifact, delete_artifact, show_image, set_branch_overview,
+ * update_artifact, delete_artifact, show_image, show_blocks, set_branch_overview,
  * set_follow_ups) report through a runtime session. The runtime contract
  * carries them as host events; `type` is the SSE event name the client reads
  * and `payload` is that event's data, field for field.
  *
  * Michi's tool handlers (services/mcpServer.ts) report spawn_branches,
- * artifact_saved, artifact_updated, artifact_deleted and image through the
+ * artifact_saved, artifact_updated, artifact_deleted, image and blocks through the
  * slot's session sink (the Claude, Codex and Kiro adapters give every slot one). For the
  * turn metadata, and for Pi's in-process tools, the adapter builds the host
  * event itself (the runtime layer cannot import this module). Michi decodes
@@ -25,6 +25,7 @@ export const MICHI_HOST_EVENT_TYPES = [
     "artifact_updated",
     "artifact_deleted",
     "image",
+    "blocks",
 ] as const;
 
 export type MichiHostEventType = (typeof MICHI_HOST_EVENT_TYPES)[number];
@@ -132,6 +133,10 @@ const PAYLOADS: { [T in MichiHostEventType]: (p: Fields) => ChatStreamPayloads[T
     image: (p) => typeof p.path === "string" && isOptional(p.caption, "string")
         && typeof p.mimeType === "string" && typeof p.size === "number"
         ? { path: p.path, caption: p.caption as string | undefined, mimeType: p.mimeType, size: p.size }
+        : null,
+    blocks: (p) => Array.isArray(p.blocks) && p.blocks.length > 0 && p.blocks.every(isFields)
+        && isOptional(p.title, "string") && typeof p.fallbackText === "string"
+        ? { blocks: p.blocks, ...(p.title !== undefined ? { title: p.title as string } : {}), fallbackText: p.fallbackText }
         : null,
 };
 

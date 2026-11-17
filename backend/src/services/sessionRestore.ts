@@ -4,7 +4,7 @@
  * restore (ChatManager.ensureParentSession).
  */
 import * as sessionRegistry from '../agents/sessionRegistry';
-import { sessionReplayHistory } from '../agents/sessionReplayView';
+import { sessionReplayTranscript } from '../agents/sessionReplayView';
 import { BranchBoundaryError, renderBranchBoundary, resolveBranchBoundary, type BranchBoundary } from './branchBoundary';
 import { getNode, getNodeSessionBinding, listMessages, type NodeRow } from './dbRepository';
 import { log } from './logger';
@@ -38,7 +38,7 @@ export function rebuildInheritance(input: {
     const parent = parentNodeId ? getNode(parentNodeId) : null;
     if (!parent) return { parentChatId, context: null };
     // Posted check-ins replay as one-line facts, never their text (DESIGN-v2 §2.8 T2): a branch of V too.
-    const messages = sessionReplayHistory(listMessages(parent.id, userId), { name: () => getCompanionSettings().displayName });
+    const messages = sessionReplayTranscript(listMessages(parent.id, userId), { name: () => getCompanionSettings().displayName });
     return { parentChatId, context: buildCompatibleResumeContext(messages, { nodeId: parent.id, title: parent.title ?? null }) };
 }
 

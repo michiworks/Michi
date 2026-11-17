@@ -76,6 +76,8 @@ for (const palette of ['bone', 'monokai']) test(`Pages and the Michi panel stay 
   await expect(page.locator('.meta-chat-area, button.meta-chat-pill')).toHaveCount(0);
   await expect(home.getByText('Agent updated', { exact: true })).toHaveCount(0);
   await expect(home.getByText('Agent maintained', { exact: true })).toHaveCount(0);
+  // The loading skeleton fades out as an inert copy of the column; measure once it has gone.
+  await expect(home.locator('.spaces-arrival-ghost')).toHaveCount(0);
   const column = home.locator('.area-settings__doc');
   const columnBox = await column.boundingBox();
   const homeBox = await home.boundingBox();
@@ -94,6 +96,8 @@ for (const palette of ['bone', 'monokai']) test(`Pages and the Michi panel stay 
   await page.screenshot({ animations: 'disabled', path: resolve(evidence, `assistant-${palette}.png`) });
   await panel.getByRole('button', { name: 'Close Michi', exact: true }).click();
   await expect(panel).toHaveCount(0);
+  // The panel sinks out as an inert copy; the page gets its width back once that has gone.
+  await expect(page.locator('aside[data-companion-panel]')).toHaveCount(0);
   await page.setViewportSize({ width: 940, height: 850 });
   expect(await home.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ animations: 'disabled', path: resolve(evidence, `workspace-narrow-${palette}.png`) });

@@ -1,6 +1,8 @@
-.page-view-entry{color:var(--term-accent);cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:3px}
-.page-view-entry[aria-disabled=true]{color:var(--term-dim);cursor:default;text-decoration-style:dotted}
-.page-view-entry:focus-visible,.page-view-back:focus-visible{outline: var(--focus-ring);outline-offset:3px;border-radius:3px}
+/* A link, as in prose (ST-01): its underline rests at 40% and fills in under the pointer. */
+.page-view-entry{color:var(--term-accent-text);cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-decoration-color:color-mix(in srgb,currentColor 40%,transparent);text-underline-offset:3px}
+@media(hover:hover){.page-view-entry:hover:not([aria-disabled=true]){text-decoration-color:currentColor}}
+.page-view-entry[aria-disabled=true]{color:var(--term-muted);cursor:default;text-decoration-style:dotted}
+.page-view-entry:focus-visible,.page-view-back:focus-visible{outline: var(--focus-ring);outline-offset:1px;border-radius:var(--ui-radius-sm)}
 .page-view-block-entry{margin-top:10px;font-size:var(--fs-md)}
 .page-view-content{min-width:0;min-height:0;overflow:auto;flex:1;padding:40px 24px 16px;color:var(--term-fg);font-family:var(--message-latin-font),var(--message-cjk-font)}
 .page-view-content__page[hidden]{display:none}
@@ -9,6 +11,8 @@
 .page-view-inline>header{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 12px}
 .page-view-inline>header h3{margin:0;font-size:var(--fs-lg);font-weight:600}
 .page-view-inline>header>div{display:flex;gap:12px}
-.page-view-back{border:0;background:transparent;color:var(--term-accent);font:inherit;font-size:var(--fs-md);cursor:pointer;padding:4px}
+.page-view-back{border:0;background:transparent;color:var(--term-accent-text);font:inherit;font-size:var(--fs-md);cursor:pointer;padding:4px}
 .page-view-inline .page-view-content{padding:32px 0 12px}
 @media(max-width:600px){.page-view-content{padding:40px 12px 12px}.page-view-inline>header{flex-wrap:wrap}}
+/* A finger's target is 40px tall; the words keep their line (ST-21). */
+@media(hover:none) and (pointer:coarse){.page-view-entry,.page-view-back{position:relative}.page-view-entry::after,.page-view-back::after{content:'';position:absolute;inset:-10px 0}}

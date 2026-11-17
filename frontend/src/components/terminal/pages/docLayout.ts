@@ -66,8 +66,8 @@ export const BRANCHES_LAYOUT_CSS = `
     transition: color var(--t-quick), background var(--t-quick), border-color var(--t-quick);
   }
   .branches-directory__item:hover { color: var(--term-fg); background: color-mix(in srgb, var(--term-accent-f) 30%, var(--term-surface)); }
-  .branches-directory__item:focus-visible { outline: 1px solid var(--term-accent); outline-offset: -1px; }
-  .branches-directory__item.is-current { color: var(--term-fg); border-left-color: var(--term-accent); background: color-mix(in srgb, var(--term-accent-f) 30%, var(--term-surface)); font-weight: 600; }
+  .branches-directory__item:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+  .branches-directory__item.is-current { color: var(--term-fg); border-left-color: var(--term-accent); background: color-mix(in srgb, var(--term-accent-f) 30%, var(--term-surface)); }
   @media (max-width: 860px) {
     .branches-layout { width: min(760px, calc(100% - 36px)); display: block; }
     .branches-directory { position: static; max-height: none; overflow: visible; margin-top: 20px; }

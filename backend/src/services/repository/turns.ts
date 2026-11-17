@@ -32,9 +32,10 @@ export function beginTurn(snapshot: DurableTurnSnapshot): TurnRow {
   return coreBeginTurn(mainThreadDb, snapshot) as unknown as TurnRow;
 }
 
-/** Persist a bounded partial snapshot without marking the turn terminal. */
-export function checkpointTurn(snapshot: DurableTurnSnapshot): TurnRow {
-  return coreCheckpointTurn(mainThreadDb, snapshot) as unknown as TurnRow;
+/** Persist a bounded partial snapshot without marking the turn terminal; payloadBytes as coreCheckpointTurn. */
+export function checkpointTurn(snapshot: DurableTurnSnapshot): { turn: TurnRow; payloadBytes: number | null } {
+  const { turn, payloadBytes } = coreCheckpointTurn(mainThreadDb, snapshot);
+  return { turn: turn as unknown as TurnRow, payloadBytes };
 }
 
 /** Atomically materialize the canonical terminal snapshot before SSE success. */
@@ -57,6 +58,11 @@ export function getSavedTurn(
   const message = prepareCached('SELECT * FROM messages WHERE id = ? AND node_id = ?')
     .get(turn.assistant_message_id, nodeId) as MessageRow | undefined;
   return { turn, message: message ?? null };
+}
+
+/** Whether the node has a turn receipt besides `turnId`, of any status. */
+export function hasOtherTurn(nodeId: string, turnId: string): boolean {
+  return prepareCached('SELECT 1 FROM turns WHERE node_id = ? AND turn_id <> ? LIMIT 1').get(nodeId, turnId) !== undefined;
 }
 
 /** Newest turn first: by start, then by last write when two started at once. */

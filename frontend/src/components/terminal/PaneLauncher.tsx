@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { useChatActions } from '../../state/chatStore';
 import { HoverTip } from '../ui/Popover';
 import { TOPBAR_TIP_DELAY_MS } from './TopbarIconButton';
+import { PlusIcon } from './icons';
 
 export default function PaneLauncher() {
   const { openLauncherPane } = useChatActions();
@@ -11,7 +12,7 @@ export default function PaneLauncher() {
     <HoverTip label="New pane" delayMs={TOPBAR_TIP_DELAY_MS}>
       <button
         type="button"
-        className="t-icon-btn"
+        className="t-icon-btn topbar-icon-btn"
         aria-label="New pane"
         onClick={() => {
           try {
@@ -23,12 +24,10 @@ export default function PaneLauncher() {
         style={{
           width: 26,
           height: 26,
-          fontSize: 'var(--fs-2xl)',
-          color: 'var(--term-mid)',
           WebkitAppRegion: 'no-drag',
         } as React.CSSProperties}
       >
-        +
+        <PlusIcon />
       </button>
     </HoverTip>
   );

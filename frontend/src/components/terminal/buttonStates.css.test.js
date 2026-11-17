@@ -27,6 +27,16 @@ describe('button states', () => {
     expect(rule(css('multiModel/MultiModelRunCard.css'), '.mm-card .qbtn')).toContain('border-radius: var(--ui-radius);');
   });
 
+  it('dims the hand-rolled ⋯, bordered and danger-outlined buttons while disabled, and stops their hover', () => {
+    const index = css('../../index.css');
+    for (const cls of ['.ws-action-btn', '.t-border-btn', '.t-danger-outline-btn']) {
+      const escaped = cls.replace(/[.-]/g, '\\$&');
+      const disabled = new RegExp(`${escaped}:disabled[^{]*\\{([^}]*)\\}`).exec(index)?.[1] ?? '';
+      expect(disabled, cls).toMatch(/opacity: 0\.5;[\s\S]*cursor: not-allowed;/);
+      expect(index, cls).not.toMatch(new RegExp(`${escaped}:hover \\{`));
+    }
+  });
+
   it('shows a disabled database primary (Creating…) as nothing to do yet, the way a disabled primary Button does', () => {
     const db = css('content/db/db.css');
     expect(rule(db, '.michi-db-btn:disabled')).toContain('cursor: not-allowed;');

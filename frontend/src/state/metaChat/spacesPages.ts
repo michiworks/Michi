@@ -108,7 +108,7 @@ function workspaceHomeOf(connectionId: string, pageId: string): string | undefin
  */
 export async function openSpacesPage(target: SpacesPageTarget): Promise<'opened' | 'deleted' | 'failed'> {
   const backendConnectionId = target.backendConnectionId ?? LOCAL_BACKEND_CONNECTION_ID;
-  const reveal = () => { if (target.blockId) revealPageTarget({ targetId: target.blockId, ...(target.databaseId ? { databaseId: target.databaseId } : {}) }); };
+  const reveal = () => { if (target.blockId) revealPageTarget({ targetId: target.blockId, ...(target.databaseId ? { databaseId: target.databaseId } : {}) }, { land: 'instant' }); };
   if (target.currentPageId === target.pageId) {
     // Already on screen.
     reveal();

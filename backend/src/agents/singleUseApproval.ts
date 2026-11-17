@@ -3,6 +3,15 @@ import type { McpSlot } from "michi-runtime/internal/contract/mcp";
 /** The runtime's Michi-owned question channel (ask_user). */
 export type AskUser = NonNullable<McpSlot["onAskUser"]>;
 
+/**
+ * The text answer to `question` (else to the only question asked), trimmed.
+ * An approval asks choices, never a field, so its answers are text.
+ */
+export function approvalAnswer(answers: Awaited<ReturnType<AskUser>> & object, question: string): string {
+  const answer = answers[question] ?? Object.values(answers)[0];
+  return typeof answer === "string" ? answer.trim() : "";
+}
+
 export type SingleUseApprovalResult =
   | { approved: true }
   | { approved: false; reason: "declined" | "no_answer" | "unavailable"; note?: string };
@@ -31,7 +40,7 @@ export async function askUserSingleUseApproval(askUser: AskUser | undefined, ask
     multiSelect: false,
   }]);
   if (!answers) return { approved: false, reason: "no_answer" };
-  const answer = (answers[ask.question] ?? Object.values(answers)[0] ?? "").trim();
+  const answer = approvalAnswer(answers, ask.question);
   if (answer === ask.approve.label) return { approved: true };
   if (!answer || answer === ask.decline.label) return { approved: false, reason: "declined" };
   return { approved: false, reason: "declined", note: answer.slice(0, 500) };

@@ -231,10 +231,8 @@ describe('importing the runtimes\' own memories', () => {
     assert.ok(recipe.map((part) => part.body).join(' ').includes('charlie'));
     const note = claude.filter((record) => record.importRef?.startsWith(`${project}/MEMORY.md#`));
     assert.deepEqual(note.map((record) => record.body), ['The user wants answers in Chinese.']);
-    // A note's title is its topic, shared by every part of a split one; an untitled note has none.
-    assert.equal(shared.topic, 'Shared checkout', 'the file\'s name, not its description');
-    assert.deepEqual(recipe.map((part) => part.topic), ['Live recipe', 'Live recipe']);
-    assert.equal(note[0].topic, null);
+    // An import sets no topic: a file's name names one note; the topic pass (memoryTopics.ts) files them.
+    assert.ok(claude.every((record) => record.topic === null));
     // A workspace elsewhere has none.
     assert.equal(imported('claude', 'ws-elsewhere').length, 0);
 
@@ -269,16 +267,6 @@ describe('importing the runtimes\' own memories', () => {
     assert.equal(changed.filesRead, 1);
     assert.equal(changed.updated, 1);
     assert.equal(changed.created, 0);
-  });
-
-  test('a memory imported before topics existed gets its title as topic once, and then nothing changes', () => {
-    const seen = new Map<string, string>();
-    sync(seen);
-    getDb().prepare('UPDATE memories SET topic = NULL').run();
-    const titled = memories().filter((record) => record.importRef && !record.importRef.includes('MEMORY.md#')).length;
-    const backfill = sync();
-    assert.ok(backfill.updated >= titled && titled > 0, JSON.stringify(backfill));
-    assert.equal(sync().updated, 0, 'compared as stored: no update on every pass');
   });
 
   test('a changed note updates its memory in place and a removed one takes its memory along', () => {

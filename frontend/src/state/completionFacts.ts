@@ -68,6 +68,15 @@ function leftAnswer(message: ChatMessage): boolean {
   return turnLeftAnswer(assistantPersistenceContent(message), message.blocks ?? []);
 }
 
+/**
+ * A finished reply of the kind the server counts as a completion. Its turn's
+ * status is not on the message: an errored or stopped reply that left text
+ * looks the same.
+ */
+export function isCountedReply(message: ChatMessage): boolean {
+  return message.role === 'assistant' && message.streaming !== true && leftAnswer(message);
+}
+
 /** What a `done` action says about the completion (chatTypes `done`). */
 export interface DoneCompletion {
   assistantId: string;

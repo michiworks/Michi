@@ -1,0 +1,115 @@
+/* Workspace Manage page (pages/WorkspaceManage.tsx). */
+
+/* Chats / Artifacts / Digests: underline tabs, weight unchanged when selected. */
+.manage-tab {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: -1px;
+  padding: 10px 18px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-xl);
+  font-weight: 400;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.manage-tabs--compact .manage-tab { min-height: 44px; padding: 10px 12px 12px; }
+.manage-tab[aria-selected='true'] { border-bottom-color: var(--term-accent); color: var(--term-fg); }
+.manage-tab:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.manage-tab__count { color: var(--term-muted); font-size: var(--fs-md); }
+@media (hover: hover) {
+  .manage-tab:hover { color: var(--term-fg); }
+}
+
+/* A list row whose button stretches over it, with its own buttons above. It
+   lights for the pointer and for keyboard focus, not for a click's focus. */
+.manage-row {
+  position: relative;
+  transition: background var(--t-quick) var(--t-ease);
+}
+.manage-row__open {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.manage-row__open::after { content: ''; position: absolute; inset: 0; }
+/* The row draws the ring instead. */
+.manage-row__open:focus-visible { outline: 2px solid transparent; }
+.manage-row__above { position: relative; z-index: 1; }
+@media (hover: hover) {
+  .manage-row:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+/* A tap shows its press, hover or not. */
+.manage-row:has(.manage-row__open:active) { background: var(--term-hover-bg, var(--term-alt)); }
+.manage-row:has(.manage-row__open:focus-visible) {
+  background: var(--term-hover-bg, var(--term-alt));
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+.manage-row[data-selected='true'] { background: color-mix(in srgb, var(--term-accent) 14%, transparent); }
+/* The ⋯ keeps its hit area without making the row taller; a finger-sized one on touch. */
+.manage-row__more { flex-shrink: 0; align-self: center; margin-block: -4px; }
+@media (hover: none) and (pointer: coarse) {
+  .manage-row__more { min-width: 40px; min-height: 36px; margin: -9px -8px -9px 0; }
+}
+
+/* Thread groups are split by a hairline that a lit row hides. */
+.chat-tree-block + .chat-tree-block { border-top: 1px solid color-mix(in srgb, var(--term-line) 45%, transparent); }
+@media (hover: hover) {
+  .chat-tree-block:has(.manage-row:hover),
+  .chat-tree-block:has(.manage-row:hover) + .chat-tree-block { border-top-color: transparent; }
+}
+
+/* Artifact rows: the size at rest; with a pointer, the row's actions take its
+   place while the row is hovered or holds keyboard focus. A touch screen has
+   no hover, so there they sit side by side. Only the actions take clicks: a
+   click on the size selects the row like any other. */
+.manage-artifact__end { display: grid; align-items: center; justify-items: end; pointer-events: none; }
+.manage-artifact__end > * { grid-area: 1 / 1; }
+.manage-artifact__actions { pointer-events: auto; }
+@media (hover: hover) {
+  .manage-artifact__actions { opacity: 0; pointer-events: none; }
+  .manage-row:is(:hover, :has(:focus-visible)) .manage-artifact__actions { opacity: 1; pointer-events: auto; }
+  .manage-row:is(:hover, :has(:focus-visible)) .manage-artifact__size { opacity: 0; }
+}
+@media (hover: none) {
+  .manage-artifact__end { display: flex; gap: 12px; }
+}
+
+/* Icon buttons in rows: quiet at rest, with the tone of what they do. */
+.manage-icon-btn { color: var(--term-muted); }
+.manage-icon-btn[aria-pressed='true'] > svg { color: var(--term-accent); }
+.manage-icon-btn[data-danger='true'] > svg { color: var(--term-danger-text); }
+
+/* Folders: a name that renames on click, and the dashed Add folder. */
+.manage-folder__name {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: transparent;
+  color: var(--term-fg);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.manage-folder__name { cursor: pointer; }
+@media (hover: hover) {
+  button.manage-folder__name:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+button.manage-folder__name:active { background: var(--term-hover-bg, var(--term-alt)); }
+.manage-folder__add { width: 100%; margin-top: 8px; border-style: dashed; }

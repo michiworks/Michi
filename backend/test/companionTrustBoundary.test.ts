@@ -8,16 +8,15 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  *   each posted check-in as Michi's one-line fact;
  * - T4: a message that starts with check-in or collector material (a reply
  *   to a post, an attached Today item, a targeted block a check-in wrote)
- *   is guarded on every runtime (D19): the route records it before the turn
- *   starts; the mode stays the user's, Approve for me is off, and Codex runs
- *   sandboxed and asks on escalation; a steer into V's running turn records
- *   it on that turn;
- * - T5: once a turn has read check-in material (companion_read, a page a
- *   check-in wrote, the Home's content page), what leaves the machine asks on
- *   Claude, Kiro and Pi, whatever the mode, an always-allow grant or "Trust
- *   all tools for this session" says; local work follows the mode; Michi
- *   reads and Michi-internal writes run, but nothing they write loads from or
- *   links outside Michi (w2-fix D2); a taint that cannot be read fails closed;
+ *   is recorded before the turn starts, and a steer into V's running turn
+ *   records it on that turn; a turn the user sent still follows its mode
+ *   (2026-11-13: Michi decides by who started the turn);
+ * - T5: a read of check-in material (companion_read, a page a check-in
+ *   wrote, the Home's content page) taints the turn: Michi-internal writes
+ *   run, but nothing they write loads from or links outside Michi (w2-fix
+ *   D2); in a turn Michi drives, a dangerous egress asks on Claude, Kiro and
+ *   Pi whatever the mode, an always-allow grant or "Trust all tools for this
+ *   session" says; a taint that cannot be read fails closed;
  * - w2-fix D1: what V took in stays with its live session, until it is
  *   rebuilt, cleared or compacted;
  * - the reserved prefix: no client saves, writes, loads, steers, streams,
@@ -47,6 +46,7 @@ import { configureRuntimeDeps, __resetRuntimeDeps } from '../src/agents/runtimeD
 import { ChatApprovalState } from '../src/agents/chatApprovalState';
 import { createMichiRuntimeHost } from '../src/agents/michiRuntimeHost';
 import { chatApproveForMe, chatPermissionMode, codexChatTurnPolicy, resolveChatPolicy } from '../src/agents/permissionPolicy';
+import { noteMichiStartedTurn } from '../src/services/turnGuard';
 import { assistantPurposeKey } from '../src/assistant/identity';
 import { ensureAssistant, updateAssistantSettings } from '../src/assistant/store';
 import { assistantToolsFor, type AssistantToolContext } from '../src/assistant/tools';
@@ -218,7 +218,7 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
     });
   });
 
-  describe('T4: a message that starts with check-in or collector material is guarded on every runtime', () => {
+  describe('T4: a message that starts with check-in or collector material records it before the turn starts', () => {
     test('the route records the material before the turn starts, so the turn reads it from its first event', async () => {
       const v = ensureAssistant();
       seedPost(v.nodeId);
@@ -261,14 +261,12 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       }
     });
 
-    test('with that material the turn is guarded: the mode stays, Approve for me is off, Codex runs sandboxed and asks on escalation', () => {
+    test('with that material the turn is still the user\'s: the mode decides, Approve for me stays on, Codex runs it as any turn', () => {
       const v = ensureAssistant();
       registerLiveSession(v.nodeId);
       permissions({ [v.nodeId]: 'yolo' }, true);
       const host = createMichiRuntimeHost();
       const owner = chatOwner(v.nodeId);
-      assert.equal(host.permissions.mode(owner, null), 'yolo');
-      assert.equal(host.permissions.turnGuard!(owner, null), 'none');
       for (const detail of ['checkin', 'collector'] as const) {
         const turnId = `turn-${detail}`;
         getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(v.nodeId);
@@ -278,29 +276,22 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
         // Claude, Codex and Kiro: the host's permission port; Pi: chatPermissionMode itself (PiSession).
         assert.equal(host.permissions.mode(owner, null), 'yolo', detail);
         assert.equal(chatPermissionMode(owner, null), 'yolo', detail);
-        assert.equal(host.permissions.approveForMe?.(owner, null), false, detail);
-        assert.equal(chatApproveForMe(owner, null), false, detail);
-        assert.equal(host.permissions.turnGuard!(owner, null), 'egress', detail);
-        const codex = codexChatTurnPolicy('yolo', tmpDir, host.permissions.turnGuard!(owner, null));
-        assert.deepEqual([codex.approvalPolicy, codex.sandboxPolicy.type], ['on-request', 'workspaceWrite'], `${detail}: Codex's turn is sandboxed and escalation asks`);
-        assert.equal(host.permissions.decide({ owner, ownerUserId: null, toolName: 'bash', nativeRequest: true, mode: 'yolo', call: { input: { command: ['git', 'push'] } } }), 'ask');
+        assert.equal(host.permissions.approveForMe?.(owner, null), true, detail);
+        assert.equal(chatApproveForMe(owner, null), true, detail);
+        assert.equal(host.permissions.turnGuard!(owner, null), 'none', detail);
+        assert.deepEqual(codexChatTurnPolicy('yolo', tmpDir, host.permissions.turnGuard!(owner, null)), codexChatTurnPolicy('yolo', tmpDir, 'none'), detail);
+        assert.equal(host.permissions.decide({ owner, ownerUserId: null, toolName: 'bash', nativeRequest: true, mode: 'yolo', call: { input: { command: ['git', 'push'] } } }), 'allow');
       }
-      // The next turn on the same live session still holds it (w2-fix D1); once the session no longer does, it is unguarded.
+      // The next turn on the same live session still records it (w2-fix D1): a conversation it starts carries it.
       getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(v.nodeId);
       activeTurnRow(v.nodeId, 'turn-next', 'a-next');
-      assert.equal(host.permissions.turnGuard!(owner, null), 'egress', 'carried to the next turn');
-      assert.equal(companionTaintOf({ nodeId: v.nodeId, turnId: 'turn-next' }), 'collector', 'and recorded on it, as the last turn took it in');
-      // A /clear or compaction between turns: the turn after it is unguarded again.
-      getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(v.nodeId);
-      clearCarriedCompanionTaint(v.nodeId);
-      activeTurnRow(v.nodeId, 'turn-cleared', 'a-cleared');
       assert.equal(host.permissions.turnGuard!(owner, null), 'none');
-      assert.equal(chatApproveForMe(owner, null), true);
+      assert.equal(companionTaintOf({ nodeId: v.nodeId, turnId: 'turn-next' }), 'collector', 'recorded on it, as the last turn took it in');
     });
   });
 
-  describe('T5: after a read of check-in material what leaves the machine asks, grants or not', () => {
-    test('companion_read and a page a check-in wrote taint the turn; then Claude, Kiro and Pi ask before a push, local work follows the mode, Michi reads still run', async () => {
+  describe('T5: a read of check-in material taints the turn; a dangerous egress asks only in Michi\'s work', () => {
+    test('companion_read and a page a check-in wrote taint the turn; the user\'s turn still follows its mode on Claude, Kiro and Pi', async () => {
       const v = ensureAssistant();
       const grants = permissions({ [v.nodeId]: 'trust' });
       const owner = chatOwner(v.nodeId);
@@ -332,26 +323,25 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       assert.equal(read.isError, undefined, JSON.stringify(read));
       assert.equal(companionTaintOf({ nodeId: v.nodeId, turnId: 'turn-read' }), 'checkin');
 
-      for (const [tool, input] of egress) {
+      for (const [tool, input] of [...egress, ...local]) {
         // Claude: the coordinator over the port with the turn's mode; Kiro: the port with the mode it reads; Pi: the coordinator.
-        assert.equal(approvals.policy(owner, null, tool, true, 'trust', undefined, { input }), 'ask', `${tool}: Claude/Pi`);
-        assert.equal(host.permissions.decide({ owner, ownerUserId: null, toolName: tool, nativeRequest: true, mode: host.permissions.mode(owner, null), call: { input } }), 'ask', `${tool}: Kiro`);
-        assert.equal(resolveChatPolicy(owner, null, tool, true, 'yolo', false, { input }), 'ask', `${tool}: whatever the mode`);
-        assert.ok(host.permissions.forced!({ owner, ownerUserId: null, toolName: tool, nativeRequest: true, call: { input } })?.reason, `${tool}: says why`);
+        assert.equal(approvals.policy(owner, null, tool, true, 'trust', undefined, { input }), 'allow', `${tool}: Claude/Pi`);
+        assert.equal(host.permissions.decide({ owner, ownerUserId: null, toolName: tool, nativeRequest: true, mode: host.permissions.mode(owner, null), call: { input } }), 'allow', `${tool}: Kiro`);
+        assert.equal(host.permissions.forced!({ owner, ownerUserId: null, toolName: tool, nativeRequest: true, call: { input } }), null, `${tool}: nothing forced`);
       }
-      for (const [tool, input] of local) assert.equal(approvals.policy(owner, null, tool, true, 'trust', undefined, { input }), 'allow', `${tool}: the mode`);
       // Still running in Trust: local reads, Michi's reads and writes, and work whose turn the outside content travels to.
       for (const tool of ['Read', 'Grep', 'mcp____michi_internal____read_page', '@michi/edit_page', 'list_tasks', 'companion_items',
         'mcp____michi_internal____start_conversation', '@michi/send_to_thread', 'mcp____michi_internal____create_scheduled_job', 'web_search']) {
         assert.equal(resolveChatPolicy(owner, null, tool, true, 'trust'), 'allow', tool);
       }
-      assert.equal(resolveChatPolicy(owner, null, 'open_url', false, 'trust'), 'ask', 'open_url leaves the machine');
+      assert.equal(resolveChatPolicy(owner, null, 'open_url', false, 'trust'), 'allow', 'open_url, by the mode');
     });
 
-    test('on Kiro every Michi tool reaches the policy by name (W4 failure 2): its self-gated tools run unasked in a tainted turn, so session_send asks only its own question; others ask once, by name', async () => {
+    test('on Kiro every Michi tool reaches the policy by name (W4 failure 2): its self-gated tools run unasked in Michi\'s work, so session_send asks only its own question; a push asks once, by name', async () => {
       const v = ensureAssistant();
       permissions({ [v.nodeId]: 'trust' });
       activeTurnRow(v.nodeId, 'turn-kiro', 'a-kiro');
+      noteMichiStartedTurn(v.nodeId, 'turn-kiro');
       recordCompanionTaint({ nodeId: v.nodeId, turnId: 'turn-kiro' }, 'companion_read', 'checkin');
       const options = [{ optionId: 'accept', name: 'Allow', kind: 'allow_once' }, { optionId: 'reject', name: 'Deny', kind: 'reject_once' }];
       // As kiro-cli titles a Michi MCP call (W4 shot 36: "@michi/companion_session_send"), or names it by its v3 tool id.
@@ -382,11 +372,10 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       for await (const event of session.send('go')) if (event.kind === 'permission_request') prompts.push(event.title);
       assert.deepEqual(Object.fromEntries(requests.map(([name], index) => [name, answers.get(index + 1) ?? 'asked'])), {
         companion_item: 'accept', companion_session_send: 'accept', companion_set_name: 'accept', companion_items: 'accept',
-        // D19: a conversation start is local; a command Michi can read runs by the mode; one it cannot, or a push, asks.
-        start_conversation: 'accept', shell: 'asked', 'shell with its command': 'accept', push: 'asked',
+        // D19: in Michi's work everything runs but a dangerous egress: a conversation start, a command Michi can or cannot read; a push asks.
+        start_conversation: 'accept', shell: 'accept', 'shell with its command': 'accept', push: 'asked',
       });
-      // A v3 shell request names no grant: its title is the prompt.
-      assert.deepEqual(prompts, ['echo ok', 'git push']);
+      assert.deepEqual(prompts, ['git push']);
     });
 
     test('companion_read and the collectors\' reads taint their turn too', async () => {
@@ -644,13 +633,13 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
 
       // A reply to a post holds it from its start, and the session's next turn too (D1).
       const reply = await send({ metaAgentContext: { pageId: null, refs: [{ kind: 'post', messageId: welcome }] } });
-      // D19: the mode stays the user's; what leaves the machine asks (permissionPolicy forcedChatDecision).
+      // The mode stays the user's: it is the user's turn (permissionPolicy).
       assert.deepEqual([reply.taint, reply.mode, reply.companionTurn], ['checkin', 'trust', { startTaint: 'checkin' }]);
       const next = await send();
       assert.deepEqual([next.taint, next.mode, next.companionTurn], ['checkin', 'trust', { carriedTaint: 'checkin' }]);
     });
 
-    test('every chat carries it (w3-fix D17): another chat\'s later turns ask, hold no Approve for me and record it, until its session is rebuilt, cleared or compacted', async (t) => {
+    test('every chat carries it (w3-fix D17): another chat\'s later turns record it, until its session is rebuilt, cleared or compacted; the user\'s turns keep their mode', async (t) => {
       ensureAssistant();
       saveWorkspace({ id: 'ws-a', name: 'A', cwd: tmpDir, created_at: 1, updated_at: 1, settings: null });
       const nodeId = 'n-ordinary';
@@ -679,10 +668,10 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       const second = nextTurn();
       assert.equal(activeCompanionTaint(nodeId), 'checkin', 'the next turn on the same session');
       assert.equal(chatPermissionMode(owner, null), 'ask');
-      assert.equal(chatApproveForMe(owner, null), false);
-      assert.deepEqual(kiro.policyPresetsFor(owner, null), [], 'Kiro opens or reopens the session without the classifier preset');
+      assert.equal(chatApproveForMe(owner, null), true, 'the user\'s turn');
+      assert.deepEqual(kiro.policyPresetsFor(owner, null), ['approve-for-me']);
       grants.add(`${nodeId}:bash`);
-      for (const mode of ['ask', 'trust', 'yolo'] as const) assert.equal(resolveChatPolicy(owner, null, 'Bash', true, mode), 'ask', mode);
+      for (const mode of ['ask', 'trust', 'yolo'] as const) assert.equal(resolveChatPolicy(owner, null, 'Bash', true, mode), 'allow', mode);
       assert.deepEqual(getTurnTrust({ nodeId, turnId: second }).sources.map((source) => source.tool), ['companion_earlier_turn'],
         'recorded on the turn itself, so memory extraction and Memory writes see it');
 
@@ -818,7 +807,7 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       }
     });
 
-    test('"Trust all tools for this session" never covers what leaves the machine in a tainted turn, given before it or during it (E-review #1, D19)', () => {
+    test('"Trust all tools for this session" never covers a dangerous egress in Michi\'s work, given before it or during it (E-review #1, D19)', () => {
       const v = ensureAssistant();
       permissions({ [v.nodeId]: 'ask' });
       const owner = chatOwner(v.nodeId);
@@ -829,22 +818,18 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       activeTurnRow(v.nodeId, 'turn-st', 'a-st');
       assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask');
       assert.equal(approvals.accept('allow_session', owner, 'Bash', null), true);
-      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'allow', 'session trust before any material');
+      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'allow', 'the user\'s turn: session trust covers it');
       recordCompanionTaint({ nodeId: v.nodeId, turnId: 'turn-st' }, 'companion_read', 'checkin');
-      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask', 'a push');
-      assert.equal(approvals.policy(owner, null, 'mcp__github__create_issue', true, 'ask'), 'ask');
-      assert.equal(approvals.policy(owner, null, 'Edit', true, 'ask', undefined, { input: { file_path: 'a.ts' } }), 'allow', 'local work: session trust holds');
-      assert.equal(approvals.accept('allow_session', owner, 'Bash', null), true, 'the answer still approves the call it was asked for');
-      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask', 'but never the next push');
-      // The next turn on the same session holds it too (D1).
+      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'allow', 'whatever it read');
+      // A turn Michi drives on the same session.
       getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(v.nodeId);
       activeTurnRow(v.nodeId, 'turn-st2', 'a-st2');
-      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask');
-      // Cleared between turns (the routes refuse /clear during one), session trust covers it again.
-      getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(v.nodeId);
-      clearCarriedCompanionTaint(v.nodeId);
-      activeTurnRow(v.nodeId, 'turn-st3', 'a-st3');
-      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'allow');
+      noteMichiStartedTurn(v.nodeId, 'turn-st2');
+      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask', 'a push');
+      assert.equal(approvals.policy(owner, null, 'mcp__slack__post_message', true, 'ask'), 'ask', 'a message');
+      assert.equal(approvals.policy(owner, null, 'Edit', true, 'ask', undefined, { input: { file_path: 'a.ts' } }), 'allow', 'local work');
+      assert.equal(approvals.accept('allow_session', owner, 'Bash', null), true, 'the answer still approves the call it was asked for');
+      assert.equal(approvals.policy(owner, null, 'Bash', true, 'ask', undefined, push), 'ask', 'but never the next push');
     });
 
     test('a taint that cannot be read fails closed: the turn asks; with no database open there is none (E-review #3)', () => {
@@ -856,7 +841,7 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       getDb().exec('ALTER TABLE turn_trust RENAME TO turn_trust_unreadable');
       assert.equal(activeCompanionTaint(v.nodeId), 'checkin');
       assert.equal(chatPermissionMode(owner, null), 'yolo', 'the mode stays (D19)');
-      assert.equal(resolveChatPolicy(owner, null, 'Bash', true, 'yolo', false, { input: { command: 'git push' } }), 'ask', 'what leaves the machine asks');
+      assert.equal(resolveChatPolicy(owner, null, 'Bash', true, 'yolo', false, { input: { command: 'git push' } }), 'ask', 'unreadable counts as Michi\'s work: a push asks');
       assert.equal(resolveChatPolicy(owner, null, 'Bash', true, 'yolo', false, { input: { command: 'npm test' } }), 'allow');
       getDb().exec('ALTER TABLE turn_trust_unreadable RENAME TO turn_trust');
       assert.equal(activeCompanionTaint(v.nodeId), null);
@@ -882,8 +867,8 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
     });
   });
 
-  describe('w3-fix D15, D19: a check-in\'s direct send is Michi\'s work from check-in material: leaving the machine and the network ask', () => {
-    test('its cms- turn runs local work, asks for egress and network reads whatever grants or session trust say; the next turn asks for egress', () => {
+  describe('w3-fix D15, D19: a check-in\'s direct send is Michi\'s work from check-in material: a dangerous egress asks', () => {
+    test('its cms- turn runs everything but a dangerous egress, whatever grants or session trust say; the user\'s next turn follows its mode', () => {
       ensureAssistant();
       saveWorkspace({ id: 'ws-w', name: 'W', cwd: tmpDir, created_at: 1, updated_at: 1, settings: null });
       const worker = 'n-worker';
@@ -893,11 +878,10 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       const grants = permissions({ [worker]: 'ask' });
       const owner = chatOwner(worker);
       const approvals = new ChatApprovalState();
-      const egress: Array<[string, Record<string, unknown>]> = [['Bash', { command: 'git push' }], ['bash', { command: 'gh pr create --fill' }], ['mcp__slack__post_message', {}],
-        ['@michi/open_url', { url: 'https://x' }]];
-      const network: Array<[string, Record<string, unknown>]> = [['WebFetch', { url: 'https://x' }], ['WebSearch', {}], ['fetch_content', {}],
-        ['Bash', { command: 'curl https://x' }], ['Read', { file_path: '/home/u/.aws/credentials' }]];
-      const local: Array<[string, Record<string, unknown>]> = [['Bash', { command: 'npm test' }], ['edit', { path: 'a.ts' }], ['Write', { file_path: 'b.ts' }],
+      const dangerous: Array<[string, Record<string, unknown>]> = [['Bash', { command: 'git push' }], ['bash', { command: 'gh pr create --fill' }], ['mcp__slack__post_message', {}]];
+      const runs: Array<[string, Record<string, unknown>]> = [['@michi/open_url', { url: 'https://x' }], ['WebFetch', { url: 'https://x' }], ['WebSearch', {}],
+        ['fetch_content', {}], ['Bash', { command: 'curl https://x' }], ['Read', { file_path: '/home/u/.aws/credentials' }],
+        ['Bash', { command: 'npm test' }], ['edit', { path: 'a.ts' }], ['Write', { file_path: 'b.ts' }],
         ['@michi/start_conversation', {}], ['send_to_thread', {}], ['memory_save', {}], ['read', {}], ['Grep', {}]];
 
       // The check-in's follow-up: its cms- turn is recorded as check-in material before it starts (D15, sessionSend.ts),
@@ -911,17 +895,17 @@ describe('the trust boundary between a check-in and V (DESIGN-v2 §2.8)', () => 
       approvals.accept('allow_session', owner, 'edit', null);
       assert.equal(chatPermissionMode(owner, null), 'ask', 'the user\'s mode');
       for (const nativeRequest of [true, false]) {
-        for (const [tool, input] of [...egress, ...network]) {
+        for (const [tool, input] of dangerous) {
           assert.equal(approvals.policy(owner, null, tool, nativeRequest, 'ask', undefined, { input }), 'ask', `${tool} ${JSON.stringify(input)} native=${nativeRequest}`);
         }
-        for (const [tool, input] of local) {
+        for (const [tool, input] of runs) {
           assert.equal(approvals.policy(owner, null, tool, nativeRequest, 'ask', undefined, { input }), 'allow', `${tool} native=${nativeRequest}`);
         }
       }
-      // The worker's next turn on the same session: what it was sent is still in its context (D17): egress still asks.
+      // The worker's next turn, the user's own: what it was sent is still in its context (D17), and the mode decides.
       getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(worker);
       activeTurnRow(worker, 'a-after', 'asst-after');
-      for (const [tool, input] of egress) assert.equal(approvals.policy(owner, null, tool, true, 'yolo', undefined, { input }), 'ask', `next turn: ${tool}`);
+      for (const [tool, input] of dangerous) assert.equal(approvals.policy(owner, null, tool, true, 'yolo', undefined, { input }), 'allow', `next turn: ${tool}`);
       assert.equal(turnTaintOf({ nodeId: worker, turnId: 'a-after' }), 'checkin', 'and its copy says check-in material');
     });
   });

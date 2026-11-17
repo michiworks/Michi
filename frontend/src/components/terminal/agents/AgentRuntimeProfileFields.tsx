@@ -3,6 +3,7 @@ import { changeRuntimeProfile, resolveProfileReasoning, supportedProfileReasonin
 import { filterAvailableRuntimes } from '../../../lib/runtimeVisibility';
 import type { RuntimeReasoning } from 'michi-shared';
 import type { AgentCapabilities, AgentModelInfo, AgentProviderInfo, AgentRuntimeOption } from '../../../services/api/agentRuntime';
+import { useFieldError, type FieldErrorProps } from './useFieldError';
 
 export interface RuntimeProfileDraft {
   runtimeId: string;
@@ -81,8 +82,8 @@ export default function AgentRuntimeProfileFields({ value, onChange, prefix = 'r
     <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
       {retry && <RuntimeOptionsError onRetry={retry} />}
       <Field label="Runtime" error={errors.runtimeId}>
-        {catalog ? (
-          <select className="ui-select" aria-label={`${prefix} runtime`} value={value.runtimeId}
+        {(control) => catalog ? (
+          <select className="ui-select" aria-label={`${prefix} runtime`} {...control} value={value.runtimeId}
             onChange={(event) => onChange(changeRuntimeProfile(value, 'runtimeId', event.target.value))}>
             <option value="">choose runtime…</option>
             {runtimes.map((runtime) => (
@@ -91,12 +92,12 @@ export default function AgentRuntimeProfileFields({ value, onChange, prefix = 'r
             <SavedOption id={value.runtimeId} options={runtimes} hidden />
           </select>
         ) : (
-          <input className="ui-input" aria-label={`${prefix} runtime`} value={value.runtimeId} onChange={(event) => onChange(changeRuntimeProfile(value, 'runtimeId', event.target.value))} placeholder="pi, claude, kiro, codex" />
+          <input className="ui-input" aria-label={`${prefix} runtime`} {...control} value={value.runtimeId} onChange={(event) => onChange(changeRuntimeProfile(value, 'runtimeId', event.target.value))} placeholder="pi, claude, kiro, codex" />
         )}
       </Field>
       <Field label="Provider" error={errors.providerId}>
-        {providers && providers.length > 0 ? (
-          <select className="ui-select" aria-label={`${prefix} provider`} value={value.providerId}
+        {(control) => providers && providers.length > 0 ? (
+          <select className="ui-select" aria-label={`${prefix} provider`} {...control} value={value.providerId}
             onChange={(event) => onChange(changeRuntimeProfile(value, 'providerId', event.target.value))}>
             <option value="">choose provider…</option>
             {providers.map((provider) => (
@@ -105,12 +106,12 @@ export default function AgentRuntimeProfileFields({ value, onChange, prefix = 'r
             <SavedOption id={value.providerId} options={providers} />
           </select>
         ) : (
-          <input className="ui-input" aria-label={`${prefix} provider`} value={value.providerId} onChange={(event) => onChange(changeRuntimeProfile(value, 'providerId', event.target.value))} placeholder={catalog && value.runtimeId ? 'runtime-managed' : 'optional'} />
+          <input className="ui-input" aria-label={`${prefix} provider`} {...control} value={value.providerId} onChange={(event) => onChange(changeRuntimeProfile(value, 'providerId', event.target.value))} placeholder={catalog && value.runtimeId ? 'runtime-managed' : 'optional'} />
         )}
       </Field>
       <Field label="Model" error={errors.modelId}>
-        {models && models.length > 0 ? (
-          <select className="ui-select" aria-label={`${prefix} model`} value={value.modelId} onChange={(event) => onChange(changeRuntimeProfile(value, 'modelId', event.target.value))}>
+        {(control) => models && models.length > 0 ? (
+          <select className="ui-select" aria-label={`${prefix} model`} {...control} value={value.modelId} onChange={(event) => onChange(changeRuntimeProfile(value, 'modelId', event.target.value))}>
             <option value="">runtime default</option>
             {models.map((model) => (
               <option key={model.id} value={model.id}>{model.label ?? model.id}</option>
@@ -118,30 +119,33 @@ export default function AgentRuntimeProfileFields({ value, onChange, prefix = 'r
             <SavedOption id={value.modelId} options={models} />
           </select>
         ) : (
-          <input className="ui-input" aria-label={`${prefix} model`} value={value.modelId} onChange={(event) => onChange(changeRuntimeProfile(value, 'modelId', event.target.value))} placeholder="optional model ID" />
+          <input className="ui-input" aria-label={`${prefix} model`} {...control} value={value.modelId} onChange={(event) => onChange(changeRuntimeProfile(value, 'modelId', event.target.value))} placeholder="optional model ID" />
         )}
       </Field>
       <Field label="Reasoning" error={errors.reasoning}>
-        <select className="ui-select" aria-label={`${prefix} reasoning`} value={value.reasoning} onChange={(event) => set('reasoning', event.target.value as RuntimeProfileDraft['reasoning'])}>
-          <option value="">runtime default</option>
-          {value.reasoning && !supportedProfileReasoning(value.reasoning, reasoningLevels) && <option value={value.reasoning} disabled>{value.reasoning} (unavailable)</option>}
-          {reasoningLevels.map((reasoning) => <option key={reasoning} value={reasoning}>{reasoning}</option>)}
-        </select>
-        {value.reasoning && !supportedProfileReasoning(value.reasoning, reasoningLevels) && <span role="alert">This reasoning level is unavailable for the selected model. Choose runtime default or a supported level.</span>}
+        {(control) => <>
+          <select className="ui-select" aria-label={`${prefix} reasoning`} {...control} value={value.reasoning} onChange={(event) => set('reasoning', event.target.value as RuntimeProfileDraft['reasoning'])}>
+            <option value="">runtime default</option>
+            {value.reasoning && !supportedProfileReasoning(value.reasoning, reasoningLevels) && <option value={value.reasoning} disabled>{value.reasoning} (unavailable)</option>}
+            {reasoningLevels.map((reasoning) => <option key={reasoning} value={reasoning}>{reasoning}</option>)}
+          </select>
+          {value.reasoning && !supportedProfileReasoning(value.reasoning, reasoningLevels) && <span role="alert">This reasoning level is unavailable for the selected model. Choose runtime default or a supported level.</span>}
+        </>}
       </Field>
       <Field label="Mode" error={errors.modeId}>
-        <input className="ui-input" aria-label={`${prefix} mode`} value={value.modeId} onChange={(event) => set('modeId', event.target.value)} placeholder="optional mode" />
+        {(control) => <input className="ui-input" aria-label={`${prefix} mode`} {...control} value={value.modeId} onChange={(event) => set('modeId', event.target.value)} placeholder="optional mode" />}
       </Field>
     </div>
   );
 }
 
-function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) {
+function Field({ label, error, children }: { label: string; error?: string; children: (control: FieldErrorProps) => React.ReactNode }) {
+  const { control, line } = useFieldError(error);
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase' }}>
       {label}
-      {children}
-      {error && <span role="alert" style={{ color: 'var(--danger, var(--term-danger))', fontSize: 'var(--fs-xs)', letterSpacing: 0, textTransform: 'none' }}>{error}</span>}
+      {children(control)}
+      {line}
     </label>
   );
 }

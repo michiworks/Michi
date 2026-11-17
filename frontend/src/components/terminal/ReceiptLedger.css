@@ -1,5 +1,6 @@
 /* What a reply changed, under it: one bordered list, a row per thing.
-   The rows share the list's columns (subgrid), so verbs and Views line up. */
+   The rows, and the boxes they grow in with (RevealList), share the list's
+   columns (subgrid), so verbs and Views line up. */
 .receipt-ledger {
   max-width: min(100%, 640px);
   margin: 8px 0 4px;
@@ -11,7 +12,6 @@
   column-gap: 10px;
   margin: 0;
   padding: 0;
-  list-style: none;
   border: 1px solid var(--term-line);
   border-radius: var(--ui-radius);
   font-family: var(--ui-font);
@@ -26,7 +26,7 @@
   min-height: 30px;
   padding: 5px 8px 5px 10px;
 }
-.receipt-row + .receipt-row { border-top: 1px solid var(--term-line); }
+.receipt-ledger__list > * + * .receipt-row { border-top: 1px solid var(--term-line); }
 .receipt-row__glyph { grid-column: 1; color: var(--term-digest); }
 .receipt-row__verb { grid-column: 2; color: var(--term-muted); }
 .receipt-row__object {

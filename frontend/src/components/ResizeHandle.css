@@ -1,0 +1,36 @@
+/* A resize edge: an 8px separator on the side of what it resizes. Its grip
+   shows for a mouse over it, for keyboard focus and while it drags; the
+   states are CSS, so a pointer crossing a streaming pane's edge renders
+   nothing (ST-27). */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  background: transparent;
+}
+.resize-handle[data-side='right'] { right: 0; }
+.resize-handle[data-side='left'] { left: 0; }
+.resize-handle__grip {
+  width: 3px;
+  height: 36px;
+  border-radius: var(--ui-radius-pill);
+  background: var(--term-faint);
+  opacity: 0;
+  transition: opacity var(--t-soft) var(--t-ease);
+  pointer-events: none;
+}
+@media (hover: hover) {
+  .resize-handle:hover .resize-handle__grip { opacity: 1; }
+}
+.resize-handle:focus-visible .resize-handle__grip,
+.resize-handle[data-dragging] .resize-handle__grip { opacity: 1; }
+.resize-handle:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}

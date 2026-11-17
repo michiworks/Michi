@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Pencil } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { EditIcon } from '../../../icons';
 import type { MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
 import { threadItemProps } from '../../threads/threadItem';
 import { CellEditor } from '../CellEditor';
@@ -11,6 +12,7 @@ import { addRowOp, cellEditLabel, cellEditOps } from '../dbOps';
 import { GroupHeading, groupSums, rowTitle, } from './RowBits';
 import type { DbViewProps } from './viewTypes';
 import { isImeComposing } from '../../../../../lib/ime';
+import { menuOpenKey } from '../../../../ContextMenu';
 
 type Spot = { row: string; col: string };
 const spotKey = (s: Spot) => `${s.row}\n${s.col}`;
@@ -142,7 +144,7 @@ export function TableView(props: DbViewProps & { onFilterPanel?: () => void }) {
                       setMenu((open) => (open?.column.id === c.id ? null : { column: c, anchor }));
                     }}
                   >
-                    <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
+                    <Icon aria-hidden="true" />
                     <span className="michi-db-th__name">{columnName(db, c)}</span>
                   </button>
                 </th>
@@ -191,8 +193,9 @@ export function TableView(props: DbViewProps & { onFilterPanel?: () => void }) {
       {!isThreadsDb(db) && !db.merged && (
         <button type="button" className="michi-db-new-row" onClick={addRow}>+ New row</button>
       )}
-      {menu && (
+      <AnimatePresence>{menu && (
         <ColumnMenu
+          key={menuOpenKey(menu)}
           db={db}
           view={view}
           column={menu.column}
@@ -201,7 +204,7 @@ export function TableView(props: DbViewProps & { onFilterPanel?: () => void }) {
           onClose={() => setMenu(null)}
           onFilter={onFilterPanel}
         />
-      )}
+      )}</AnimatePresence>
     </div>
   );
 }
@@ -212,14 +215,16 @@ function SelectAll({ checked, mixed, onChange }: { checked: boolean; mixed: bool
     if (ref.current) ref.current.indeterminate = mixed;
   }, [mixed]);
   return (
-    <input
-      ref={ref}
-      type="checkbox"
-      className="michi-db-check"
-      aria-label="Select all"
-      checked={checked}
-      onChange={(event) => onChange(event.currentTarget.checked)}
-    />
+    <label className="michi-db-check-hit">
+      <input
+        ref={ref}
+        type="checkbox"
+        className="michi-db-check"
+        aria-label="Select all"
+        checked={checked}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+    </label>
   );
 }
 
@@ -253,15 +258,17 @@ function TableRow({
   return (
     <tr className="michi-db-row michi-item t-reveal-host" {...threadItemProps(row.id, handlers, 'row')}>
       <td className="michi-db-td michi-db-td--check">
-        <input
-          type="checkbox"
-          className="michi-db-check"
-          aria-label={`Select ${rowTitle(db, row)}`}
-          checked={selected}
-          onChange={() => handlers.onItemToggle(row.id)}
-          onClick={(event) => event.stopPropagation()}
-        />
-
+        {/* The whole cell selects the row; a click there does not also open it. */}
+        <label className="michi-db-check-hit" onClick={(event) => event.stopPropagation()}>
+          <input
+            type="checkbox"
+            className="michi-db-check"
+            aria-label={`Select ${rowTitle(db, row)}`}
+            checked={selected}
+            onChange={() => handlers.onItemToggle(row.id)}
+            onClick={(event) => event.stopPropagation()}
+          />
+        </label>
       </td>
       {columns.map((c) => (
         <Cell
@@ -379,7 +386,7 @@ function Cell({
                 onEdit();
               }}
             >
-              <Pencil size={11} strokeWidth={1.8} aria-hidden="true" />
+              <EditIcon size="sm" aria-hidden="true" />
               Rename
             </button>
           )}

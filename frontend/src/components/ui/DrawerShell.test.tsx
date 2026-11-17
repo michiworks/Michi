@@ -1,4 +1,5 @@
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { act, createEvent, fireEvent, render, screen } from '@testing-library/react';
 import { MotionConfig } from 'motion/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -57,6 +58,15 @@ describe('DrawerShell presence', () => {
     expect(presence).toHaveBeenLastCalledWith(false);
   });
 
+  it("leaves no closing panel or scrim when it closes with motion='instant' (a destination opened from it)", () => {
+    const drawer = (open: boolean, motion: 'standard' | 'instant') => <DrawerShell open={open} motion={motion} onClose={vi.fn()} title="Artifacts">Content</DrawerShell>;
+    const view = render(drawer(true, 'standard'));
+    expect(screen.getByRole('dialog').getAttribute('data-motion')).toBe('standard');
+    view.rerender(drawer(false, 'instant'));
+    expect(document.querySelector(".drawer-shell-panel[data-state='closed']")).toBeNull();
+    expect(document.querySelector('.drawer-shell-scrim')).toBeNull();
+  });
+
   it('cancels stale exit timers when reopened', () => {
     const drawer = (open: boolean) => <DrawerShell open={open} onClose={vi.fn()} title="Artifacts">Content</DrawerShell>;
     const view = render(drawer(true));
@@ -106,6 +116,52 @@ describe('DrawerShell non-modal', () => {
     panel.focus();
     view.rerender(drawer(false));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Second card' }));
+  });
+
+  describe('when focus moves under the panel', () => {
+    afterEach(() => vi.restoreAllMocks());
+    // jsdom lays nothing out: give the panel and the page controls their boxes.
+    const place = (element: Element, left: number, right: number) => {
+      element.getBoundingClientRect = () => ({ left, right, top: 0, bottom: 40, width: right - left, height: 40 }) as DOMRect;
+    };
+
+    it('closes, and focus stays on the page control it went to', () => {
+      const close = vi.fn();
+      const drawer = (open: boolean) => (
+        <>
+          <button type="button">Beside</button>
+          <button type="button">Under</button>
+          <DrawerShell open={open} modal={false} onClose={close} title="Row">Content</DrawerShell>
+        </>
+      );
+      const view = render(drawer(true));
+      const panel = screen.getByRole('dialog');
+      place(panel, 600, 1040);
+      place(screen.getByRole('button', { name: 'Beside' }), 0, 100);
+      place(screen.getByRole('button', { name: 'Under' }), 700, 800);
+      vi.spyOn(document, 'elementFromPoint').mockImplementation((x) => (x >= 600 ? panel : null));
+      screen.getByRole('button', { name: 'Beside' }).focus();
+      expect(close).not.toHaveBeenCalled();
+      screen.getByRole('button', { name: 'Under' }).focus();
+      expect(close).toHaveBeenCalledTimes(1);
+      view.rerender(drawer(false));
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Under' }));
+    });
+
+    it('stays open for a popover opened from it, which draws above the panel', () => {
+      const close = vi.fn();
+      render(
+        <DrawerShell open modal={false} onClose={close} title="Row">
+          {createPortal(<button type="button">Choice</button>, document.body)}
+        </DrawerShell>,
+      );
+      const choice = screen.getByRole('button', { name: 'Choice' });
+      place(screen.getByRole('dialog'), 600, 1040);
+      place(choice, 700, 800);
+      vi.spyOn(document, 'elementFromPoint').mockReturnValue(choice);
+      choice.focus();
+      expect(close).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -157,7 +213,7 @@ describe('DrawerShell close control', () => {
 });
 
 describe('DrawerShell resize', () => {
-  const handleOf = () => screen.getByTitle('Drag to resize · Double-click to reset');
+  const handleOf = () => screen.getByRole('separator', { name: 'Resize Task' });
   const drag = (from: number, to: number) => {
     const panel = screen.getByRole('dialog');
     panel.getBoundingClientRect = () => ({ width: 440 } as DOMRect);
@@ -171,7 +227,7 @@ describe('DrawerShell resize', () => {
 
   it('is fixed without a resize', () => {
     render(<DrawerShell open onClose={vi.fn()} title="Task" width={440}>Content</DrawerShell>);
-    expect(screen.queryByTitle('Drag to resize · Double-click to reset')).toBeNull();
+    expect(screen.queryByRole('separator')).toBeNull();
   });
 
   it('drags the left edge wider within the minimum and three quarters of the window, and double-click resets', () => {
@@ -211,7 +267,7 @@ describe('DrawerShell on a phone', () => {
 
   it('fills the screen at any dragged width, with no edge to drag', () => {
     render(<DrawerShell open onClose={vi.fn()} title="Task" width={440} resize={{ width: 600, set: vi.fn(), reset: vi.fn() }}>Content</DrawerShell>);
-    expect(screen.queryByTitle('Drag to resize · Double-click to reset')).toBeNull();
+    expect(screen.queryByRole('separator')).toBeNull();
     expect(screen.getByRole('dialog').style.width).toBe('440px');
   });
 

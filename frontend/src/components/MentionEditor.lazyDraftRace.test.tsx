@@ -41,7 +41,6 @@ function DraftStoreHarness({ editorRef, onChange }: {
         onChange(draft);
       }}
       currentNodeId="page-helper"
-      sameTreeNodes={[]}
       artifacts={[]}
     />
   </Suspense>;

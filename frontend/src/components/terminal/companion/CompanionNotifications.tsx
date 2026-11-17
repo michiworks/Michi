@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { CompanionTarget } from 'michi-shared';
 import { getElectron } from '../../../lib/electronBridge';
+import { leaveOverlaysEvent } from '../../../state/appEvents';
 import { onOpenCompanionTargetRequest } from '../../../state/attentionOpenRequests';
 import { startCompanionFeed } from '../../../state/companion/companionFeed';
 import { startCompanionPresence } from '../../../state/companion/companionPresence';
@@ -68,7 +69,10 @@ export function CompanionNotifications({ noticeReady = false }: { noticeReady?: 
       clearCompanionTargetParam();
       void openRef.current(initial);
     }
-    const detachOpen = electron?.onCompanionOpen?.((target: CompanionTarget) => { void openRef.current(target); });
+    const detachOpen = electron?.onCompanionOpen?.((target: CompanionTarget) => {
+      leaveOverlaysEvent.dispatch({});
+      void openRef.current(target);
+    });
     return () => { detachOpen?.(); };
   }, []);
 

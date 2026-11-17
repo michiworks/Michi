@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import AskUserNotice from './AskUserNotice';
 import InterruptedTurnsNotice from './InterruptedTurnsNotice';
 import { NoticeAnnounceContext } from './shellNoticeParts';
+import { RemoteSignInNotices } from '../RemoteAuthenticationDialog';
 
 /** How far below the stack toasts start (index.css reads --shell-notices-height). */
 const TOAST_GAP_PX = 8;
@@ -31,7 +32,8 @@ function noticeBoxes(stack: HTMLElement): Box[] {
 
 /**
  * The corner where Michi keeps what waits on the user: an agent's question
- * (AskUserNotice) and tasks that stopped before finishing (InterruptedTurnsNotice).
+ * (AskUserNotice), tasks that stopped before finishing (InterruptedTurnsNotice)
+ * and remote sign-ins that background work needs (RemoteSignInNotices).
  * Pinned under the topbar's right end, where toasts appear, but unlike a
  * toast a notice stays until its state resolves: the question is answered,
  * the task resumed or dismissed. Each can be shrunk to a tab; something new
@@ -102,6 +104,7 @@ export default function ShellNotices() {
         <NoticeAnnounceContext.Provider value={announce}>
           <AskUserNotice />
           <InterruptedTurnsNotice />
+          <RemoteSignInNotices />
         </NoticeAnnounceContext.Provider>
       </div>
       <div className="sr-only" role="status" aria-live="polite">{message}</div>

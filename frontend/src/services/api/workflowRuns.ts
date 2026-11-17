@@ -1,4 +1,5 @@
 import {
+  applyWorkflowRunPatch,
   parseWorkflowRunDto,
   parseWorkflowRunSseEnvelope,
   SSE_HEARTBEAT_MS,
@@ -40,12 +41,17 @@ function mapWorkflowRunIdentity(run: WorkflowRunDtoV1, connectionId: string): Wo
   };
 }
 
-/** The run a `{ run }` read or command answers, validated, as the feed delivers it. */
-export async function requestRun(url: string, operation: string, init?: RequestInit): Promise<WorkflowRunDtoV1> {
+/** The run a `{ run }` read or command answers, validated, as the backend wrote it. */
+async function requestBackendRun(url: string, operation: string, init?: RequestInit): Promise<WorkflowRunDtoV1> {
   const payload = await jsonResponse(await backendFetch(url, init, { mapPayload: false }), operation);
   const run = payload && typeof payload === 'object' ? parseWorkflowRunDto((payload as { run?: unknown }).run) : null;
   if (!run) throw new Error(`${operation} returned a malformed run`);
-  return mapWorkflowRunIdentity(run, connectionIdFromApiUrl(url));
+  return run;
+}
+
+/** The run a `{ run }` read or command answers, validated, as the feed delivers it. */
+export async function requestRun(url: string, operation: string, init?: RequestInit): Promise<WorkflowRunDtoV1> {
+  return mapWorkflowRunIdentity(await requestBackendRun(url, operation, init), connectionIdFromApiUrl(url));
 }
 
 export function getWorkflowRun(backendConnectionId: string, runId: string, signal?: AbortSignal): Promise<WorkflowRunDtoV1> {
@@ -86,11 +92,35 @@ export interface WorkflowRunSubscriptionOptions {
   onDisconnect?: (error?: Error) => void;
 }
 
-/** Snapshot-then-live stream of a workspace's runs (and background subagents). Returns unsubscribe. */
+/**
+ * Snapshot-then-live stream of a workspace's runs (and background
+ * subagents). Returns unsubscribe. It asks for patches: each run arrives
+ * once, then only what changed, merged here into the copy the feed sent so
+ * `onRun` always gets whole runs. A patch for another revision than that
+ * copy (a frame lost) reads the run whole instead. Backends from before
+ * patches ignore the ask and send whole runs.
+ */
 export function subscribeWorkflowRuns(workspaceId: string, options: WorkflowRunSubscriptionOptions): () => void {
   const base = workspaceBackendApiBase(workspaceId);
   const connectionId = connectionIdFromApiUrl(base);
-  return openSseFeed(`${base}/workflow-runs/subscribe?${new URLSearchParams({ workspaceId })}`, {
+  // The runs as this feed sent them (unmapped), the bases its patches apply to.
+  const sent = new Map<string, WorkflowRunDtoV1>();
+  const deliver = (run: WorkflowRunDtoV1) => {
+    const known = sent.get(run.id);
+    if (known && known.revision > run.revision) return;
+    sent.set(run.id, run);
+    options.onRun(mapWorkflowRunIdentity(run, connectionId));
+  };
+  const reading = new Set<string>();
+  const readWhole = (runId: string) => {
+    sent.delete(runId);
+    if (reading.has(runId)) return;
+    reading.add(runId);
+    requestBackendRun(`${base}/workflow-runs/${encodeURIComponent(runId)}`, 'getWorkflowRun')
+      .then(deliver, () => {})
+      .finally(() => reading.delete(runId));
+  };
+  return openSseFeed(`${base}/workflow-runs/subscribe?${new URLSearchParams({ workspaceId, patches: '1' })}`, {
     label: 'subscribeWorkflowRuns',
     transport: { mapPayload: false },
     silenceMs: sseSilenceTimeoutMs(SSE_HEARTBEAT_MS.workflowRuns),
@@ -100,8 +130,14 @@ export function subscribeWorkflowRuns(workspaceId: string, options: WorkflowRunS
       let json: unknown;
       try { json = JSON.parse(data); } catch { return; }
       const envelope = parseWorkflowRunSseEnvelope(json);
-      if (envelope?.run) options.onRun(mapWorkflowRunIdentity(envelope.run, connectionId));
-      else if (envelope?.event === 'background_subagents' && envelope.backgroundSubagents) {
+      if (envelope?.run) deliver(envelope.run);
+      else if (envelope?.event === 'workflow_run_patch' && envelope.patch) {
+        const known = sent.get(envelope.patch.id);
+        const patched = known ? applyWorkflowRunPatch(known, envelope.patch) : null;
+        const run = patched ? parseWorkflowRunDto(patched) : null;
+        if (run) deliver(run);
+        else readWhole(envelope.patch.id);
+      } else if (envelope?.event === 'background_subagents' && envelope.backgroundSubagents) {
         options.onBackgroundSubagents?.(mapBackendPayload(envelope.backgroundSubagents, connectionId, 'renderer', 'backgroundSubagents'));
       } else if (envelope?.event === 'background_subagents_ended' && envelope.backgroundSubagentsEnded) {
         options.onBackgroundSubagentsEnded?.(mapBackendPayload(envelope.backgroundSubagentsEnded, connectionId, 'renderer'));

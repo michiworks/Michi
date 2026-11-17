@@ -11,7 +11,7 @@ import { applyAgentPageEdits, applyUserPageEdits } from '../src/services/pages/p
 import { applyUserDatabaseEdits } from '../src/services/pages/databaseWrites';
 import { getSpacesHome, setWorkspaceHomeHidden } from '../src/services/pages/homePages';
 import {
-  actOnHomeReminder, blockLine, chatHubLiveWait, homeConversations, homeSections, lastQuestion, markSpacesHomeLooked, STALLED_AFTER_MS,
+  actOnHomeReminder, blockLine, chatHubLiveWait, FAILED_WAIT_MS, homeConversations, homeSections, lastQuestion, markSpacesHomeLooked, STALLED_AFTER_MS,
   threadCards, type HomeLiveWaitReader,
 } from '../src/services/pages/homeSections';
 import { seedConversation, type SeedTurn } from './helpers/homeConversations';
@@ -175,7 +175,7 @@ test('a reply ending in a question waits for your answer; the row quotes the que
 test('after three quiet days a waiting conversation moves to Stalled, listed once; a normal completion never stalls', () => {
   const fresh = chat({ status: 'error', error: 'x', startedAt: NOW - STALLED_AFTER_MS + DAY, completedAt: NOW - STALLED_AFTER_MS + 1 });
   const quiet = chat({ status: 'completed', reply: 'Proceed?', startedAt: NOW - 5 * DAY, completedAt: NOW - STALLED_AFTER_MS });
-  const old = chat({ status: 'error', error: 'y', startedAt: NOW - 9 * DAY });
+  const old = chat({ status: 'error', error: 'y', startedAt: NOW - 5 * DAY });
   const pending = chat({ status: 'active', startedAt: NOW - 4 * DAY, updatedAt: NOW - 4 * DAY });
   const finished = chat({ status: 'completed', reply: 'All green.', startedAt: NOW - 9 * DAY });
   const sections = read((nodeId) => nodeId === pending ? { kind: 'approval', text: 'Edit file' } : null);
@@ -183,6 +183,34 @@ test('after three quiet days a waiting conversation moves to Stalled, listed onc
   assert.deepEqual(ids(sections.stalled), [quiet, pending, old]);
   assert.deepEqual([sections.stalled.items[0]!.summary, sections.stalled.items[0]!.at], ['Asked: Proceed?', NOW - STALLED_AFTER_MS]);
   assert.deepEqual(ids(sections.done), [finished], 'it is done (since the start of time here), never stalled');
+});
+
+test('a failed or interrupted last turn leaves Waiting and Stalled once you saw it, or after a week, as the sidebar\'s Failed mark', () => {
+  const mark = (nodeId: string, at: number) => applyWorkspaceCommands('ws', {
+    operationId: `view-${nodeId}`, commands: [{ type: 'node.patch', payload: { id: nodeId, viewed_at: at } }],
+  });
+  const seen = chat({ status: 'error', error: 'boom', startedAt: NOW - 2_000, completedAt: NOW - 1_000 });
+  const seenBefore = chat({ status: 'error', error: 'boom', startedAt: NOW - 2_000, completedAt: NOW - 1_000 });
+  const restartedSeen = chat({ status: 'error', error: 'backend_restarted', startedAt: NOW - 2_000, completedAt: NOW - 1_000 });
+  const stalledUnseen = chat({ status: 'error', error: 'x', startedAt: NOW - 5 * DAY });
+  const lastDay = chat({ status: 'error', error: 'x', startedAt: NOW - FAILED_WAIT_MS - 10, completedAt: NOW - FAILED_WAIT_MS });
+  const weekOld = chat({ status: 'error', error: 'x', startedAt: NOW - FAILED_WAIT_MS - 20, completedAt: NOW - FAILED_WAIT_MS - 1 });
+  const question = chat({ status: 'completed', reply: 'Proceed?', startedAt: NOW - 2_000, completedAt: NOW - 1_000 });
+  const oldQuestion = chat({ status: 'completed', reply: 'Proceed?', startedAt: NOW - 9 * DAY });
+  mark(seen, NOW - 1_000);
+  mark(seenBefore, NOW - 1_001);
+  mark(restartedSeen, NOW);
+  mark(question, NOW);
+
+  const sections = read();
+  assert.deepEqual(ids(sections.waiting), [seenBefore, question], 'seen at the failure counts; before it does not; a question is not a failure');
+  assert.deepEqual(ids(sections.stalled), [stalledUnseen, lastDay, oldQuestion], 'only a failure ages out');
+  assert.deepEqual(sections.byWorkspace, { ws: { waiting: 2, stalled: 3 } });
+  const all = homeConversations({ ownerUserId: OWNER, now: NOW, since: LONG_AGO }).items;
+  for (const id of [seen, restartedSeen, weekOld]) assert.equal(all.find((item) => item.id === `conversation:${id}`)?.state, null);
+  const settled = all.find((item) => item.id === `conversation:${seen}`)!;
+  assert.throws(() => actOnHomeReminder({ ownerUserId: OWNER, now: NOW, itemId: settled.id, version: settled.reminderVersion!, action: 'dismiss' }),
+    /no longer needs attention/);
 });
 
 test('Just done lists normal completions after the last look, with the first line of the reply', () => {
@@ -215,7 +243,7 @@ test('Just done leaves out a conversation you had on screen since it completed, 
   const sections = read();
   assert.deepEqual(ids(sections.done), [unseen, seenWhileRunning]);
   assert.equal(sections.done.total, 2);
-  assert.deepEqual(ids(sections.waiting), [failed], 'having seen a failure does not answer it');
+  assert.deepEqual(ids(sections.waiting), [], 'a failure you had on screen since leaves Waiting too');
   const all = homeConversations({ ownerUserId: OWNER, now: NOW, since: LONG_AGO });
   assert.equal(all.items.find((item) => item.id === `conversation:${seen}`)?.state, null);
   assert.deepEqual(ids(homeConversations({ ownerUserId: OWNER, now: NOW, since: LONG_AGO, state: 'done' })), [unseen, seenWhileRunning]);

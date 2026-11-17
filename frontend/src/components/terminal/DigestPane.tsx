@@ -5,13 +5,12 @@ import { useDigestEnabled } from '../../state/prefs';
 import { parseDigestStructure, staleSources, visibleDigestMarkdown } from '../../state/digest';
 import { requestDigestFocus } from '../../state/digestFocus';
 import MarkdownContent from '../MarkdownContent';
+import { TERM_PROSE_CLASS } from '../markdownProse';
 import DigestGenerationStatus from './DigestGenerationStatus';
 import { Tag } from './primitives';
 import { navPageEvent } from '../../state/appEvents';
 import { formatDigestAge } from './content/michiFormat';
-
-const DIGEST_PROSE =
-  'prose prose-sm max-w-none wrap-break-word [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-(--term-fg) [&_h2]:text-(--term-fg) [&_h3]:text-(--term-fg) [&_h4]:text-(--term-fg) [&_p]:text-(--term-mid) [&_li]:text-(--term-mid) [&_strong]:text-(--term-fg) [&_a]:text-(--term-accent)';
+import { BranchIcon, RetryIcon, SpinnerIcon } from './icons';
 
 export default function DigestPane({
   nodeId,
@@ -23,7 +22,7 @@ export default function DigestPane({
   const { focusPane, refreshDigest, createChildChat } = useChatStore();
   const n = useChatNode(nodeId);
   const nodesSnapshot = useChatNodesSnapshot();
-  const paneShellStyle = usePaneShellStyle(nodeId);
+  const { style: paneShellStyle, recede } = usePaneShellStyle(nodeId);
   const digestEnabled = useDigestEnabled();
 
   const savedContent = n?.digest?.content;
@@ -122,7 +121,7 @@ export default function DigestPane({
         >
           {title}
         </span>
-        {stale.length > 0 && <Tag color="var(--term-select)">{stale.length} stale</Tag>}
+        {stale.length > 0 && <Tag color="var(--term-waiting-text)">{stale.length} stale</Tag>}
         <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-xs)' }}>
           {d.status === 'streaming' ? 'streaming…' : formatDigestAge(d.generatedAt)}
         </span>
@@ -136,20 +135,13 @@ export default function DigestPane({
             void refreshDigest(nodeId);
           }}
           disabled={d.status === 'streaming'}
-          style={{
-            padding: '3px 8px',
-            border: '1px solid var(--term-digest)',
-            background: d.status === 'streaming' ? 'var(--term-alt)' : 'transparent',
-            color: 'var(--term-digest)',
-            fontWeight: 700,
-            fontSize: 'var(--fs-xs)',
-            cursor: d.status === 'streaming' ? 'not-allowed' : 'pointer',
-            fontFamily: 'var(--ui-font)',
-            opacity: d.status === 'streaming' ? 0.6 : 1,
-          }}
+          className="t-icon-btn"
           title="Rebuild digest"
+          aria-label="Rebuild digest"
         >
-          {d.status === 'streaming' ? '⟳' : '↻'}
+          {d.status === 'streaming'
+            ? <SpinnerIcon size="sm" className="motion-safe:animate-spin" style={{ color: 'var(--term-digest)' }} />
+            : <RetryIcon size="sm" style={{ color: 'var(--term-digest)' }} />}
         </button>
         <button
           type="button"
@@ -157,18 +149,10 @@ export default function DigestPane({
             e.stopPropagation();
             openFullDetail();
           }}
-          style={{
-            padding: '3px 8px',
-            border: '1px solid var(--term-line)',
-            background: 'transparent',
-            color: 'var(--term-mid)',
-            fontSize: 'var(--fs-xs)',
-            cursor: 'pointer',
-            fontFamily: 'var(--ui-font)',
-          }}
+          className="t-text-btn is-bordered"
           title="Open full digest view"
         >
-          ↗ detail
+          detail
         </button>
         </>}
       </div>
@@ -207,7 +191,7 @@ export default function DigestPane({
                 ▸ TL;DR
               </div>
               <div style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-fg)', lineHeight: 1.6 }}>
-                <MarkdownContent text={parsed.tldr} className={DIGEST_PROSE} />
+                <MarkdownContent text={parsed.tldr} className={TERM_PROSE_CLASS} />
               </div>
             </div>
           )}
@@ -253,10 +237,10 @@ export default function DigestPane({
                       >
                         {s.title}
                       </span>
-                      {isStale && <Tag color="var(--term-select)">stale</Tag>}
+                      {isStale && <Tag color="var(--term-waiting-text)">stale</Tag>}
                     </div>
                     <div style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-mid)', lineHeight: 1.6 }}>
-                      <MarkdownContent text={s.body} className={DIGEST_PROSE} />
+                      <MarkdownContent text={s.body} className={TERM_PROSE_CLASS} />
                     </div>
                   </div>
                 );
@@ -265,7 +249,7 @@ export default function DigestPane({
           ) : !parsed?.tldr && !parsed?.openThreads.length ? (
             <div style={{ color: 'var(--term-mid)' }}>
               {content ? (
-                <MarkdownContent text={content} className={DIGEST_PROSE} />
+                <MarkdownContent text={content} className={TERM_PROSE_CLASS} />
               ) : d.status === 'idle' ? (
                 <span style={{ color: 'var(--term-muted)' }}>— digest is empty —</span>
               ) : null}
@@ -300,16 +284,21 @@ export default function DigestPane({
                   >
                     <span style={{ color: 'var(--term-accent)' }}>?</span>
                     <span style={{ color: 'var(--term-fg)', flex: 1 }}>{q}</span>
-                    <span
+                    <button
+                      type="button"
                       onClick={() => void createChildChat(nodeId, q).catch(() => {})}
                       style={{
                         fontSize: 'var(--fs-xs)',
                         color: 'var(--term-mauve)',
                         cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
                       }}
                     >
-                      ⧉ explore
-                    </span>
+                      <BranchIcon size="sm" />
+                      explore
+                    </button>
                   </div>
                 ))}
               </div>
@@ -317,6 +306,7 @@ export default function DigestPane({
           )}
         </div>
       </div>
+      {recede}
     </div>
   );
 }

@@ -39,11 +39,11 @@
 }
 .mm-dbtn:disabled {
   opacity: 0.5;
-  cursor: default;
+  cursor: not-allowed;
 }
 .mm-dlink:disabled {
   color: var(--term-muted);
-  cursor: default;
+  cursor: not-allowed;
 }
 @media (hover: hover) {
   .mm-dbtn:not(.is-warn):not(:disabled):hover { border-color: var(--term-muted); }

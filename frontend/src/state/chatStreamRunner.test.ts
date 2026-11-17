@@ -14,7 +14,7 @@ import { assistantAnswerRawText } from './assistantBlocks';
 import { mapMessageRow } from './chatHydration';
 import type { ChatAction, ChatNodeState } from './chatTypes';
 import { indexBackendProjects, setKnownBackendConnections } from '../config/backendConnections';
-import { closeRemoteAuthentication, completeRemoteAuthentication, getRemoteAuthentication, reportRemoteCredentialError } from './remoteAuthentication';
+import { closeRemoteAuthentication, completeRemoteAuthentication, getPendingRemoteAuthentications, reportRemoteCredentialError } from './remoteAuthentication';
 import { resetTurnPageReceiptInvalidationForTests } from '../lib/turnPageReceipt';
 import { subscribePageChanges } from './pages/pageEvents';
 vi.mock('../../../shared/src/remoteCredentials', () => ({ REMOTE_CREDENTIALS: {
@@ -44,14 +44,16 @@ it('clears an old remote sign-in incident only after a successful turn without c
     return mockStream.mock.calls[0][2];
   };
   try {
+    // A turn's credential error asks from the notice corner, until a clean turn clears it.
+    const asked = () => getPendingRemoteAuthentications().map((request) => request.key);
     reportRemoteCredentialError('n1', 'Run example-login --remote'); closeRemoteAuthentication();
     const failed = start();
     failed.onMcpServerError({ serverName: 'aws', error: 'Run example-login --remote' }); failed.onDone('end_turn');
-    reportRemoteCredentialError('n1', 'Run example-login --remote'); expect(getRemoteAuthentication()).toBeNull();
+    expect(asked()).toEqual(['runtime:sso-remote']);
     start().onDone('cancel');
-    reportRemoteCredentialError('n1', 'Run example-login --remote'); expect(getRemoteAuthentication()).toBeNull();
+    expect(asked()).toEqual(['runtime:sso-remote']);
     start().onDone('end_turn');
-    reportRemoteCredentialError('n1', 'Run example-login --remote'); expect(getRemoteAuthentication()?.key).toBe('runtime:sso-remote');
+    expect(asked()).toEqual([]);
   } finally {
     closeRemoteAuthentication(); completeRemoteAuthentication('runtime:sso-remote');
     setKnownBackendConnections([]); indexBackendProjects([]); mockStream.mockClear();
@@ -894,7 +896,7 @@ describe('chatStreamRunner — saved turn after the live replay is gone', () => 
     const { handlers, actions, onTurnEnd, onStreamComplete } = start();
     expect(handlers.onSavedTurn?.(saved({ status: 'cancelled', stopReason: null }))).toBe(true);
     expect(actions.find((action) => action.type === 'done')).toMatchObject({ aborted: true, completedAt: 20 });
-    expect(onTurnEnd).toHaveBeenCalledExactlyOnceWith('done', 'n1');
+    expect(onTurnEnd).toHaveBeenCalledExactlyOnceWith('cancel', 'n1');
     expect(onStreamComplete).not.toHaveBeenCalled();
   });
 
@@ -940,6 +942,8 @@ describe('a done frame ends a turn alike in the runner and the background bindin
 
     expect(background.filter(terminal)).toEqual(foreground.filter(terminal));
     expect(background.filter(terminal)).toHaveLength(1);
+    // A failed ending carries the done frame's time, so the sidebar can mark it Failed.
+    if (stopReason === 'error' || !persisted) expect(foreground.find(terminal)).toMatchObject({ type: 'error', completedAt: 10 });
     expect(backgroundEnd.mock.calls).toEqual(foregroundEnd.mock.calls);
   });
 });

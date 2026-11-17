@@ -5,7 +5,6 @@ import {
   DEFAULT_COMPANION_SETTINGS,
   isChatNotificationLevel,
   type ChatNotificationLevel,
-  type CompanionBriefDto,
   type CompanionCardDto,
   type CompanionCheckinChangeDto,
   type CompanionGetStartedDto,
@@ -19,7 +18,7 @@ import {
 
 /**
  * Browser-only Companion: every /api/companion route, answered from memory.
- * installMockApi uses a quiet instance by default (no items, no brief, no
+ * installMockApi uses a quiet instance by default (no items, no
  * conversation, a change feed that sends the current revision and ends), so
  * the Topbar button shows and nothing errors; a spec that needs data seeds
  * its own (items, a status, Michi's attention records the background feed carries once) and passes
@@ -31,10 +30,9 @@ import {
 export interface CompanionMockOptions {
   items?: CompanionItemDto[];
   conversation?: CompanionSnapshotDto['conversation'] | null;
-  brief?: CompanionBriefDto | null;
   cards?: CompanionCardDto[];
   settings?: Partial<CompanionSettings>;
-  /** Status fields to report (e.g. `nextBriefAt`). */
+  /** Status fields to report (e.g. `nextHeartbeatAt`). */
   status?: Partial<CompanionStatusDto>;
   /**
    * Michi's attention records (services/companion/notices.ts on the backend):
@@ -97,7 +95,6 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
     cards: [...(options.cards ?? [])],
     goals: [] as CompanionGoalDto[],
     reminders: [] as CompanionReminderDto[],
-    brief: options.brief ?? null,
     notes: '',
     notesRevision: 0,
     rules: '',
@@ -124,14 +121,12 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
         lastCheckAt: now - 120_000,
         nextCheckAt: now + 180_000,
         nextHeartbeatAt: null,
-        nextBriefAt: null,
         turnsToday: 0,
         working: false,
         ...options.status,
       },
       conversation: options.conversation ?? null,
       items: open,
-      brief: state.brief,
       cards: state.cards,
       goals: state.goals,
       notes: state.notes,
@@ -143,7 +138,6 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
       ...(state.getStarted !== undefined ? { getStarted: state.getStarted } : {}),
       ...(state.offNoticeAt !== undefined ? { offNoticeAt: state.offNoticeAt } : {}),
       demotedSubtypes: [],
-      catchUp: null,
       activity: [],
       counts: {
         needsYou: open.filter((item) => item.bucket === 'needs_you').length,
@@ -214,7 +208,7 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
       return true;
     }
     if (method === 'POST' && path === '/companion/presence') { await noContent(route); return true; }
-    if (method === 'POST' && path === '/companion/view') { await json(route, { catchUp: null }); return true; }
+    if (method === 'POST' && path === '/companion/view') { await noContent(route); return true; }
     if (method === 'POST' && path === '/companion/welcome') { await json(route, { started: false }); return true; }
     if (method === 'POST' && (path === '/companion/get-started' || path === '/companion/get-started/later') && state.getStarted) {
       const input = body();
@@ -327,19 +321,6 @@ export function createCompanionMock(options: CompanionMockOptions = {}): Compani
       return true;
     }
     if (method === 'DELETE' && /^\/companion\/demotions\/[^/]+$/.test(path)) { changed(); await noContent(route); return true; }
-    if (method === 'POST' && path === '/companion/brief/curate') { await noContent(route); return true; }
-    const feedbackMatch = /^\/companion\/brief\/([^/]+)\/feedback$/.exec(path);
-    if (method === 'POST' && feedbackMatch) {
-      if (!state.brief || state.brief.id !== decodeURIComponent(feedbackMatch[1])) { await json(route, { error: 'Brief not found', code: 'not_found' }, 404); return true; }
-      const input = body();
-      const cardFeedback = { ...state.brief.cardFeedback };
-      if (input.feedback === 'up' || input.feedback === 'down') cardFeedback[input.index as number] = input.feedback;
-      else delete cardFeedback[input.index as number];
-      state.brief = { ...state.brief, cardFeedback };
-      changed();
-      await json(route, state.brief);
-      return true;
-    }
     if (method === 'POST' && path === '/companion/reset') { changed(); await json(route, snapshot()); return true; }
     if (method === 'POST' && /^\/companion\/notifications\/[^/]+\/ack$/.test(path)) { await noContent(route); return true; }
     await json(route, { error: `No mock for ${method} ${path}`, code: 'not_found' }, 404);

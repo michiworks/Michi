@@ -62,6 +62,6 @@ describe('AttachmentPills', () => {
       <AttachmentPills workspaceId="ws-1" items={[{ name: 'png', absPath: '/p/.attachments/png', relPath: '.attachments/png' }]} />,
     );
     expect(queryAllByTestId('attachment-thumb')).toHaveLength(0);
-    expect(getByTestId('attachment-pill').textContent).toContain('📄');
+    expect(getByTestId('attachment-pill').textContent).toBe('png');
   });
 });

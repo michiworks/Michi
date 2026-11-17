@@ -1,9 +1,11 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, useIsPresent } from 'motion/react';
 import type { AgentModelInfo } from '../../../../services/api';
 import { MenuItem, PopoverSurface } from '../../../ui/Popover';
 import { useAnchoredPosition } from '../../../ui/useAnchoredPosition';
 import { filterModelCatalog } from './modelCatalogFilter';
 import { isImeComposing } from '../../../../lib/ime';
+import { CheckIcon } from '../../icons';
 
 const GAP = 4;
 const EDGE = 8;
@@ -58,8 +60,13 @@ export function ModelCombobox({
   placeholder: string;
   onSelect: (modelId: string) => void;
 }) {
-  const listId = useId();
-  const [open, setOpen] = useState(false);
+  const baseId = useId();
+  // Each opening is a new list, with its own key and ids: one reopened while
+  // the last fades out mounts afresh beside it.
+  const openings = useRef(0);
+  const [opening, setOpening] = useState<number | null>(null);
+  const open = opening !== null;
+  const listId = `${baseId}-${opening}`;
   const triggerRef = useRef<HTMLButtonElement>(null);
   const selected = value ? models.find((model) => model.id === value) : undefined;
   const label = selected?.label || value || placeholder;
@@ -67,11 +74,15 @@ export function ModelCombobox({
   const inert = disabled || (models.length === 0 && !value);
 
   useEffect(() => {
-    if (inert) setOpen(false);
+    if (inert) setOpening(null);
   }, [inert]);
 
+  const openList = () => {
+    openings.current += 1;
+    setOpening(openings.current);
+  };
   const close = (restoreFocus: boolean) => {
-    setOpen(false);
+    setOpening(null);
     if (restoreFocus) triggerRef.current?.focus({ preventScroll: true });
   };
 
@@ -92,19 +103,24 @@ export function ModelCombobox({
         data-mono={value && !(selected?.label && selected.label !== selected.id) ? '' : undefined}
         disabled={inert}
         title={selected?.label && selected.label !== selected.id ? `${selected.label} (${selected.id})` : label}
-        onClick={() => { if (!busy) setOpen((current) => !current); }}
+        onClick={() => {
+          if (busy) return;
+          if (open) setOpening(null);
+          else openList();
+        }}
         onKeyDown={(event) => {
           if (!open && !busy && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
             event.preventDefault();
-            setOpen(true);
+            openList();
           }
         }}
       >
         {/* The chevron is the selects' own (Settings.css). */}
         <span className="settings-model-combo__value">{label}</span>
       </button>
-      {open && triggerRef.current && (
+      <AnimatePresence>{open && triggerRef.current && (
         <ModelList
+          key={opening}
           listId={listId}
           trigger={triggerRef.current}
           value={value}
@@ -116,7 +132,7 @@ export function ModelCombobox({
             if (modelId !== value) onSelect(modelId);
           }}
         />
-      )}
+      )}</AnimatePresence>
     </>
   );
 }
@@ -146,6 +162,8 @@ function ModelList({
   const side = useRef<'below' | 'above' | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // Closed, it fades out for a moment (PopoverSurface) and takes no keys or presses.
+  const present = useIsPresent();
 
   const options = useMemo<Option[]>(() => {
     const filtered = filterModelCatalog([...models], query).map((model) => ({
@@ -198,6 +216,7 @@ function ModelList({
   });
 
   useEffect(() => {
+    if (!present) return;
     const onKey = (event: KeyboardEvent) => {
       // Esc closes the list, not the Settings window under it.
       if (event.key !== 'Escape' || isImeComposing(event)) return;
@@ -216,7 +235,7 @@ function ModelList({
       window.removeEventListener('keydown', onKey, true);
       document.removeEventListener('pointerdown', onPointer, true);
     };
-  }, [trigger]);
+  }, [present, trigger]);
 
   const moveTo = (index: number) => {
     if (options.length > 0) setActiveId(options[(index + options.length) % options.length].id);
@@ -309,7 +328,7 @@ function ModelList({
                 <span className="settings-model-combo__label">{option.label}</span>
                 {option.detail && <span className="settings-model-combo__detail">{option.detail}</span>}
               </span>
-              <span className="michi-menu-glyph" aria-hidden="true">{option.id === value ? '✓' : ''}</span>
+              <span className="michi-menu-glyph" aria-hidden="true">{option.id === value && <CheckIcon />}</span>
             </MenuItem>
           ))}
         </ul>

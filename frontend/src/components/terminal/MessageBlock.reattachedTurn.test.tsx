@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { render } from '@testing-library/react';
 import { MessageBlock } from './MessageBlock';
-import { AgentBlockStyleOverride } from '../../state/prefs';
 import { hydrateBackendWorkspaces } from '../../state/chatHydration';
 import { reduceNodes } from '../../state/chatReducers';
 
@@ -27,17 +26,16 @@ const runningWorkspace = {
 };
 
 describe('a running tool call in a turn this renderer reattached to', () => {
-  it('shows the agent block as Working…', () => {
+  it('shows the agent block live on the running call', () => {
     const { nodes } = hydrateBackendWorkspaces([runningWorkspace]);
     const next = reduceNodes(nodes, {
       type: 'tool-call', nodeId: 'n1', assistantId: 'a1',
       tool: { id: 't2', title: 'bash', status: 'in_progress' },
     });
-    const { getByText } = render(
-      <AgentBlockStyleOverride.Provider value="card">
-        <MessageBlock m={next.n1.messages[1]} index={1} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
-      </AgentBlockStyleOverride.Provider>,
+    const { container, getByText } = render(
+      <MessageBlock m={next.n1.messages[1]} index={1} isDark={false} copyText={() => ''} showThoughts density="comfortable" />,
     );
-    expect(getByText('Working…')).not.toBeNull();
+    expect(container.querySelector('.agent-line-run[data-live]')).not.toBeNull();
+    expect(getByText('Run a command…')).not.toBeNull();
   });
 });

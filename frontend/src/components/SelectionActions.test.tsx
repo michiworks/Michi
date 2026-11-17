@@ -92,6 +92,28 @@ describe('SelectionActions', () => {
     expect(onComment).toHaveBeenCalledWith('immutable source text', 'Comment on the original passage', expect.any(Range), { source: 'original.md' });
   });
 
+  it('hands the keyboard to the pane composer when Esc closes its composer', () => {
+    function PaneHarness() {
+      const ref = React.useRef<HTMLDivElement>(null);
+      React.useEffect(() => {
+        if (ref.current) ref.current.getBoundingClientRect = () => rect(0, 0, 400, 300);
+      }, []);
+      return (
+        <div className="terminal-pane">
+          <div ref={ref}><span>immutable source text</span><SelectionActions containerRef={ref} onQuote={vi.fn()} onBranch={vi.fn()} onComment={vi.fn()} /></div>
+          <div className="terminal-composer"><div role="textbox" aria-label="Message" contentEditable suppressContentEditableWarning tabIndex={0} /></div>
+        </div>
+      );
+    }
+    render(<PaneHarness />);
+    selectContextSource();
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }));
+    const draft = document.querySelector('.sel-actions-popup textarea') as HTMLTextAreaElement;
+    draft.focus();
+    fireEvent.keyDown(draft, { key: 'Escape' });
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Message' }));
+  });
+
   it('captures context once and submits it to the latest callback after props and focus change', () => {
     const token = { snapshot: 'v1', target: 'thread A' };
     const capture = vi.fn(() => token);

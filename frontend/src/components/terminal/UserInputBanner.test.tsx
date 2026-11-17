@@ -127,6 +127,7 @@ describe('UserInputBanner answering', () => {
     expect(document.querySelector('.ask-card-opt-other')?.hasAttribute('data-ask-fade')).toBe(true);
     // The controls tell AT they are not taking input.
     expect(screen.getByRole('button', { name: 'Submit' }).getAttribute('aria-disabled')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Submit' }).getAttribute('aria-busy')).toBe('true');
     expect(screen.getByRole('button', { name: 'Skip' }).getAttribute('aria-disabled')).toBe('true');
     expect(cookies.getAttribute('aria-disabled')).toBe('true');
 
@@ -213,6 +214,24 @@ describe('UserInputBanner answering', () => {
     await waitFor(() => expect(receipt.querySelector('.ask-card-ghost')).toBeNull());
     await waitFor(() => expect(receipt.style.height).toBe(''));
     expect(within(receipt).getAllByText('JWT')).toHaveLength(1);
+  });
+
+  it('takes the receipt height at once under reduced motion, with no copy over it', async () => {
+    layOutCards();
+    const ghosts = watchGhosts();
+    document.documentElement.dataset.reduceMotion = 'on';
+    try {
+      render(<Swap userInput={req({ interactionId: 'turn:input:reduced' })} />);
+      fireEvent.click(screen.getByRole('radio', { name: /JWT/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
+      await landAnswer();
+      const receipt = document.querySelector('.ask-resolved') as HTMLElement;
+      expect(ghosts).toHaveLength(0);
+      expect(receipt.style.height).toBe('');
+      expect(within(receipt).getAllByText('JWT')).toHaveLength(1);
+    } finally {
+      delete document.documentElement.dataset.reduceMotion;
+    }
   });
 
   it('copies what is on screen: running fades are committed before the copy is taken', async () => {

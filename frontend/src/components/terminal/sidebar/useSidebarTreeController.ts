@@ -117,15 +117,20 @@ function pinBeforeSwitch(
  *
  * `branchIdsForProject` returns a project's branch ids in the view's on-screen
  * order (see `flattenBranchIds`) for ⇧+click range selection.
+ *
+ * `phoneDrawer`: the view is the phone drawer's, whose conversations fold by
+ * ST-36 (see `isThreadOpen`).
  */
 export function useSidebarTreeController({
   onActivate,
   branchIdsForProject,
+  phoneDrawer = false,
 }: {
   onActivate?: () => void;
   branchIdsForProject: (project: Project) => string[];
+  phoneDrawer?: boolean;
 }) {
-  const { projects, activeProjectId, activeProject, selection, treeSelection } = useChatProjects();
+  const { projects, activeProjectId, activeProject, selection, treeSelection, focusedNodeId } = useChatProjects();
   const { focusedPane } = useChatPanes();
   const {
     selectProject,
@@ -173,10 +178,26 @@ export function useSidebarTreeController({
     [setPref],
   );
 
+  // The phone drawer opens the current conversation by itself, when the
+  // drawer opens (it mounts then) and whenever the current node changes,
+  // until the user folds or unfolds it with its caret. Every other
+  // conversation shows what the user set, collapsed by default (ST-36).
+  const currentTreeId = activeProject?.activeTreeId ?? null;
+  const [caretOnCurrent, setCaretOnCurrent] = useState<{ treeId: string; nodeId: string | null } | null>(null);
+  if (caretOnCurrent && caretOnCurrent.nodeId !== focusedNodeId) setCaretOnCurrent(null);
+  const currentOpensItself = caretOnCurrent?.treeId !== currentTreeId;
+  const drawerThreadOpen = useCallback(
+    (expanded: Expanded, treeId: string) =>
+      (currentOpensItself && treeId === currentTreeId) || expanded.threads[treeId] === true,
+    [currentOpensItself, currentTreeId],
+  );
+
   const isThreadOpen = useCallback(
     (treeId: string, ownerActiveTreeId: string | null) =>
-      isThreadExpanded(sidebarExpanded, treeId, ownerActiveTreeId),
-    [sidebarExpanded],
+      phoneDrawer
+        ? drawerThreadOpen(sidebarExpanded, treeId)
+        : isThreadExpanded(sidebarExpanded, treeId, ownerActiveTreeId),
+    [phoneDrawer, drawerThreadOpen, sidebarExpanded],
   );
   const isBranchOpen = useCallback(
     (nodeId: string) => isBranchExpanded(sidebarExpanded, nodeId),
@@ -185,6 +206,14 @@ export function useSidebarTreeController({
 
   const toggleThread = useCallback(
     (treeId: string) => {
+      if (phoneDrawer) {
+        updateExpanded((cur) => ({
+          ...cur,
+          threads: { ...cur.threads, [treeId]: !drawerThreadOpen(cur, treeId) },
+        }));
+        if (treeId === currentTreeId) setCaretOnCurrent({ treeId, nodeId: focusedNodeId });
+        return;
+      }
       const ownerActiveTreeId =
         projects.find((p) => p.trees.some((t) => t.id === treeId))?.activeTreeId ?? null;
       updateExpanded((cur) => ({
@@ -192,7 +221,7 @@ export function useSidebarTreeController({
         threads: { ...cur.threads, [treeId]: !isThreadExpanded(cur, treeId, ownerActiveTreeId) },
       }));
     },
-    [projects, updateExpanded],
+    [phoneDrawer, drawerThreadOpen, currentTreeId, focusedNodeId, projects, updateExpanded],
   );
 
   const setThreadExpanded = useCallback(
@@ -211,14 +240,16 @@ export function useSidebarTreeController({
   );
 
   /** Pin the visible expand state before a thread/workspace switch (see
-   *  pinBeforeSwitch). `adjust` edits the pinned value in the same write. */
+   *  pinBeforeSwitch). `adjust` edits the pinned value in the same write.
+   *  The phone drawer's threads have no open-by-default to pin: the switch
+   *  only moves which one opens itself. */
   const snapshotBeforeSwitch = useCallback(
     (nextTreeId: string | null, nextProjectId: string | null, adjust?: (next: Expanded) => Expanded) =>
       updateExpanded((cur) => {
-        const next = pinBeforeSwitch(cur, projects, activeProjectId, nextTreeId, nextProjectId);
+        const next = pinBeforeSwitch(cur, projects, activeProjectId, phoneDrawer ? null : nextTreeId, nextProjectId);
         return adjust ? adjust(next) : next;
       }),
-    [updateExpanded, projects, activeProjectId],
+    [updateExpanded, projects, activeProjectId, phoneDrawer],
   );
 
   // ── Navigation ──
@@ -285,7 +316,8 @@ export function useSidebarTreeController({
   /** Click on a thread row. ⌘/⇧ only select (see selectThread). A plain
    *  click always opens and focuses the root, even on the active thread (a
    *  branch may hold the focus), then: a collapsed thread expands, the open
-   *  active one collapses, an open inactive one stays open. */
+   *  active one collapses, an open inactive one stays open. In the phone
+   *  drawer it only opens: there only the caret folds (ST-36). */
   const clickThreadRow = useCallback(
     (tree: Tree, project: Project, event: React.MouseEvent | undefined, row: ThreadRowClick) => {
       if (event && (event.metaKey || event.ctrlKey || event.shiftKey)) {
@@ -293,9 +325,9 @@ export function useSidebarTreeController({
         return;
       }
       openThreadRoot(tree, project);
-      if (row.hasBranches && (!row.expanded || row.isActive)) toggleThread(tree.id);
+      if (!phoneDrawer && row.hasBranches && (!row.expanded || row.isActive)) toggleThread(tree.id);
     },
-    [selectThread, openThreadRoot, toggleThread],
+    [selectThread, openThreadRoot, toggleThread, phoneDrawer],
   );
 
   const selectBranch = useCallback(
@@ -354,15 +386,17 @@ export function useSidebarTreeController({
   // becomes visible, then scroll it into view. Runs only when focusedPane
   // changes; the ref holds the latest projects so a manual collapse/expand by
   // the user isn't undone by unrelated updates (e.g. background streams).
-  const revealRef = useRef({ projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion });
-  revealRef.current = { projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion };
+  // The phone drawer needs the workspace alone: its current thread opens
+  // itself (isThreadOpen) and shows every branch at one level.
+  const revealRef = useRef({ projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion, phoneDrawer });
+  revealRef.current = { projects, activeProject, activeProjectId, reduceMotion: prefs.reduceMotion, phoneDrawer };
   const readNode = useChatNodeReader();
   const lastFocusedRef = useRef<string | null>(null);
   useEffect(() => {
     if (!focusedPane) return;
     const previous = lastFocusedRef.current;
     lastFocusedRef.current = focusedPane;
-    const { projects: all, activeProject: active, activeProjectId: pid } = revealRef.current;
+    const { projects: all, activeProject: active, activeProjectId: pid, phoneDrawer: drawer } = revealRef.current;
     // The open conversation was archived or deleted and the store opened
     // another in its place. The user did not go there, so the list stays
     // where they were reading it.
@@ -398,6 +432,7 @@ export function useSidebarTreeController({
       if (!isWorkspaceExpanded(cur, owner.id, pid)) {
         next = { ...next, workspaces: { ...next.workspaces, [owner.id]: true } };
       }
+      if (drawer) return next;
       // The root row is visible with its thread collapsed.
       if (focusedPane !== owningTree.rootNodeId && !isThreadExpanded(next, treeId, owner.activeTreeId)) {
         next = { ...next, threads: { ...next.threads, [treeId]: true } };

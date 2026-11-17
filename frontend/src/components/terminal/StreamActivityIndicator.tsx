@@ -1,10 +1,10 @@
 import React, { useRef } from 'react';
 import type { AssistantBlock, ChatNodeState, ToolCallState } from '../../state/chatTypes';
 import type { PlanEntry } from '../../services/api';
-import { type AgentBlockStyle, useAgentBlockStyle } from '../../state/prefs';
 import { splitAssistantRuns, tailRunsFormAgentCluster } from '../../state/streamingProjection';
 import { isRunningStatus, isHiddenInternalTool } from './toolCallGrouping';
 import { useNow } from '../../hooks/useNow';
+import { useFresh } from '../../motion/useFresh';
 
 /**
  * Phase 1 "backend is working" indicator — runtime-agnostic.
@@ -69,16 +69,14 @@ function planStepActivity(plan: PlanEntry[] | undefined): StreamActivity | null 
 export interface StreamActivityRenderContext {
   /** prefs.showThoughts — thought blocks render at all. */
   showThoughts: boolean;
-  agentBlockStyle: AgentBlockStyle;
 }
 
 /**
- * True when the tail thought block's header is already showing a live
+ * True when the tail thought block's line is already showing a live
  * "Thinking…"/"Working…" status, making the bare fallback row a duplicate.
- * Mirrors BlockAssistantBody: card/terminal styles keep the tail agent
- * cluster live for the whole streaming message; plain style's
- * ThinkingRunView is live only while its thinking tokens stream (running
- * tools are already handled before this is consulted).
+ * Mirrors BlockAssistantBody, which keeps the tail agent cluster live for the
+ * whole streaming message (running tools are already handled before this is
+ * consulted).
  */
 function thoughtHeaderIsLive(
   blocks: readonly AssistantBlock[],
@@ -86,25 +84,16 @@ function thoughtHeaderIsLive(
   ctx: StreamActivityRenderContext | undefined,
 ): boolean {
   if (!ctx?.showThoughts || !messageStreaming) return false;
-  if (ctx.agentBlockStyle === 'plain') {
-    const tail = blocks[blocks.length - 1];
-    return tail?.kind === 'thinking' && !!tail.streaming;
-  }
   return tailRunsFormAgentCluster(splitAssistantRuns(blocks));
 }
 
 /**
- * The 'line' chrome keeps the newest tool group of a streaming turn live
- * between its calls (the row says "Working…" after a pause), so that row is
- * the live signal: true when the turn's last run ends in a group with a
- * visible tool (MessageBlock passes that group `live`).
+ * The newest tool group of a streaming turn stays live between its calls (the
+ * row says "Working…" after a pause), so that row is the live signal: true when
+ * the turn's last run ends in a group with a visible tool (MessageBlock passes
+ * that group `live`).
  */
-function lineToolRowIsLive(
-  blocks: readonly AssistantBlock[],
-  toolCalls: readonly ToolCallState[],
-  ctx: StreamActivityRenderContext | undefined,
-): boolean {
-  if (ctx?.agentBlockStyle !== 'line') return false;
+function toolRowIsLive(blocks: readonly AssistantBlock[], toolCalls: readonly ToolCallState[]): boolean {
   const runs = splitAssistantRuns(blocks);
   const tail = runs[runs.length - 1];
   if (!tail || tail.kind !== 'answer') return false;
@@ -183,8 +172,8 @@ export function deriveStreamActivity(
   // The thought block's own header already says "Thinking…"/"Working…" with a
   // live timer; a second bare row underneath repeats it.
   if (thoughtHeaderIsLive(blocks, !!last.streaming, ctx)) return null;
-  // Likewise the line chrome's live tool row.
-  if (last.streaming && lineToolRowIsLive(blocks, last.toolCalls, ctx)) return null;
+  // Likewise the live tool row.
+  if (last.streaming && toolRowIsLive(blocks, last.toolCalls)) return null;
 
   // Tail block tells us what the model is mid-producing.
   if (tail?.kind === 'thinking' && tail.streaming) return { label: 'Thinking' };
@@ -198,85 +187,101 @@ export function deriveStreamActivity(
 /** Only surface an elapsed counter once a turn has run long enough to matter. */
 const ELAPSED_GRACE_MS = 3000;
 
-function StreamActivityIndicatorInner({
-  node,
-  showThoughts = false,
-}: {
-  node: ChatNodeState;
-  /** prefs.showThoughts; defaults off so the fallback row stays visible. */
-  showThoughts?: boolean;
-}) {
-  const agentBlockStyle = useAgentBlockStyle();
-  const activity = deriveStreamActivity(node, { showThoughts, agentBlockStyle });
+const ROW_STYLE: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  margin: '8px 0',
+  fontSize: 'var(--fs-sm)',
+  fontFamily: 'var(--ui-font)',
+  color: 'var(--term-muted)',
+};
 
+/**
+ * The row. It decides once, as it mounts, whether to fade in: only when its
+ * turn has just started on screen; a re-show later in the turn or a remount
+ * renders settled (MO-01). The indicator above it stays mounted for the
+ * whole list, so the decision lives here, where each showing mounts.
+ */
+function ActivityRow({ startedAt, ariaLabel, children }: {
+  startedAt?: number;
+  ariaLabel: string;
+  children: React.ReactNode;
+}) {
+  const fresh = useFresh(startedAt);
+  return (
+    <div role="status" aria-live="polite" aria-label={ariaLabel} className="t-stream-activity" data-fresh={fresh ? '' : undefined} style={ROW_STYLE}>
+      {children}
+    </div>
+  );
+}
+
+function StreamActivityIndicatorInner({
+  label,
+  detail,
+  streamingStartedAt,
+  live,
+}: {
+  /** deriveStreamActivity's label; none renders nothing. */
+  label?: string;
+  detail?: string;
+  streamingStartedAt?: number;
+  /** The turn is streaming and its visible response is not complete. */
+  live: boolean;
+}) {
   // Elapsed ticker. Seeded from the store's streamingStartedAt so the timer
   // survives unmount/remount cycles (e.g. switching threads and back). Falls
   // back to mount-time if the field is somehow missing. The 1s setState
   // re-renders only this row — never the message list.
-  const startRef = useRef<number>(node.streamingStartedAt ?? Date.now());
-  if (node.streamingStartedAt && node.streamingStartedAt !== startRef.current) {
-    startRef.current = node.streamingStartedAt;
+  const startRef = useRef<number>(streamingStartedAt ?? Date.now());
+  if (streamingStartedAt && streamingStartedAt !== startRef.current) {
+    startRef.current = streamingStartedAt;
   }
-  const isStreaming = node.status === 'streaming' && !node.visibleResponseComplete;
   // Only tick while the turn is actually streaming. The component stays
   // mounted across label flips within a turn (and renders null when idle),
   // but once the node goes idle/error there is nothing to count — leaving the
   // 1Hz setState running on every idle pane that ever streamed was pure
   // wasted re-render churn.
-  const elapsedMs = useNow(1_000, isStreaming) - startRef.current;
+  const elapsedMs = useNow(1_000, live) - startRef.current;
 
   // Render nothing (but stay mounted, preserving the timer across label flips
   // within a turn) when there's no standalone activity to show.
-  if (!activity) return null;
+  if (!label) return null;
 
   const seconds = Math.floor(elapsedMs / 1000);
-  const showElapsed = isStreaming && elapsedMs >= ELAPSED_GRACE_MS;
+  const showElapsed = live && elapsedMs >= ELAPSED_GRACE_MS;
 
-  const ariaLabel =
-    `${activity.detail ? `${activity.detail}, ` : ''}${activity.label}` +
-    `${showElapsed ? `, ${seconds} seconds elapsed` : ''}`;
+  // The live region announces the activity when it changes, never the
+  // ticking seconds (ST-27): they stay out of the label and aria-hidden.
+  const ariaLabel = `${detail ? `${detail}, ` : ''}${label}`;
 
   return (
-    <div
-      role="status"
-      aria-live="polite"
-      aria-label={ariaLabel}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        margin: '8px 0',
-        fontSize: 'var(--fs-sm)',
-        fontFamily: 'var(--ui-font)',
-        color: 'var(--term-muted)',
-        animation: 'fadeIn var(--t-decay) ease',
-      }}
-    >
+    <ActivityRow startedAt={streamingStartedAt} ariaLabel={ariaLabel}>
       <span aria-hidden style={{ display: 'inline-flex', alignItems: 'center' }}>
         <span className="typing-dot" />
         <span className="typing-dot" style={{ animationDelay: '.15s' }} />
         <span className="typing-dot" style={{ animationDelay: '.3s' }} />
       </span>
-      {activity.detail && (
+      {detail && (
         <span style={{ color: 'var(--term-run)', fontVariantNumeric: 'tabular-nums' }}>
-          {activity.detail}
+          {detail}
         </span>
       )}
       <span style={{ minWidth: 0, flex: '1 1 auto', overflowWrap: 'anywhere' }}>
-        {activity.label}
+        {label}
       </span>
       {showElapsed && (
-        <span style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--term-muted)', fontVariantNumeric: 'tabular-nums' }}>
+        <span aria-hidden style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--term-muted)', fontVariantNumeric: 'tabular-nums' }}>
           {seconds}s
         </span>
       )}
-    </div>
+    </ActivityRow>
   );
 }
 
 /**
- * Memoized so unrelated parent re-renders (e.g. sibling message churn) don't
- * reset the elapsed ticker. Re-renders only when the fields the label depends
- * on change, plus its own 1s internal tick.
+ * Memoized on primitives (PaneMessageList derives the label once per render
+ * with deriveStreamActivity), so streamed chunks skip it: it re-renders when
+ * the label, detail or liveness changes, plus its own 1s tick.
  */
 export const StreamActivityIndicator = React.memo(StreamActivityIndicatorInner);

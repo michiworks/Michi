@@ -35,7 +35,7 @@ export interface ClaudeModelCatalogOptions {
 
 /** Process and pool limits, read when the runtime and its sessions are created. */
 export interface ClaudeLimits {
-  /** Claude processes at most, active, warm and starting together (Michi: 15). */
+  /** Claude processes at most, active, warm and starting together (Michi: 50). */
   maxConcurrent: number;
   pool: {
     /** No warm processes: every chat cold-spawns. */
@@ -53,6 +53,12 @@ export interface ClaudeLimits {
   disposeTermTimeoutMs: number;
   /** Wait for the exit after SIGKILL, in ms (Michi: 1000). */
   disposeKillTimeoutMs: number;
+  /**
+   * How long a chat session stays live after its last use before idleRelease
+   * lets the host release it, in ms; the next message resumes it natively.
+   * 0 keeps every session until the cap reclaims one (Michi: 900000).
+   */
+  sessionIdleTtlMs: number;
 }
 
 /** Claude Code CLI switches, read at each spawn (humanOrigin at each prompt). */
@@ -173,12 +179,13 @@ export interface ClaudeAdapterOptions {
 
 /** The limits claudeAdapterOptions gives a host that sets none, Michi's own. Frozen, pool included. */
 export const DEFAULT_CLAUDE_LIMITS: Readonly<Omit<ClaudeLimits, 'pool'>> & { readonly pool: Readonly<ClaudeLimits['pool']> } = Object.freeze({
-  maxConcurrent: 15,
+  maxConcurrent: 50,
   pool: Object.freeze({ disabled: false, sessionsPerCwd: 2, waitForWarm: true }),
   initTimeoutMs: 60_000,
   approveTimeoutMs: 300_000,
   disposeTermTimeoutMs: 2000,
   disposeKillTimeoutMs: 1000,
+  sessionIdleTtlMs: 15 * 60_000,
 });
 
 /**

@@ -34,7 +34,7 @@
  *
  * V is never busy because of a check-in: only the post's one transaction
  * makes it active. Outcomes: spoke / quiet / superseded / skipped (a
- * catch-up, another check-in, V busy, chatHub already had the turn) /
+ * another check-in, V busy, chatHub already had the turn) /
  * preempted (the user typed, or Stop) / error (no session, the launch check
  * failing closed included, Michi Memory that could not be read, a failed or
  * timed-out turn, a post that failed or was withdrawn: its material waits
@@ -46,7 +46,6 @@ import {
   COMPANION_LIMITS,
   companionCheckinTurnId,
   extractTurnMetadata,
-  type CompanionBriefDto,
   type CompanionCardDto,
   type CompanionItemDto,
   type CompanionItemSubtype,
@@ -72,14 +71,13 @@ import { recordUntrustedSource } from '../turnTrust';
 import { settleAbandonedStarts } from './cards';
 import { checkinMemoryHolds, createCheckinNode, purgeCheckinNode, startCheckinMemory, type CheckinNode } from './checkinNode';
 import { checkinWritesOf, forgetCheckinWrites } from './checkinWrites';
-import { atLocalClock, localDateKey, systemCompanionClock } from './clock';
+import { systemCompanionClock } from './clock';
 import type { CompanionEventBus } from './delivery';
 import { CompanionCheckinWithdrawn, checkinRunChanges, mergeCheckinChanges, postCompanionMessage } from './posts';
 import { composeCompanionTurn, type CompanionItemFeedback } from './prompts';
 import {
   COMPANION_NATIVE_KEPT_NOTE,
   COMPANION_OWNER,
-  briefForDate,
   cardDto,
   getCompanionMetaNumber,
   getItem,
@@ -295,13 +293,13 @@ async function within(promise: Promise<unknown>, ms: number): Promise<void> {
 
 /**
  * Items the note names that are not open any more (resolved, dismissed):
- * those of its changes, and `alsoIds` (earlier brief cards'). Never one out
- * of sight (its source is off, B15): the note reads it as an unknown item.
+ * those of its changes. Never one out of sight (its source is off, B15):
+ * the note reads it as an unknown item.
  */
-function otherItemsOf(request: CompanionTurnRequest, alsoIds: readonly string[] = []): Map<string, CompanionItemDto> {
+function otherItemsOf(request: CompanionTurnRequest): Map<string, CompanionItemDto> {
   const open = new Set(request.material.open.map((item) => item.id));
   const others = new Map<string, CompanionItemDto>();
-  for (const id of [...request.material.changes.map((event) => event.itemId), ...alsoIds]) {
+  for (const id of request.material.changes.map((event) => event.itemId)) {
     if (open.has(id) || others.has(id)) continue;
     const item = getItem(id);
     if (item && !isCompanionItemHidden(item)) others.set(item.id, item);
@@ -309,23 +307,11 @@ function otherItemsOf(request: CompanionTurnRequest, alsoIds: readonly string[] 
   return others;
 }
 
-/** How many days back a brief looks for the briefs before it and the user's thumbs on them. */
-const PAST_BRIEF_DAYS = 7;
-/** How long a thumb counts in the brief's informational tally (conv-1). */
+/** How long a thumb counts in a check-in's informational tally (conv-1). */
 const FEEDBACK_TALLY_MS = 30 * 24 * 60 * 60_000;
 
-/** The briefs of the days before `now`'s, newest first: each day's own when there is one, else Michi's fallback. */
-function pastBriefs(now: number): CompanionBriefDto[] {
-  const briefs: CompanionBriefDto[] = [];
-  for (let days = 1; days <= PAST_BRIEF_DAYS; days += 1) {
-    const brief = briefForDate(localDateKey(atLocalClock(now, '12:00', -days)));
-    if (brief) briefs.push(brief);
-  }
-  return briefs;
-}
-
 /**
- * The user's thumbs by kind for the brief (conv-1), informational only: of
+ * The user's thumbs by kind for a heartbeat (conv-1), informational only: of
  * the last 30 days, on the version they rated, thumbs up and `too_noisy`
  * (counted from the subtype's last demotion undo, as the demotion counts
  * them). Never already_handled, not_relevant, too_early or too_late: those
@@ -372,7 +358,7 @@ interface TurnResult {
   outcome: CompanionTurnOutcome;
   reply: string | null;
   followUps?: string[];
-  /** The line it wrote for Home (companion_headline, or its brief's headline). */
+  /** The line it wrote for Home (companion_headline). */
   headline?: string | null;
 }
 
@@ -474,21 +460,19 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
       log.warn('chat', 'companion abandoned conversation starts not settled', { error: message(error) });
     }
     const cardResults = request.material.cardResults.length > 0 ? request.material.cardResults : listUnreportedCards().map(cardDto);
-    const brief = request.kind === 'brief';
-    // The brief learns from the briefs before it: the user's thumbs on their cards and on items of each kind.
-    const briefs = brief ? pastBriefs(request.material.now) : [];
+    // The heartbeat is the check-in that reviews Today, so the user's feedback goes to it (conv-1).
+    const review = request.kind === 'heartbeat';
     const settings = getCompanionSettings();
     const text = composeCompanionTurn({
       kind: request.kind,
       material: { ...request.material, cardResults },
-      otherItems: otherItemsOf(request, briefs.flatMap((past) => past.cards.flatMap((card) => card.itemIds))),
+      otherItems: otherItemsOf(request),
       // §3.6: what the user and the agent said in V lately (their words and its replies only); conv-3: what Michi does not watch.
       recentConversation: recentConversationExcerpt(conversation.nodeId),
       offSources: companionSourcesOff(settings),
-      demotedSubtypes: brief ? listDemotedSubtypes() : [],
+      demotedSubtypes: review ? listDemotedSubtypes() : [],
       workspaceNames: workspaceNamesOf(request),
-      pastBriefs: briefs,
-      itemFeedback: brief ? itemFeedbackByKind(request.material.now) : [],
+      itemFeedback: review ? itemFeedbackByKind(request.material.now) : [],
       waitingCards: listPendingCards(request.material.now).map(cardDto),
     });
     let memoryContext: string | null;
@@ -701,7 +685,8 @@ export function createCompanionTurnRunner(deps: CompanionTurnRunnerDeps): Compan
     },
 
     async run(request) {
-      if (request.kind === 'catch_up') return { outcome: 'skipped', detail: 'The catch-up is deterministic: no model turn runs for it' };
+      // Nothing plans a brief or a catch-up any more (2026-11-17) and no note exists for one; a queued one is dropped.
+      if (request.kind === 'brief' || request.kind === 'catch_up') return { outcome: 'skipped', detail: `A ${request.kind} check-in no longer runs` };
       if (active) return { outcome: 'skipped', detail: 'Another check-in is running' };
       const turn = newActiveTurn(companionTurnId(request.runId));
       active = turn;

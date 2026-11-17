@@ -105,7 +105,7 @@
   place-items: center;
   width: 16px;
   height: 16px;
-  border-radius: 3px;
+  border-radius: var(--ui-radius-sm);
   background: var(--ws-accent);
   /* White on the fixed workspace badge palette (workspaceAccent.ts), in every theme. */
   color: #fff;
@@ -113,7 +113,7 @@
   font-weight: 700;
 }
 .settings-history__ws { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-.settings-history__ws::before { content: ''; flex: none; width: 7px; height: 7px; border-radius: 2px; background: var(--ws-accent); }
+.settings-history__ws::before { content: ''; flex: none; width: 7px; height: 7px; border-radius: var(--ui-radius-sm); background: var(--ws-accent); }
 .settings-history__card { margin: 0; padding: 0; list-style: none; border: 1px solid var(--term-line); background: var(--settings-card); }
 
 .settings-history__row {
@@ -128,15 +128,18 @@
 }
 .settings-history__row + .settings-history__row::before { content: ''; position: absolute; top: 0; left: 52px; right: 0; border-top: 1px solid var(--term-line); }
 .settings-history__row[data-selected] { background: color-mix(in srgb, var(--term-accent) 7%, var(--settings-card)); }
-.settings-history__row:has(.settings-history__open:focus-visible) { box-shadow: inset 0 0 0 2px var(--term-accent); }
+.settings-history__row:has(.settings-history__open:focus-visible) { box-shadow: inset 0 0 0 2px var(--term-accent); outline: 2px solid transparent; outline-offset: -2px; }
 
 /* The kind's icon, until the pointer, the keyboard or a selection asks for the checkbox. */
 .settings-history__lead { position: relative; display: grid; place-items: center; width: 28px; height: 28px; }
+/* With a checkbox, the lead is its label: all 28px of it select the row (ST-21, ST-28). */
+label.settings-history__lead { cursor: pointer; }
+label.settings-history__lead:has(.settings-history__check:disabled) { cursor: not-allowed; }
 .settings-history__kind { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--ui-radius-sm); background: var(--term-alt); color: var(--term-mid); transition: opacity var(--t-soft) var(--t-ease); }
 .settings-history__lead .settings-history__check { position: absolute; opacity: 0; }
-.settings-history__row:focus-within .settings-history__check,
+.settings-history__row:is(:focus-visible, :has(:focus-visible)) .settings-history__check,
 [data-history-selecting] .settings-history__check { opacity: 1; }
-.settings-history__row:focus-within .settings-history__kind,
+.settings-history__row:is(:focus-visible, :has(:focus-visible)) .settings-history__kind,
 [data-history-selecting] .settings-history__kind { opacity: 0; }
 
 .settings-history__check {
@@ -146,8 +149,8 @@
   width: 15px;
   height: 15px;
   margin: 0;
-  border: 1px solid var(--term-line-s);
-  border-radius: 3px;
+  border: 1px solid var(--term-faint);
+  border-radius: var(--ui-radius-sm);
   background: var(--term-surface);
   cursor: pointer;
   transition: opacity var(--t-soft) var(--t-ease), background var(--t-soft) var(--t-ease), border-color var(--t-soft) var(--t-ease);
@@ -166,7 +169,7 @@
   transform: rotate(45deg);
 }
 .settings-history__check:indeterminate::after { content: ''; position: absolute; left: 3px; right: 3px; top: 6px; height: 1.75px; background: var(--term-surface); }
-.settings-history__check:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.settings-history__check:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .settings-history__check:disabled { cursor: not-allowed; }
 
 .settings-history__open {
@@ -191,12 +194,12 @@
 .settings-history__meta > :last-child { flex: 0 1 auto; }
 .settings-history__dot { color: var(--term-faint); }
 
-/* The time at rest; with a mouse, the row's actions take its place on hover or focus.
+/* The time at rest; with a mouse, the row's actions take its place on hover or keyboard focus.
    Only the actions take clicks here: a click on the time opens the row like any other. */
 .settings-history__end { position: relative; z-index: 1; display: grid; align-items: center; justify-items: end; min-width: 96px; pointer-events: none; }
 .settings-history__end > * { grid-area: 1 / 1; }
 .settings-history__when { display: inline-flex; align-items: center; gap: 5px; color: var(--term-muted); font-size: var(--fs-md); white-space: nowrap; transition: opacity var(--t-soft) var(--t-ease); }
-.settings-history__when[data-soon] { color: var(--term-select); }
+.settings-history__when[data-soon] { color: var(--term-waiting-text); }
 /* Above the time: while it fades out, opacity gives it a layer of its own that would take the clicks. */
 .settings-history__actions { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 4px; pointer-events: auto; transition: opacity var(--t-soft) var(--t-ease); }
 .settings-history__more {
@@ -211,12 +214,15 @@
   color: var(--term-mid);
   cursor: pointer;
 }
-.settings-history__more:hover:not(:disabled),
-.settings-history__more[aria-expanded='true'] { background: var(--term-alt); color: var(--term-fg); }
+@media (hover: hover) {
+  .settings-history__more:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+}
+.settings-history__more[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+.settings-history__more:not(:disabled):active { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); color: var(--term-fg); }
 .settings-history__more:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 .settings-history__more:disabled { opacity: .5; cursor: not-allowed; }
-.settings-history__row:not(:focus-within, :has([aria-expanded='true'])) .settings-history__actions { opacity: 0; pointer-events: none; }
-.settings-history__row:is(:focus-within, :has([aria-expanded='true'])) .settings-history__when { opacity: 0; }
+.settings-history__row:not(:focus-visible, :has(:focus-visible, [aria-expanded='true'])) .settings-history__actions { opacity: 0; pointer-events: none; }
+.settings-history__row:is(:focus-visible, :has(:focus-visible, [aria-expanded='true'])) .settings-history__when { opacity: 0; }
 [data-history-selecting] .settings-history__actions { display: none; }
 [data-history-selecting] .settings-history__row .settings-history__when { opacity: 1; }
 @media (hover: hover) and (pointer: fine) {
@@ -238,17 +244,20 @@
 }
 
 .settings-history__empty { margin-top: 18px; padding: 28px 24px 30px; border: 1px dashed var(--term-line-s); text-align: center; }
-.settings-history__empty > svg { color: var(--term-faint); }
+.settings-history__empty > svg { color: var(--term-faint); stroke-width: 1.3; }
 .settings-history__empty h3 { margin: 10px 0 4px; font-size: var(--fs-xl); font-weight: 600; }
 .settings-history__empty p { max-width: 46ch; margin: 0 auto; color: var(--term-muted); font-size: var(--fs-lg); line-height: 1.55; text-wrap: pretty; }
 .settings-history__empty .ui-btn { margin-top: 14px; }
 
 .settings-history__loading { display: grid; gap: 8px; margin-top: 18px; }
-.settings-history__loading span { height: 54px; border: 1px solid var(--term-line); background: linear-gradient(90deg, var(--settings-card), var(--term-alt), var(--settings-card)); background-size: 200% 100%; animation: settings-history-shimmer 1.2s ease-in-out infinite; }
-@keyframes settings-history-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+/* Flat bars on the soft skeleton pulse (index.css), as Scheduled and Trash draw theirs: opacity only (MO-13). */
+.settings-history__loading span { height: 54px; border: 1px solid var(--term-line); background: color-mix(in srgb, var(--term-fg) 6%, transparent); animation: t-skeleton-pulse-soft var(--t-loop) ease-in-out infinite; }
 
 /* ── An item's detail ─────────────────────────────────────────────── */
-.settings-history__detail { animation: settings-history-in 180ms cubic-bezier(.16, 1, .3, 1); }
+/* Item levels drill in from the right. Back also returns to Your memories,
+   in one frame (TR-26), so it enters only when opened. */
+.settings-history__detail,
+.memory-manage[data-entrance] { animation: settings-history-in var(--t-enter) cubic-bezier(0.23, 1, 0.32, 1); }
 @keyframes settings-history-in { from { opacity: 0; transform: translateX(12px); } }
 .settings-history__back {
   display: inline-flex;
@@ -258,30 +267,30 @@
   padding: 2px 6px 2px 0;
   border: 0;
   background: transparent;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   font-size: var(--fs-lg);
   cursor: pointer;
 }
 .settings-history__back:hover { text-decoration: underline; text-underline-offset: 3px; }
-.settings-history__back:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.settings-history__back:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .settings-history__detail-title { margin: 0 4px 4px; font-size: var(--fs-3xl); font-weight: 600; line-height: 1.35; text-wrap: balance; }
 .settings-history__detail-title:focus { outline: none; }
 /* A level whose title is the page's (pageTitle): its kind follows close under it. */
 .terminal-settings .settings-history__detail > h1.terminal-settings-heading { margin-bottom: 4px; text-wrap: balance; }
 .settings-history__detail-kind { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 4px 22px; color: var(--term-muted); font-size: var(--fs-lg); }
-.settings-history__lock { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--term-line); border-radius: 999px; font-size: var(--fs-sm); }
+.settings-history__lock { display: inline-flex; align-items: center; gap: 4px; margin-left: 4px; padding: 1px 7px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-pill); font-size: var(--fs-sm); }
 .settings-history__details { margin: 0; }
 .terminal-settings[data-cards] .settings-history__details .settings-row { grid-template-columns: 150px minmax(0, 1fr); padding: 10px 0; }
 .settings-history__details dt { color: var(--term-muted); font-size: var(--fs-lg); }
 .settings-history__details dd { min-width: 0; margin: 0; font-size: var(--fs-lg); overflow-wrap: anywhere; }
-.settings-history__details dd[data-soon] { color: var(--term-select); }
+.settings-history__details dd[data-soon] { color: var(--term-waiting-text); }
 .settings-history__details code { color: var(--term-mid); font-family: var(--message-code-font); font-size: var(--fs-md); }
 .settings-history__contents { margin: 0; padding-block: 0; list-style: none; }
 .terminal-settings[data-cards] .settings-history__contents .settings-row { grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; padding: 9px 0; font-size: var(--fs-lg); }
 .settings-history__contents svg { color: var(--term-faint); }
 .settings-history__contents small { color: var(--term-muted); font-size: var(--fs-sm); }
-.settings-history__contents button { padding: 0; border: 0; background: none; color: var(--term-accent); font: inherit; text-align: left; cursor: pointer; }
+.settings-history__contents button { padding: 0; border: 0; background: none; color: var(--term-accent-text); font: inherit; text-align: left; cursor: pointer; }
 .settings-history__transcript { padding-block: 4px; }
 .settings-history__message { padding: 12px 0; }
 .settings-history__message + .settings-history__message { border-top: 1px solid var(--term-line); }
@@ -342,7 +351,7 @@
 .terminal-settings--drawer[data-stacked] .settings-history__open::after { left: 0; }
 .terminal-settings--drawer[data-stacked] .settings-history__row:not([data-history-selecting] *) .settings-history__check { opacity: 0; pointer-events: none; }
 .terminal-settings--drawer[data-stacked] .settings-history__row:not([data-history-selecting] *) .settings-history__kind { opacity: 1; }
-.terminal-settings--drawer[data-stacked] .settings-history__check { width: 20px; height: 20px; border-radius: 50%; }
+.terminal-settings--drawer[data-stacked] .settings-history__check { width: 20px; height: 20px; border-radius: var(--ui-radius-pill); }
 .terminal-settings--drawer[data-stacked] .settings-history__check:checked::after { left: 6.5px; top: 3px; width: 5px; height: 10px; }
 .terminal-settings--drawer[data-stacked] .settings-history__title { display: -webkit-box; font-size: var(--fs-md); white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .terminal-settings--drawer[data-stacked] .settings-history__meta,
@@ -355,7 +364,7 @@
 .terminal-settings--drawer[data-stacked] .settings-history__details dt,
 .terminal-settings--drawer[data-stacked] .settings-history__details dd { font-size: var(--fs-md); }
 .terminal-settings--drawer[data-stacked] .settings-history__details dd { text-align: right; }
-.terminal-settings--drawer[data-stacked] .settings-history__message p { font-size: 15px; }
+.terminal-settings--drawer[data-stacked] .settings-history__message p { font-size: var(--message-body-size); }
 .terminal-settings--drawer[data-stacked] .settings-history__detail-actions {
   bottom: -40px;
   margin: 24px -16px -40px;

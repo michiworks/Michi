@@ -41,6 +41,7 @@
   white-space: nowrap;
 }
 .assistant-attach__x {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -58,6 +59,12 @@
 }
 .assistant-attach__x:hover {
   color: var(--term-fg);
+}
+/* The 16px × takes clicks across 24px (ST-21). */
+.assistant-attach__x::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
 }
 
 /* ── Chips for links in answers ──────────────────────────────── */
@@ -96,7 +103,7 @@
 .assistant-cite[aria-disabled='true'] {
   border-style: dashed;
   color: var(--term-muted);
-  cursor: default;
+  cursor: not-allowed;
 }
 .assistant-cite[aria-disabled='true']:hover {
   border-color: var(--term-line);
@@ -130,11 +137,10 @@
   overflow-wrap: anywhere;
   text-align: inherit;
   vertical-align: baseline;
-  transition: box-shadow var(--t-enter) ease, background var(--t-enter) ease;
+  transition: background var(--t-quick) var(--t-ease);
 }
 .prose .assistant-cite:hover {
   background: color-mix(in srgb, var(--term-accent) 18%, transparent);
-  box-shadow: 0 0 3px color-mix(in srgb, var(--term-accent) 30%, transparent);
   color: var(--term-accent);
 }
 .prose .assistant-cite__icon { margin-inline-end: 4px; color: inherit; vertical-align: -0.1em; }
@@ -144,7 +150,6 @@
 .prose .assistant-cite[aria-disabled='true'],
 .prose .assistant-cite[aria-disabled='true']:hover {
   background: color-mix(in srgb, var(--term-muted) 10%, transparent);
-  box-shadow: none;
   color: var(--term-muted);
 }
 

@@ -23,7 +23,7 @@ import {
   createMemory, deleteMemory, forgetMemory, memoryEvents, mergeMemoryInto, setConversationMemoryMode, supersedeMemory,
   type CreateMemoryInput,
 } from '../src/services/memory/memoryService';
-import { forgetConversationTurn, indexTurn, recallSearch } from '../src/services/memory/recallIndex';
+import { indexTurn, recallSearch } from '../src/services/memory/recallIndex';
 
 const ME = LOCAL_AGENT_OWNER_ID;
 const DAY = 24 * 60 * 60 * 1000;
@@ -165,21 +165,6 @@ describe('removal without forget', () => {
     assert.equal(state(fromX.id), null);
     assert.equal(state(fromY.id)?.status, 'active');
     assert.equal(state(fromY.id)?.mergedIntoId, null);
-  });
-
-  test('Don\'t recall on a put-away note\'s own excerpt hides that excerpt only: when the note it went into leaves, the note comes back', () => {
-    const tY = pastTurn('n-y', 'I play the cello on Tuesdays');
-    const tX = pastTurn('n-x', '我每周二拉大提琴');
-    const x = noted('用户每周二拉大提琴', 'n-x', tX);
-    const y = noted('The user plays the cello on Tuesdays.', 'n-y', tY);
-    merge(y, x);
-    const docId = (getDb().prepare("SELECT id FROM memory_recall_docs WHERE doc_kind = 'turn' AND ref_id = ?").get(tY) as { id: number }).id;
-    assert.equal(forgetConversationTurn({ ownerUserId: ME, docId, workspaceIds: 'all', includeUserScope: true, currentWorkspaceId: 'ws' }), true);
-    assert.ok(hidden(tY));
-    setConversationMemoryMode({ ownerUserId: ME }, 'n-x', 'use_only');
-    assert.equal(state(x.id), null, 'Michi\'s note of a conversation that left Learn goes');
-    assert.equal(state(y.id)?.status, 'active', 'the note put away into it comes back, not deleted');
-    assert.equal(state(y.id)?.mergedIntoId, null);
   });
 
   test('a predecessor whose own source no longer learns is removed, and the rule recurses into what was merged into it', () => {

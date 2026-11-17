@@ -19,7 +19,10 @@
  * background maintenance chats, temporary chats (memory/temporaryChat.ts), and
  * scheduled-job runs (their job's item says when one failed). A conversation
  * waiting longer than a month is abandoned,
- * not stalled. A conversation the Companion delegated is not "done" while
+ * not stalled. A failed or interrupted last turn stops waiting sooner: once
+ * the user had the conversation on screen since, or after a week, as on the
+ * Spaces Home and the sidebar's Failed mark (homeSections' failureSettled).
+ * A conversation the Companion delegated is not "done" while
  * its worker report covers it (SYNTHESIS D5).
  *
  * Versions encode the state only (R2.7): waiting / stalled / done, the turn,
@@ -33,13 +36,13 @@
  * conversations stand, for worker reports).
  */
 
-import { COMPANION_LIMITS, isAssistantWorkspaceSettings, isSystemWorkspaceSettings, type CompanionSettings, type CompanionTarget } from 'michi-shared';
+import { COMPANION_LIMITS, TURN_ENDED_EARLY, isAssistantWorkspaceSettings, isSystemWorkspaceSettings, type CompanionSettings, type CompanionTarget } from 'michi-shared';
 import { LOCAL_AGENT_OWNER_ID } from '../../agentOwner';
 import { getDb } from '../../db';
 import { notTemporaryChatSql } from '../../memory/temporaryChat';
-import { lastQuestion, serverLiveWait, STALLED_AFTER_MS, type HomeLiveWaitReader } from '../../pages/homeSections';
+import { failureSettled, lastQuestion, serverLiveWait, STALLED_AFTER_MS, type HomeLiveWaitReader } from '../../pages/homeSections';
 import { stableHash } from '../observations';
-import { listDelegationsSince } from '../repository';
+import { getItemByKey, listDelegationsSince, resolveItems } from '../repository';
 import type {
   CompanionDraftInput,
   CompanionFocusEntry,
@@ -67,11 +70,7 @@ const TITLE_MAX = 120;
 const SUMMARY_MAX = 200;
 
 /** Turns that completed without finishing their work (as the Spaces Home words them). */
-const ENDED_EARLY: Record<string, string> = {
-  max_tokens: 'Stopped early: it reached its output limit',
-  max_turn_requests: 'Stopped early: it reached its step limit',
-  refusal: 'Stopped: the agent declined to continue',
-};
+const ENDED_EARLY: Readonly<Record<string, string>> = TURN_ENDED_EARLY;
 
 // ── Reading conversations ───────────────────────────────────────────────────
 
@@ -188,6 +187,17 @@ function waitOf(row: ConversationRow, live: HomeLiveWaitReader): { kind: WaitKin
     return { kind: 'asked', summary: oneLine(question ? `Asked: ${question}` : 'Asked you a question', SUMMARY_MAX), at };
   }
   return null;
+}
+
+/** Local turn events confirm an answer immediately; they need no two-poll absence check. */
+export function resolveMichiWaitingItem(nodeId: string, live: HomeLiveWaitReader = serverLiveWait, now = Date.now()): boolean {
+  const item = getItemByKey(`michi:node:${nodeId}`);
+  if (!item || item.status === 'resolved' || item.status === 'muted'
+    || (item.subtype !== 'michi_waiting' && item.subtype !== 'michi_stalled')) return false;
+  const row = rowsForNodes(LOCAL_AGENT_OWNER_ID, [nodeId])[0];
+  // Re-read the current turn: a late answer to an older request must not clear a new wait.
+  if (row && waitOf(row, live)) return false;
+  return resolveItems([item.id], now).length > 0;
 }
 
 // ── Observation states ──────────────────────────────────────────────────────
@@ -370,7 +380,7 @@ export interface CompanionWorkerState {
   viewedAt: number | null;
   /**
    * The user wrote in it themselves (DESIGN-v2 §4): a user message besides
-   * the brief that started it and the follow-ups the agent sent
+   * the first message that started it and the follow-ups the agent sent
    * (`companionSend`, or a thread message from one of the agent's own
    * conversations), which never count.
    */
@@ -396,11 +406,13 @@ interface WorkerRow {
 
 /**
  * A user message nobody but the user wrote, as SQL on `u` (DESIGN-v2 §4):
- * not one of the agent's follow-ups (`companionSend`) and not a thread
- * message from a conversation in the agent's own workspace (`?` is that
- * workspace list as JSON; the MVP's assistant sent those).
+ * not one of the agent's follow-ups (`companionSend`), not Michi's automatic
+ * continuation of a turn (`autoContinue`) and not a thread message from a
+ * conversation in the agent's own workspace (`?` is that workspace list as
+ * JSON; the MVP's assistant sent those).
  */
 const HUMAN_MESSAGE_SQL = `(u.metadata IS NULL OR NOT json_valid(u.metadata) OR (json_extract(u.metadata,'$.companionSend') IS NULL
+  AND json_extract(u.metadata,'$.autoContinue') IS NULL
   AND (json_extract(u.metadata,'$.threadMessage.fromNodeId') IS NULL OR json_extract(u.metadata,'$.threadMessage.fromNodeId') NOT IN
     (SELECT f.id FROM nodes f WHERE f.workspace_id IN (SELECT value FROM json_each(?))))))`;
 
@@ -464,7 +476,8 @@ function focusSnapshot(owner: string, live: HomeLiveWaitReader, now: number): Co
   return rows
     .map((row): CompanionFocusEntry => {
       const wait = waitOf(row, live);
-      const state: CompanionFocusEntry['state'] = wait ? 'waiting' : row.turn_status === 'active' ? 'running' : 'idle';
+      // A failure the user has seen since no longer waits, as in the feed.
+      const state: CompanionFocusEntry['state'] = wait && !failureSettled(row, wait.at, now) ? 'waiting' : row.turn_status === 'active' ? 'running' : 'idle';
       return {
         workspaceId: row.workspace_id,
         workspaceName: oneLine(row.workspace_name, 80),
@@ -575,7 +588,7 @@ class MichiSource implements CompanionMichiSource {
     };
     const wait = waitOf(row, this.live);
     if (wait) {
-      if (now - wait.at > MICHI_ABANDONED_AFTER_MS) return null;
+      if (now - wait.at > MICHI_ABANDONED_AFTER_MS || failureSettled(row, wait.at, now)) return null;
       return { ...base, section: now - wait.at >= STALLED_AFTER_MS ? 'stalled' : 'waiting', summary: wait.summary, at: wait.at, wait: wait.kind };
     }
     // Done: completed in the window, not answered since, and not on screen since it finished.

@@ -1,13 +1,16 @@
 // ask_user's contract with the model: name, description, schema, validation
 // and result text. The runtime's builtin, Michi's MCP server and Pi's tool
 // all serve it, each with its own transport.
-import type { AskUserOption, AskUserQuestion, JsonSchemaObject } from './types';
+import { FORM_FIELD_JSON_SCHEMA, parseFormField, type FormFieldValue } from 'michi-shared';
+import type { AskUserAnswers, AskUserOption, AskUserQuestion, JsonSchemaObject } from './types';
 
 export const ASK_USER_TOOL = 'ask_user';
 
-export const ASK_USER_DESCRIPTION = 'Ask the user one or more structured questions with selectable options. '
+export const ASK_USER_DESCRIPTION = 'Ask the user one or more structured questions. '
   + 'Use when you need the user to make a choice or provide input before proceeding. '
-  + 'Each question can be single-select or multi-select, and users can always type a custom answer.';
+  + 'A question either lists options, single-select or multi-select, and users can always type a custom answer; '
+  + 'or it has a field instead of options: one control such as a number, slider, date, time, text box or checkbox, '
+  + 'whose answer comes back as a typed value (a number, true/false, a list for multiselect, null when left empty).';
 
 export const ASK_USER_NOT_ANSWERED = 'The user did not answer the questions (skipped or timed out).';
 
@@ -32,7 +35,7 @@ export const ASK_USER_INPUT_SCHEMA: JsonSchemaObject = {
             type: 'array',
             minItems: 2,
             maxItems: 4,
-            description: 'Available choices (2-4 options).',
+            description: 'Available choices (2-4 options). Leave out when the question has a field.',
             items: {
               type: 'object',
               properties: {
@@ -43,8 +46,9 @@ export const ASK_USER_INPUT_SCHEMA: JsonSchemaObject = {
             },
           },
           multiSelect: { type: 'boolean', default: false, description: 'Allow multiple selections.' },
+          field: { ...FORM_FIELD_JSON_SCHEMA, description: 'Instead of options: one control whose typed value is the answer.' },
         },
-        required: ['question', 'options'],
+        required: ['question'],
       },
     },
   },
@@ -58,6 +62,15 @@ export function parseAskUserQuestions(raw: unknown): AskUserQuestion[] | string 
   for (const [i, entry] of raw.entries()) {
     if (!isRecord(entry) || typeof entry.question !== 'string' || entry.question.trim() === '') {
       return `questions[${i}].question must be a non-empty string.`;
+    }
+    if (entry.field !== undefined) {
+      // A field takes the place of the options: any sent alongside it are ignored.
+      const field = parseFormField(entry.field, `questions[${i}].field`);
+      if (typeof field === 'string') return `${field}.`;
+      const question: AskUserQuestion = { question: entry.question, options: [], multiSelect: false, field };
+      if (typeof entry.header === 'string') question.header = entry.header;
+      questions.push(question);
+      continue;
     }
     if (!Array.isArray(entry.options) || entry.options.length < 2 || entry.options.length > 4) {
       return `questions[${i}].options must list 2-4 options.`;
@@ -76,4 +89,20 @@ export function parseAskUserQuestions(raw: unknown): AskUserQuestion[] | string 
     questions.push(question);
   }
   return questions;
+}
+
+/**
+ * The answers keyed by question, as the ask_user tool returns them: a field
+ * question's typed value, any other question's answer text. A value sent for
+ * a question without a field is not taken (approvals read text), and a field
+ * question answered from a card that cannot draw fields keeps its text.
+ */
+export function askUserAnswers(
+  questions: ReadonlyArray<{ question: string; field?: unknown }>,
+  answers: ReadonlyArray<{ question: string; answer: string; value?: FormFieldValue }>,
+): AskUserAnswers {
+  const fields = new Set(questions.filter((q) => q.field !== undefined).map((q) => q.question));
+  const byQuestion: AskUserAnswers = {};
+  for (const a of answers) byQuestion[a.question] = a.value !== undefined && fields.has(a.question) ? a.value : a.answer;
+  return byQuestion;
 }

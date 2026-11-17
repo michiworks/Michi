@@ -80,8 +80,8 @@ describe('search leaves the assistant out', () => {
     }
   });
 
-  test('other agents can neither find, list nor read the assistant\'s threads', () => {
-    const all = searchMessages('ws-a', null, 'pelican', 'all');
+  test('other agents can neither find, list nor read the assistant\'s threads', async () => {
+    const all = await searchMessages('ws-a', null, 'pelican', 'all');
     assert.match(all.text, /Found 1 match/);
     assert.doesNotMatch(all.text, new RegExp(assistant.nodeId));
     assert.equal(listThreads('ws-a', null, assistant.workspaceId).status, 'no_workspace');
@@ -92,7 +92,7 @@ describe('search leaves the assistant out', () => {
     assert.equal(readNode('ws-a', null, 'n-a').status, 'ok');
   });
 
-  test('search_messages across workspaces leaves out Trash and workspaces AI navigation may not read', () => {
+  test('search_messages across workspaces leaves out Trash and workspaces AI navigation may not read', async () => {
     for (const [id, title] of [['ws-b', 'Pelican elsewhere'], ['ws-trash', 'Pelican in Trash'], ['ws-private', 'Pelican private']]) {
       saveWorkspace({ id, name: id, cwd: `/tmp/${id}`, created_at: 1, updated_at: 1, settings: null });
       seedChat(`n-${id}`, id, title);
@@ -100,12 +100,12 @@ describe('search leaves the assistant out', () => {
     }
     getDb().prepare('UPDATE workspaces SET deleted_at = 5 WHERE id = ?').run('ws-trash');
     setAiGlobalContext('ws-private', false);
-    const all = searchMessages('ws-a', null, 'pelican', 'all');
+    const all = await searchMessages('ws-a', null, 'pelican', 'all');
     assert.match(all.text, /Found 2 matches/);
     assert.match(all.text, /n-ws-b/);
     assert.doesNotMatch(all.text, /n-ws-trash|n-ws-private/);
     // Searching one workspace is unchanged.
-    assert.match(searchMessages('ws-trash', null, 'pelican').text, /n-ws-trash/);
+    assert.match((await searchMessages('ws-trash', null, 'pelican')).text, /n-ws-trash/);
   });
 
   test('unpromoted page helpers stay out of every ordinary search and export, then appear immediately after promotion', async () => {

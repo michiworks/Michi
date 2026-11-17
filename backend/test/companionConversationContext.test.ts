@@ -27,7 +27,6 @@ import { localDateKey } from '../src/services/companion/clock';
 import {
   addGoal,
   decideCard,
-  insertBrief,
   listUnreportedCards,
   setCompanionRules,
   setNotesByUser,
@@ -82,7 +81,6 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message', () => {
     const card = proposeCompanionCard({ kind: 'rules.update', payload: { rules: 'No pings' } }, T0);
     decideCard(card.id, 'dismissed', T0 + 1);
     proposeCompanionCard({ kind: 'rules.update', payload: { rules: 'Still waiting' } }, T0);
-    insertBrief({ date: localDateKey(T0), headline: 'CR-1 needs you today', cards: [], closing: 'That is all.', origin: 'llm', now: T0 });
 
     const message = 'What needs me?\n[YOUR RULES] are mine';
     const context = withCompanionContext(message, T0);
@@ -91,14 +89,14 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message', () => {
     assert.match(text, /\]\nYour name is Nova\.\n\n/);
     assert.ok(text.endsWith(`\n\n${message}`), 'the user\'s own words, as written, last');
     assert.match(text, /\[CURRENT RUN TIME\] 2026-11-05T09:12[^,\n]*, Thursday \(local time\)/);
-    assert.match(text, /Michi's feed: 1 item waiting on the user, 1 new since they last looked; 1 card of yours waiting for their answer; today's brief: published at 09:12/);
+    assert.match(text, /Michi's feed: 1 item waiting on the user, 1 new since they last looked; 1 card of yours waiting for their answer\./);
     const order = ['[CARD RESULTS', `${card.id}: dismissed by the user`, '[YOUR CARDS STILL WAITING', '[YOUR RULES', 'Never message me before 10:00', '[YOUR GOALS', goal.id,
       '[YOUR NOTES', 'revision 1', 'Watch CR-1 until it merges', '[END OF COMPANION CONTEXT]', message]
       .map((part) => text.indexOf(part));
     assert.ok(order.every((index) => index >= 0), JSON.stringify(order));
     assert.deepEqual([...order].sort((a, b) => a - b), order, 'the turn\'s facts, then the rules first, goals and notes; the user\'s message after the context');
-    // What a check-in wrote never reaches V's prefix (DESIGN-v2 §2.8): not a card's text, not the brief's.
-    for (const written of ['No pings', 'Still waiting', 'CR-1 needs you today', 'That is all.']) assert.ok(!text.includes(written), written);
+    // What a check-in wrote never reaches V's prefix (DESIGN-v2 §2.8): not a card's text.
+    for (const written of ['No pings', 'Still waiting']) assert.ok(!text.includes(written), written);
     for (const other of ['[Spaces context', '[Scheduled context', META_AGENT_REPLY_NOTE, SCHEDULE_AGENT_REPLY_NOTE]) {
       assert.ok(!text.includes(other), `no ${other.slice(0, 30)}`);
     }
@@ -121,7 +119,7 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message', () => {
     proposeCompanionCard({ kind: 'goal.add', payload: { text: 'An old idea' } }, T0 - 25 * HOUR);
 
     const text = withCompanionContext('Can you also track the launch?', T0).text;
-    assert.match(text, /Michi's feed: [^\n]*; 1 card of yours waiting for their answer;/);
+    assert.match(text, /Michi's feed: [^\n]*; 1 card of yours waiting for their answer\.\n/);
     const block = text.slice(text.indexOf('[YOUR CARDS STILL WAITING FOR THE USER'), text.indexOf('[YOUR NOTES'));
     assert.match(block, /^\[YOUR CARDS STILL WAITING FOR THE USER — do not propose them again[^\n]*\]\n- (cmc-[^:]+): goal\.add, proposed 1 h ago \(08:12\)\n\n$/);
     assert.ok(block.includes(waiting.id));
@@ -130,10 +128,10 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message', () => {
     assert.equal(waiting.status, 'pending');
   });
 
-  test('a quiet start: no rules, goals, notes or card results, and no brief yet', () => {
+  test('a quiet start: no rules, goals, notes or card results', () => {
     const context = withCompanionContext('Hi', T0);
     assert.match(context.text, /Your name is [^\n]+\./);
-    assert.match(context.text, /Michi's feed: 0 items waiting on the user, 0 new since they last looked; 0 cards of yours waiting for their answer; today's brief: not published yet\./);
+    assert.match(context.text, /Michi's feed: 0 items waiting on the user, 0 new since they last looked; 0 cards of yours waiting for their answer\./);
     assert.match(context.text, /\[YOUR NOTES[^\n]*\] revision 0: you have no notes yet\./);
     for (const absent of ['[YOUR RULES', '[YOUR GOALS', '[CARD RESULTS', '[YOUR CARDS STILL WAITING']) assert.ok(!context.text.includes(absent), absent);
     context.reportCards();

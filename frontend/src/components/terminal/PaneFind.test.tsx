@@ -29,7 +29,7 @@ function Frame({ m }: { m: ChatMessage }) {
     <div data-msg-id={m.id}>
       <MessageBlock
         m={m} index={0} isDark={false} copyText={() => ''} onRetry={() => {}} showThoughts={false}
-        fontFamily="inherit" density="comfortable" usageInfo={m.role === 'assistant' ? { durationMs: 1_000, totalTokens: 1_200 } : undefined}
+        density="comfortable" usageInfo={m.role === 'assistant' ? { durationMs: 1_000, totalTokens: 1_200 } : undefined}
       />
     </div>
   );
@@ -211,5 +211,14 @@ describe('PaneFind', () => {
     render(<PaneFind open rootRef={{ current: null }} onClose={onClose} />);
     fireEvent.keyDown(input(), { key: 'Escape', ...ime });
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('shows that older messages are still being read, or are not searched yet and can be', () => {
+    const onLoadOlder = vi.fn();
+    const { rerender } = render(<PaneFind open rootRef={{ current: null }} onClose={vi.fn()} olderHistory="reading" onLoadOlder={onLoadOlder} />);
+    expect(screen.getByText('…')).toBeTruthy();
+    rerender(<PaneFind open rootRef={{ current: null }} onClose={vi.fn()} olderHistory="more" onLoadOlder={onLoadOlder} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Search older' }));
+    expect(onLoadOlder).toHaveBeenCalled();
   });
 });

@@ -10,7 +10,7 @@ vi.mock('../services/openUrl', () => ({ openPreferredUrl }));
 async function renderEditor() {
   const ref = createRef<MentionEditorHandle>();
   const view = render(<MentionEditor ref={ref} value="" mentions={[]} onChange={() => {}} currentNodeId="current"
-    sameTreeNodes={[]} artifacts={[]} onSubmit={() => {}} />);
+    artifacts={[]} onSubmit={() => {}} />);
   await waitFor(() => expect(ref.current?.editor).toBeTruthy());
   return { view, editor: ref.current!.editor! };
 }

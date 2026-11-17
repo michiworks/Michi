@@ -25,7 +25,7 @@ import '../threads/peek.css';
 
 const BODY_MAX = 20_000;
 const THREADS_PAGE: MichiAssistantPage = { kind: 'threads' };
-const PROSE_STYLE: React.CSSProperties = { color: 'var(--term-mid)', fontSize: 'var(--fs-lg)', lineHeight: 1.6 };
+const PROSE_STYLE: React.CSSProperties = { color: 'var(--term-fg)', fontSize: 'var(--fs-lg)', lineHeight: 1.6 };
 
 /**
  * The side drawer for a row of a database a person made: its title and every

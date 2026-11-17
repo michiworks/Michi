@@ -7,8 +7,6 @@ const HEADINGS = '.settings-section__title, .meta-set__head > h3, .meta-set__sec
 const SCREENS = 2;
 /** The fewest groups worth a list. */
 const MIN_ENTRIES = 3;
-/** Narrower than this, the page column keeps the room (the window is laid out at a fixed width). */
-const MIN_WINDOW_WIDTH = 1000;
 /** A group counts as the one in view once its top is this close under the page's top. */
 const SPY_OFFSET = 48;
 
@@ -18,8 +16,7 @@ const sameEntries = (a: Entry[], b: Entry[]) => a.length === b.length
   && a.every((entry, i) => entry.label === b[i].label && entry.target === b[i].target && entry.sub === b[i].sub);
 
 function readEntries(root: HTMLElement): Entry[] {
-  const shell = root.parentElement;
-  if (!shell || shell.clientWidth < MIN_WINDOW_WIDTH || root.scrollHeight <= root.clientHeight * SCREENS) return [];
+  if (root.scrollHeight <= root.clientHeight * SCREENS) return [];
   const entries = Array.from(root.querySelectorAll<HTMLElement>(HEADINGS)).flatMap((heading) => {
     const label = heading.textContent?.trim();
     const target = heading.closest<HTMLElement>('section') ?? heading;
@@ -29,9 +26,10 @@ function readEntries(root: HTMLElement): Entry[] {
 }
 
 /**
- * On this page: a long Settings page's groups in a column beside it, the one
- * in view marked; choosing one scrolls the page to it. `contentRef` is the
- * page's scrolling column, which keeps the list current as the page loads.
+ * On this page: a long Settings page's groups, the one in view marked;
+ * choosing one scrolls the page to it. SettingsMain puts it in the panel
+ * beside the window when the screen has room for it there. `contentRef` is
+ * the page's scrolling column, which keeps the list current as the page loads.
  */
 export function SettingsToc({ contentRef }: { contentRef: React.RefObject<HTMLElement | null> }) {
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -53,7 +51,6 @@ export function SettingsToc({ contentRef }: { contentRef: React.RefObject<HTMLEl
     mutations.observe(root, { childList: true, subtree: true });
     const sizes = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
     sizes?.observe(root);
-    if (root.parentElement) sizes?.observe(root.parentElement);
     return () => { cancelAnimationFrame(frame); mutations.disconnect(); sizes?.disconnect(); };
   }, [contentRef]);
 

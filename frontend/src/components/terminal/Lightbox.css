@@ -1,0 +1,8 @@
+/* The viewer's ×, on its near-black backdrop in every palette: it takes the
+   dark bars' ink and hover fill, which stay legible there, where the
+   palette's own hover fill (light on Bone and Slate) under white ink did not. */
+.ui-overlay-close.lightbox-close { color: var(--sel-bar-fg); }
+@media (hover: hover) {
+  .ui-overlay-close.lightbox-close:hover { background: var(--sel-bar-hover); color: var(--sel-bar-fg); }
+}
+.ui-overlay-close.lightbox-close:active { background: var(--sel-bar-hover); color: var(--sel-bar-fg); }

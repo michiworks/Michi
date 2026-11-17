@@ -4,6 +4,7 @@ import CommandPalette from './CommandPalette';
 import { __resetHomeDraftForTests, receiveHomeDraft } from '../../state/homeDraft';
 import { paletteRow } from '../../test/paletteRow';
 import { resetTemporaryChatDraft, useTemporaryChatDraft } from '../../state/temporaryChatDraft';
+import type { NodeGroupedResult } from '../../services/api';
 
 const selectProject = vi.hoisted(() => vi.fn());
 const revealNode = vi.hoisted(() => vi.fn());
@@ -53,9 +54,16 @@ vi.mock('../../state/prefs', () => ({
 
 vi.mock('../../lib/digestPrompt', () => ({ requestDigest: vi.fn() }));
 
-const messageSearch = vi.hoisted(() => ({ status: 'ready' as 'idle' | 'loading' | 'ready' | 'error' }));
+const messageSearch = vi.hoisted(() => ({
+  status: 'ready' as 'idle' | 'loading' | 'ready' | 'error',
+  nodes: [] as NodeGroupedResult[],
+  attempt: 0,
+}));
 vi.mock('../../state/useNodeSearch', () => ({
-  useNodeSearch: () => ({ nodes: [], totalNodes: 0, status: messageSearch.status }),
+  useNodeSearch: (_query: string, _backends: unknown, attempt = 0) => {
+    messageSearch.attempt = attempt;
+    return { nodes: messageSearch.nodes, totalNodes: messageSearch.nodes.length, status: messageSearch.status };
+  },
 }));
 
 beforeEach(() => {
@@ -66,6 +74,7 @@ beforeEach(() => {
   selectProject.mockReset();
   revealNode.mockReset();
   messageSearch.status = 'ready';
+  messageSearch.attempt = 0;
 });
 
 describe('CommandPalette workspace routing', () => {
@@ -136,6 +145,25 @@ describe('CommandPalette message search', () => {
     expect(screen.getByText('No matches for “zzz-unmatched”')).toBeTruthy();
   });
 
+  it('makes each matching message a row ↓ reaches, which opens its thread at that message', () => {
+    messageSearch.nodes = [{
+      nodeId: 'n1', nodeTitle: 'Launch', workspaceId: 'workspace-1', workspaceName: 'Workspace A', treeId: null,
+      lastMessageAt: 1, totalMatches: 2, breadcrumb: ['Launch'],
+      snippets: [{ messageId: 'm1', role: 'user', snippet: 'first draft' }, { messageId: 'm2', role: 'assistant', snippet: 'second draft' }],
+    }];
+    try {
+      render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={vi.fn()} />);
+      const input = screen.getByPlaceholderText('Search chats, commands, messages…');
+      fireEvent.change(input, { target: { value: 'draft' } });
+      const activeRow = () => document.querySelector('[data-active="true"]')?.textContent ?? '';
+      for (let i = 0; i < 20 && activeRow() !== 'second draft'; i += 1) fireEvent.keyDown(input, { key: 'ArrowDown' });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(revealNode).toHaveBeenCalledWith('n1', { workspaceId: 'workspace-1', messageId: 'm2' });
+    } finally {
+      messageSearch.nodes = [];
+    }
+  });
+
   it('offers to start a thread with words that found nothing, and leaves them in the Home composer', async () => {
     const setPage = vi.fn();
     const onClose = vi.fn();
@@ -155,6 +183,26 @@ describe('CommandPalette message search', () => {
       stop();
       __resetHomeDraftForTests();
     }
+  });
+
+  it('says a failed message search failed, with a Retry row that searches again', async () => {
+    messageSearch.status = 'error';
+    const onClose = vi.fn();
+    render(<CommandPalette activePage="dashboard" setPage={vi.fn()} onClose={onClose} />);
+    const input = screen.getByPlaceholderText('Search chats, commands, messages…');
+    fireEvent.change(input, { target: { value: 'zzz-unmatched' } });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(screen.getByRole('alert').textContent).toBe('Couldn’t search messages');
+    expect(screen.queryByText('No matches for “zzz-unmatched”')).toBeNull();
+    // Last of the rows, after those that use the words anyway; ↓ reaches it.
+    const retry = screen.getByText(paletteRow('Retry')).closest('li')!;
+    for (let i = 0; i < 5; i++) fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(retry.getAttribute('data-active')).toBe('true');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(messageSearch.attempt).toBe(1);
+    fireEvent.click(retry);
+    expect(messageSearch.attempt).toBe(2);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

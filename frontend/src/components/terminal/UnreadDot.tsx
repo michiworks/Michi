@@ -1,24 +1,24 @@
 /**
- * Sidebar unread marker: a small green dot in the gutter left of a row's text.
+ * Classic sidebar rows' unread marker: a small green dot in the gutter left of
+ * a row's text. Card modes paint the row's right-edge rail green instead
+ * (SidebarOpenRail), which leaves their gutter to the pin star. The levels
+ * below and the colour are the same there.
  *
  * - `self`: this row's own reply finished after you last opened it.
  * - `within`: a collapsed row (thread, branch or workspace) whose hidden
  *   children hold such a reply. Drawn as a ring; once the row is expanded the
  *   children carry their own dots and the ring goes away.
  *
- * Green (`--term-digest`) matches the Map card's unread dot. The accent colour
- * stays reserved for "running", which the right-edge rail shows, so the two
- * signals differ in both colour and side.
+ * Green (`--term-digest`) matches the Map card's unread dot. Running is the
+ * right-edge rail in its own colour, so in Classic the two signals differ in
+ * both colour and side; on a card row's rail, which shows one at a time, in
+ * colour.
  *
  * The span is always mounted and only scaled (see `.sb-unread-dot` in
  * index.css). A row that hydrates or expands already unread paints settled, and
  * a reply that lands on a visible row pops its dot in.
  */
 export type UnreadMark = 'none' | 'self' | 'within';
-
-/** Dot (6px) plus the air (4px) before the text it marks: how far left of the
- *  row's text the dot's left edge sits. */
-export const UNREAD_DOT_LEAD = 10;
 
 /** Title weight for a row that is itself unread. Replaces the old 900, which
  *  CJK titles could not show: PingFang tops out at Semibold, so 900 rendered

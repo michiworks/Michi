@@ -188,3 +188,12 @@ export function sessionReplayRows(rows: readonly ReplayRow[], opts: ReplayViewOp
 export function sessionReplayHistory(rows: readonly ReplayRow[], opts: ReplayViewOptions): ReplayEntry[] {
     return sessionReplayRows(rows, opts).map(({ role, content }) => ({ role, content }));
 }
+
+/**
+ * The view as a compatible-resume transcript (services/resumeStrategy.ts):
+ * each entry keeps its time, which places the node's per-turn summaries
+ * where a long transcript's middle is cut.
+ */
+export function sessionReplayTranscript(rows: readonly ReplayRow[], opts: ReplayViewOptions): Array<ReplayEntry & { createdAt: number }> {
+    return sessionReplayRows(rows, opts).map(({ role, content, created_at }) => ({ role, content, createdAt: created_at }));
+}

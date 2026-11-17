@@ -37,7 +37,7 @@ export default function DigestGenerationStatus({ digest }: { digest: DigestState
           <section aria-label="Digest generation" style={{ minWidth: 0, padding: '12px 0', fontSize: 'var(--fs-md)' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, minHeight: 20 }}>
               <span role="status" className="term-shimmer" style={{ color: 'var(--term-digest)', overflowWrap: 'anywhere', minWidth: 0 }}>
-                {generation?.activity || 'Generating digest...'}
+                {generation?.activity || 'Generating digest…'}
               </span>
               <span aria-hidden style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--term-muted)', fontVariantNumeric: 'tabular-nums' }}>
                 {duration}

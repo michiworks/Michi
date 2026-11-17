@@ -24,4 +24,9 @@ describe('open background work requests', () => {
     expect(read({ nodeId: 'n1', focus: { kind: 'workflow', threadKey: 't1' } })).toEqual({ nodeId: 'n1' });
     expect(read({ focus: { kind: 'workflow', runKey: 'k' } })).toBeNull();
   });
+
+  it("keep the roster line's subagents, without anything that is not an id", () => {
+    expect(read({ nodeId: 'n1', subagentIds: ['a', '', 7, 'b'] })).toEqual({ nodeId: 'n1', subagentIds: ['a', 'b'] });
+    expect(read({ nodeId: 'n1', subagentIds: 'a' })).toEqual({ nodeId: 'n1' });
+  });
 });

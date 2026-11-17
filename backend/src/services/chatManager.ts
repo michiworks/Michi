@@ -23,7 +23,7 @@ import { rebuildInheritance } from './sessionRestore';
 import { chatHub } from '../agents/chatHub';
 import { AssistantBindingError, resolveAssistantBindingForSession, type AssistantSessionBinding } from '../assistant/binding';
 import { getCompanionSettings } from './companion/settings';
-import { sessionReplayHistory } from '../agents/sessionReplayView';
+import { sessionReplayHistory, sessionReplayTranscript } from '../agents/sessionReplayView';
 import { chatOwner } from '../agents/ownerMapping';
 import { workspaceSessionCwd } from './workspaceSandbox';
 import { workConversationCwd } from './workConversationWorktree';
@@ -47,8 +47,10 @@ import {
     isCheckinNodeId,
     parseEffectiveAgentDefinitionV1,
     type EffectiveAgentDefinitionV1,
+    type WorkspaceStructureChangedEvent,
 } from "michi-shared";
 import { DEFAULT_PLATFORM_POLICY } from "../agents/runs/effectivePermissionPolicy";
+import { chatTargetUnavailable, type ChatTargetUnavailable } from "./chatTarget";
 
 export type { ChatMessage, ExtraContext };
 
@@ -134,6 +136,12 @@ function refuseCheckinNode(nodeId: string): void {
     if (isCheckinNodeId(nodeId)) {
         throw new CheckinSessionError('checkin_node', `check-in node ${nodeId} opens only a fresh check-in session`);
     }
+}
+
+/** Why a chat takes no more turns (archived, in the Trash or gone, itself or with its thread or workspace), or null. */
+function retiredChat(nodeId: string): ChatTargetUnavailable | null {
+    const reason = chatTargetUnavailable(getNode(nodeId));
+    return reason === 'not_chat' ? null : reason;
 }
 
 function primaryProfileHash(effectiveDefinition: EffectiveAgentDefinitionV1): string {
@@ -364,7 +372,7 @@ export class ChatManager {
 
     /**
      * Release the live chat sessions their runtime lets go when idle
-     * (AgentRuntime.idleRelease; Kiro). The next message, Watch delivery,
+     * (AgentRuntime.idleRelease; Kiro, Claude). The next message, Watch delivery,
      * thread message or scheduled run resumes each natively, so a chat
      * keeps its session when its user turned Native Resume off, or when its
      * stored binding does not name that native session. Each release holds
@@ -399,6 +407,72 @@ export class ChatManager {
             }
         }
         return released;
+    }
+
+    /**
+     * Release the live sessions of the chats a structure frame archived or
+     * deleted, alone or with their thread or workspace, purges included.
+     * Such a chat takes no turn, so its session only holds memory; its
+     * native binding stays, so one restored and messaged again resumes
+     * natively. Each release holds the node's restore lock and asks again
+     * inside it, as releaseIdleSessions does. A chat keeps its session while
+     * chatHub is busy with it, or while its runtime would keep it however
+     * long it had been idle (AgentRuntime.idleRelease: work still runs in it,
+     * or the runtime keeps its sessions); runtimes without idleRelease keep
+     * theirs. Agent Runs, maintenance and check-in sessions have their own
+     * lifecycles.
+     */
+    async releaseRetiredSessions(frame: WorkspaceStructureChangedEvent): Promise<number> {
+        const nodeIds = new Set<string>();
+        const treeIds = new Set<string>();
+        const workspaceIds = new Set<string>();
+        for (const change of frame.changes) {
+            if (change.op !== 'archived' && change.op !== 'deleted' && change.op !== 'purged') continue;
+            if (change.entity === 'node' && change.nodeId) nodeIds.add(change.nodeId);
+            else if (change.entity === 'tree' && change.treeId) treeIds.add(change.treeId);
+            else if (change.entity === 'workspace') workspaceIds.add(change.workspaceId);
+        }
+        // An oversized frame names nothing: every live chat is checked.
+        const everyChat = frame.resync === true;
+        if (!everyChat && nodeIds.size + treeIds.size + workspaceIds.size === 0) return 0;
+        const placementOf = getDb().prepare('SELECT workspace_id, tree_id, maintenance_job_id FROM nodes WHERE id = ?');
+        const named = (id: string): boolean => {
+            // Purged rows too: a purged workspace's chats still name it.
+            const row = placementOf.get(id) as { workspace_id: string; tree_id: string | null; maintenance_job_id: string | null } | undefined;
+            if (row?.maintenance_job_id) return false;
+            if (nodeIds.has(id)) return true;
+            if (!row) return false;
+            return everyChat || workspaceIds.has(row.workspace_id) || (!!row.tree_id && treeIds.has(row.tree_id));
+        };
+        let released = 0;
+        for (const { session, owner } of sessionRegistry.listLiveSessions()) {
+            const runtime = getRuntime(session.runtimeId);
+            if (!runtime || !this.retiredReleasable(session, owner, runtime) || !named(session.id)) continue;
+            const reason = retiredChat(session.id);
+            if (!reason) continue;
+            const unlock = await acquireSessionRestoreLock(session.id);
+            try {
+                if (sessionRegistry.peekLiveSession(session.id) !== session) continue;
+                if (!this.retiredReleasable(session, owner, runtime) || !retiredChat(session.id)) continue;
+                await runtime.releaseSession(session.id, owner);
+                if (sessionRegistry.peekLiveSession(session.id) === session) sessionRegistry.dropSession(session.id);
+                released += 1;
+                log.info('chat', 'retired chat session released', { nodeId: session.id, runtimeId: runtime.id, reason, nativeSessionId: session.nativeSessionId ?? null });
+            } catch (error) {
+                log.warn('chat', 'retired chat session release failed', { nodeId: session.id, runtimeId: runtime.id, error: error instanceof Error ? error.message : String(error) });
+            } finally {
+                unlock();
+            }
+        }
+        return released;
+    }
+
+    /** releaseRetiredSessions' checks besides the chat's own state, asked before the lock and again inside it. */
+    private retiredReleasable(session: AgentSession, owner: RuntimeSessionOwner, runtime: AgentRuntime): boolean {
+        if (owner.mode !== 'interactive' || owner.key !== session.id || isCheckinNodeId(session.id)) return false;
+        if (chatHub.isBusy(session.id)) return false;
+        // Asked as if idle forever: only what still runs in the session, or the runtime's own rule, keeps it.
+        return runtime.idleRelease?.(session.id, Number.POSITIVE_INFINITY).action === 'release';
     }
 
     /** The host's half of idle release; the runtime's is AgentRuntime.idleRelease. */
@@ -686,7 +760,7 @@ export class ChatManager {
         if (!session) {
             const userId = process.env.MICHI_CLOUD === "1" ? input.ownerUserId : undefined;
             // Posted check-ins replay as one-line facts, never their text (§2.8 T2).
-            const replayHistory = sessionReplayHistory(listMessages(input.nodeId, userId), { name: companionReplayName });
+            const replayHistory = sessionReplayTranscript(listMessages(input.nodeId, userId), { name: companionReplayName });
             const replaysMessages = descriptorOf(runtime).topology.historyReplay === 'messages';
             // What ensure-session's rebuild inherits; here it precedes the node's own transcript.
             const inherited = rebuildInheritance({

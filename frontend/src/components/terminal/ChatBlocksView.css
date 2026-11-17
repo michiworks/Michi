@@ -1,0 +1,66 @@
+/* Rich blocks inside a reply (show_blocks). One card per call, as wide as the
+   text column; each block keeps its own width inside it and scrolls sideways
+   rather than widening the pane. Mantine controls inside draw their dropdowns
+   in portals, so the message frame's content-visibility does not clip them. */
+.t-chat-blocks {
+  margin: 8px 0;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: var(--term-surface);
+  color: var(--term-fg);
+  font-family: var(--ui-font);
+}
+
+.t-chat-blocks__title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--term-fg);
+}
+
+.t-chat-blocks__item {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+}
+
+/* A thread that cannot answer (read-only, archived) shows its blocks as they are. */
+.t-chat-blocks[data-disabled='true'] .t-chat-blocks__item {
+  opacity: 0.85;
+}
+
+@media (max-width: 700px) {
+  .t-chat-blocks {
+    padding: 10px;
+    gap: 12px;
+  }
+}
+
+/* A user message that answered a reply's block (ChatMessage.blockAnswer):
+   one quiet line on the user's side instead of a bubble; Show opens the
+   text that was sent. */
+.t-block-answer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.t-block-answer__line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--term-muted);
+  font-size: var(--fs-sm);
+}
+.t-block-answer__mark {
+  color: var(--term-faint);
+}

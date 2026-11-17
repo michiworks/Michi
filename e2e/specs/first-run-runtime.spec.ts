@@ -37,14 +37,14 @@ for (const kiroAvailable of [false, true]) {
     await page.goto('/');
     const setup = page.getByRole('dialog', { name: 'Setup', exact: true });
     await expect(setup).toBeVisible();
-    await expect(setup.getByRole('button', { pressed: true })).toHaveCount(0);
+    await expect(setup.getByRole('radio', { checked: true })).toHaveCount(0);
     await expect(setup.getByText('recommended', { exact: true })).toHaveCount(0);
     await expect(setup.getByRole('button', { name: 'Choose a runtime' })).toBeDisabled();
-    await expect(setup.getByRole('button', { name: /^Kiro/ })).toHaveCount(kiroAvailable ? 1 : 0);
+    await expect(setup.getByRole('radio', { name: /^Kiro/ })).toHaveCount(kiroAvailable ? 1 : 0);
     expect(selections).toEqual([]);
     await page.keyboard.press('Escape');
     await expect(setup).toBeVisible();
-    await setup.getByRole('button', { name: /^Codex/ }).click();
+    await setup.getByRole('radio', { name: /^Codex/ }).click();
     await setup.getByRole('button', { name: 'Start with Codex →' }).click();
     await expect(setup).toHaveCount(0);
     expect(selections).toEqual(['codex']);

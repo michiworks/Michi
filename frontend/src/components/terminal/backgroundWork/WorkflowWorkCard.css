@@ -20,3 +20,104 @@ button.workflow-phase-band:focus-visible {
   outline: var(--focus-ring);
   outline-offset: -2px;
 }
+
+/* The card takes focus when a run control the user pressed leaves nothing in its place. */
+.background-workflow-card:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Background work controls keep their resting look here, not in style={{…}},
+   so their hover classes (.t-hover-bg-alt, .t-hover-fg) can light them. */
+
+/* Full-width rows: the drawer's folds, agent and subagent rows, a card's toggles. */
+.background-work-row {
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The band that opens a card's agents runs edge to edge, square. */
+.background-work-row[data-band] {
+  border-radius: 0;
+}
+/* A finished phase's "N done" line rests quiet. */
+.background-work-row[data-quiet] {
+  color: var(--term-muted);
+}
+
+/* The drawer's scope picker: quiet, pressed while its menu is open. */
+.background-work-scope {
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-muted);
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.background-work-scope[aria-expanded='true'] {
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
+
+/* Quiet text links: View, Show full result, Show N more, Script, Log, JSON. */
+.workflow-card-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--term-mid);
+  font: inherit;
+  cursor: pointer;
+}
+.workflow-card-link[aria-pressed='true'] {
+  background: var(--term-alt);
+  color: var(--term-fg);
+}
+
+/* A card's bordered buttons: its run actions and its approval answers. */
+.workflow-card-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--term-line-s);
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-mid);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
+}
+.workflow-card-btn[data-variant='primary'] {
+  border-color: var(--term-select);
+  background: color-mix(in srgb, var(--term-select) 20%, transparent);
+  color: var(--term-fg);
+  font-weight: 600;
+}
+.workflow-card-btn[data-variant='reject'] {
+  border-color: transparent;
+  color: var(--term-muted);
+}
+@media (hover: hover) {
+  .workflow-card-btn:hover:not(:disabled) {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.workflow-card-btn:not(:disabled):active {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+/* While a command is in flight they are disabled; the one pressed keeps its "…" label at full strength. */
+.workflow-card-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.workflow-card-btn[aria-busy='true'] {
+  opacity: 1;
+  cursor: progress;
+}

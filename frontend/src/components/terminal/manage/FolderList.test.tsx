@@ -17,7 +17,7 @@ function renderList() {
   const onUpdateLabel = vi.fn();
   render(<FolderList folders={folders} projectId="p1" onAddFolder={vi.fn()} onRemoveFolder={vi.fn()} onUpdateLabel={onUpdateLabel} />);
   fireEvent.click(screen.getByText('docs'));
-  return { onUpdateLabel, field: screen.getByRole('textbox') as HTMLInputElement };
+  return { onUpdateLabel, field: screen.getByRole('textbox', { name: 'Folder name' }) as HTMLInputElement };
 }
 
 describe('FolderList label', () => {

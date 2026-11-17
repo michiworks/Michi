@@ -17,9 +17,11 @@ const baseProps = {
 };
 
 describe('PaneCaption', () => {
-  it('shows the warning glyph in error state', () => {
-    render(<PaneCaption {...baseProps} error />);
-    expect(screen.getByText('⚠')).toBeTruthy();
+  it('shows the warning icon in error state', () => {
+    const { rerender } = render(<PaneCaption {...baseProps} />);
+    expect(screen.queryByTestId('pane-caption-error')).toBeNull();
+    rerender(<PaneCaption {...baseProps} error />);
+    expect(screen.getByTestId('pane-caption-error')).toBeTruthy();
   });
 
   it('starts a drag with the pane MIME type', () => {
@@ -37,6 +39,19 @@ describe('PaneCaption', () => {
     expect(data.get('application/x-michi-pane-id')).toBe('n1');
   });
 
+  it('keeps zoom and close reachable by the keyboard, revealed by the caption in CSS', () => {
+    const onClose = vi.fn();
+    render(<PaneCaption {...baseProps} onClose={onClose} canZoom onZoom={() => {}} />);
+    for (const name of ['Zoom research-plan', 'Close research-plan']) {
+      const control = screen.getByRole('button', { name });
+      expect(control.tabIndex).toBe(0);
+      expect(control.classList.contains('t-reveal')).toBe(true);
+      expect(control.closest('.t-reveal-host')).toBe(screen.getByLabelText('research-plan pane'));
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Close research-plan' }));
+    expect(onClose).toHaveBeenCalledWith('n1');
+  });
+
   it('opens a context menu with Close and Close Others', () => {
     render(<PaneCaption {...baseProps} />);
     const root = screen.getByText('research-plan').parentElement!;
@@ -49,7 +64,7 @@ describe('PaneCaption', () => {
     it('shows the running count with what runs', () => {
       render(<PaneCaption {...baseProps} backgroundWork={{ subagents: 2, workflows: 1 }} />);
       const badge = screen.getByTestId('pane-background-work-badge');
-      expect(badge.textContent).toBe('◆3');
+      expect(badge.textContent).toBe('3');
       expect(badge.getAttribute('aria-label')).toBe('2 subagents · 1 workflow running. Show background work');
       expect(badge.getAttribute('title')).toBe('2 subagents · 1 workflow running');
       // Clickable inside the window's drag region (Electron).
@@ -59,15 +74,12 @@ describe('PaneCaption', () => {
     it('turns amber and says so while a run waits for an approval', () => {
       const { rerender } = render(<PaneCaption {...baseProps} backgroundWork={{ subagents: 0, workflows: 1, waiting: true }} />);
       const badge = screen.getByTestId('pane-background-work-badge');
-      expect(badge.textContent).toBe('◆1 · needs you');
+      expect(badge.textContent).toBe('1 · needs you');
       expect(badge.getAttribute('aria-label')).toBe('Needs your approval. 1 workflow running. Show background work');
       expect(badge.dataset.state).toBe('waiting');
-      expect(badge.style.color).toBe('var(--term-select)');
-      expect(badge.style.background).toBe('var(--term-select-f)');
       rerender(<PaneCaption {...baseProps} backgroundWork={{ subagents: 0, workflows: 1 }} />);
-      expect(badge.textContent).toBe('◆1');
+      expect(badge.textContent).toBe('1');
       expect(badge.dataset.state).toBe('running');
-      expect(badge.style.color).toBe('var(--term-mid)');
     });
 
     it('is hidden while nothing runs and on non-chat panes', () => {

@@ -614,13 +614,15 @@ export function useWorkflowRunDetail(runIdentity: AgentResourceIdentity): Return
   const live = useWorkflowRun(workflowRunKey(identity));
   const [missing, setMissing] = useState(false);
   const load = workflows?.load;
+  // The fetch on mount reads the trimmed revision it finds whole already.
+  const partialAtMount = useRef(live.resource?.value.partial ? live.resource.value.revision : null);
   useEffect(() => {
     if (!load) return;
     let active = true;
     void load(identity).catch(() => { if (active) setMissing(true); });
     return () => { active = false; };
   }, [load, identity]);
-  useRefetchPartialWorkflowRun(identity, live.resource);
+  useRefetchPartialWorkflowRun(identity, live.resource, partialAtMount.current);
   return { ...live, missing };
 }
 
@@ -631,10 +633,15 @@ export function useWorkflowRunDetail(runIdentity: AgentResourceIdentity): Return
  * multi-model card); useWorkflowRunDetail does both. `identity` must be
  * stable across renders (memoize it).
  */
-export function useRefetchPartialWorkflowRun(identity: AgentResourceIdentity, resource: LocatedWorkflowRun | undefined): void {
+export function useRefetchPartialWorkflowRun(
+  identity: AgentResourceIdentity,
+  resource: LocatedWorkflowRun | undefined,
+  /** A trimmed revision the caller is fetching already. */
+  fetching: number | null = null,
+): void {
   const load = useOptionalWorkflowDomain()?.load;
   const partialRevision = resource?.value.partial ? resource.value.revision : null;
-  const fetchedPartial = useRef<number | null>(null);
+  const fetchedPartial = useRef<number | null>(fetching);
   useEffect(() => {
     if (!load || partialRevision === null || fetchedPartial.current === partialRevision) return;
     fetchedPartial.current = partialRevision;

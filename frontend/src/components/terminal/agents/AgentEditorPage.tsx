@@ -4,8 +4,8 @@ import type { AgentDefinitionDtoV1, AgentCapabilityCatalogEntryV1, AgentEnableBl
 import type { AgentResourceIdentity, LocatedAgentResource } from '../../../state/agentIdentity';
 import { listAgentCapabilities } from '../../../services/api/agents';
 import AgentDefinitionForm, {
-  createAgentDefinitionFormValue, draftSaveBlocked,
-  validateAgentDefinitionForm, type AgentDefinitionFormValue,
+  createAgentDefinitionFormValue, draftSaveErrors,
+  validateAgentDefinitionForm, type AgentDefinitionFormErrors, type AgentDefinitionFormValue,
 } from './AgentDefinitionForm';
 import { backendConnectionIdForWorkspace } from '../../../config/backendConnections';
 import { useBackendScope } from '../../../hooks/useBackendScope';
@@ -29,6 +29,8 @@ interface Props {
   onCancel?: () => void;
 }
 
+const NO_ERRORS: AgentDefinitionFormErrors = {};
+
 export default function AgentEditorPage({
   definition, backendConnectionId, initialScope = 'workspace', workspaceId = null, busy = false, error, blockers = null,
   onSaveDraft, onEnable, onDisable, onDuplicate, onDelete, onCancel,
@@ -51,7 +53,17 @@ export default function AgentEditorPage({
       .catch(() => { if (!cancelled) setCapabilities(null); });
     return () => { cancelled = true; controller.abort(); };
   }, [effectiveWorkspaceId, catalogScope.key, catalogScope.connectionId]);
-  const errors = React.useMemo(() => validateAgentDefinitionForm(value, runtimeCatalog), [value, runtimeCatalog]);
+  const problems = React.useMemo(() => validateAgentDefinitionForm(value, runtimeCatalog), [value, runtimeCatalog]);
+  // Field errors show once Save Draft or Enable was pressed, then follow every
+  // edit: after Save Draft the ones that stop a draft, after Enable all (ST-17).
+  const [tried, setTried] = React.useState<'draft' | 'enable' | null>(null);
+  const errors = tried === 'enable' ? problems : tried === 'draft' ? draftSaveErrors(problems) : NO_ERRORS;
+  // Bumped when problems stop a save: once their errors show, the first invalid field takes focus.
+  const [stopped, setStopped] = React.useState(0);
+  const bodyRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    if (stopped > 0) bodyRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [stopped]);
   const identity = definition ? { backendConnectionId: definition.backendConnectionId, id: definition.value.id } : null;
   const status = definition?.value.status ?? AgentDefinitionStatus.Draft;
   const blocked = busy || submitting !== null;
@@ -59,10 +71,18 @@ export default function AgentEditorPage({
     setSubmitting(label);
     try { await action(); } finally { setSubmitting(null); }
   };
+  // Save Draft and Enable stay pressable while the form has problems; a press
+  // they stop shows them instead of saving (ST-11).
+  const submit = (label: 'draft' | 'enable', action: () => void | Promise<void>) => {
+    setTried((current) => (current === 'enable' ? current : label));
+    const stopping = label === 'enable' ? problems : draftSaveErrors(problems);
+    if (Object.keys(stopping).length > 0) { setStopped((count) => count + 1); return; }
+    void invoke(label, action);
+  };
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--term-page-bg, var(--term-bg))', color: 'var(--term-fg)' }}>
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '28px 56px 40px' }}>
+      <div ref={bodyRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '28px 56px 40px' }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 20, marginBottom: 28 }}>
         <div>
           <div style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase' }}>{definition ? 'Edit custom agent' : 'New custom agent'}</div>
@@ -90,23 +110,23 @@ export default function AgentEditorPage({
           </ul>
         </div>
       )}
-      {error && (!blockers || blockers.length === 0) && <div role="alert" style={{ border: '1px solid var(--danger, var(--term-danger))', color: 'var(--danger, var(--term-danger))', padding: 10, marginBottom: 16, fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}>{error}</div>}
+      {error && (!blockers || blockers.length === 0) && <div role="alert" style={{ border: '1px solid var(--term-danger)', color: 'var(--term-danger-text)', padding: 10, marginBottom: 16, fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}>{error}</div>}
       <AgentDefinitionForm value={value} onChange={setValue} errors={errors} capabilities={capabilities} runtimeCatalog={runtimeCatalog} />
       </div>
 
       {/* Outside the scroll area: always flush with the pane bottom; the form
           scrolls underneath it instead of showing text below the buttons. */}
       <footer aria-label="Agent editor actions" style={{ flexShrink: 0, padding: '12px 56px', borderTop: '1px solid var(--term-line)', background: 'var(--term-page-bg, var(--term-bg))', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked || draftSaveBlocked(errors)} onClick={() => { void invoke('draft', () => onSaveDraft(value)); }} variant="primary">Save Draft</Button>
+        <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked} onClick={() => submit('draft', () => onSaveDraft(value))} variant="primary">Save Draft</Button>
         {status === AgentDefinitionStatus.Enabled ? (
           <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked || !identity || !onDisable} onClick={() => identity && onDisable && void invoke('disable', () => onDisable(identity))}>Disable</Button>
         ) : (
-          <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked || Object.keys(errors).length > 0} onClick={() => { void invoke('enable', () => onEnable(value)); }} title={Object.keys(errors).length > 0 ? 'Resolve validation errors before enabling.' : undefined}>Enable</Button>
+          <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked} onClick={() => submit('enable', () => onEnable(value))}>Enable</Button>
         )}
         {identity && <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked || !onDuplicate} onClick={() => onDuplicate && void invoke('duplicate', () => onDuplicate(identity))}>Duplicate</Button>}
         {identity && <Button style={{ fontSize: 'var(--fs-sm)' }} disabled={blocked || !onDelete} onClick={() => onDelete && void invoke('delete', () => onDelete(identity))} danger>Delete</Button>}
         <span aria-live="polite" style={{ marginLeft: 'auto', color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' }}>
-          {submitting ? `${submitting}…` : Object.keys(errors).length > 0 ? `${Object.keys(errors).length} validation issue${Object.keys(errors).length === 1 ? '' : 's'}` : 'ready to enable'}
+          {submitting ? `${submitting}…` : Object.keys(problems).length > 0 ? `${Object.keys(problems).length} validation issue${Object.keys(problems).length === 1 ? '' : 's'}` : 'ready to enable'}
         </span>
       </footer>
     </div>

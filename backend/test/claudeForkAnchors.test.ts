@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { closeDb, getDb, initDb } from '../src/services/db';
-import { saveClaudeForkAnchor, readClaudeForkAnchor } from '../src/services/claudeForkAnchors';
+import { saveClaudeForkAnchor, readClaudeForkAnchor, readClaudeForkBoundary, saveClaudeForkBoundary } from '../src/services/claudeForkAnchors';
 
 let directory: string;
 const originalEnv = { ...process.env };
@@ -77,4 +77,17 @@ test('changing a public message role cannot reinterpret an assistant anchor as a
   saveClaudeForkAnchor(saveInput);
   getDb().exec("UPDATE messages SET role='user' WHERE id='assistant-1'");
   assert.equal(readClaudeForkAnchor(readInput), null);
+});
+
+test('a fork boundary is kept per child session before the chat binds to it, and goes with its chat', () => {
+  saveClaudeForkBoundary({ nodeId: 'parent', nativeSessionId: 'native-child', boundaryAt: '2026-11-14T15:02:43.000Z' });
+  closeDb(); initDb();
+  assert.equal(readClaudeForkBoundary('parent', 'native-child'), '2026-11-14T15:02:43.000Z', 'not bound to native-child yet');
+  assert.equal(readClaudeForkBoundary('parent', 'native-parent'), null);
+  saveClaudeForkBoundary({ nodeId: 'missing', nativeSessionId: 'native-child', boundaryAt: '2026-11-14T15:02:43.000Z' });
+  assert.equal(readClaudeForkBoundary('missing', 'native-child'), null);
+  getDb().exec("UPDATE nodes SET deleted_at=1 WHERE id='parent'");
+  assert.equal(readClaudeForkBoundary('parent', 'native-child'), null);
+  getDb().exec("DELETE FROM nodes WHERE id='parent'");
+  assert.equal(getDb().prepare('SELECT COUNT(*) AS count FROM claude_fork_boundaries').get()?.count, 0);
 });

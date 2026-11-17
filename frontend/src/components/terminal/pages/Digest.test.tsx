@@ -146,10 +146,10 @@ describe('TerminalDigest thread scope', () => {
     expect(markDigestViewed).toHaveBeenCalledWith('d1');
   });
 
-  it('takes a source row to that conversation on the Dashboard', () => {
+  it('takes a source row, a button the keyboard reaches, to that conversation on the Dashboard', () => {
     const onNav = vi.fn();
     render(<TerminalDigest onNav={onNav} />);
-    fireEvent.click(screen.getByText('Root one'));
+    fireEvent.click(screen.getByRole('button', { name: /Root one/ }));
     expect(revealNode).toHaveBeenCalledWith('r1', { workspaceId: 'p1' });
     expect(onNav).toHaveBeenCalledWith('dashboard');
   });

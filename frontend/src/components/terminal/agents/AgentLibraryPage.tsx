@@ -28,7 +28,7 @@ export default function AgentLibraryPage({ definitions, runs = [], workspaceId =
         <div><div style={eyebrowStyle}>Custom agents</div><h1 style={{ margin: '6px 0 4px', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-6xl)', lineHeight: 1.1, fontWeight: 500 }}>Agent Library</h1><p style={{ margin: 0, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}>Reusable capabilities stay separate from conversation branches and Runs.</p></div>
         <div style={{ display: 'flex', gap: 8 }}><Button size="sm" onClick={() => onCreate('workspace')}>+ workspace agent</Button><Button size="sm" onClick={() => onCreate('global')}>+ global agent</Button></div>
       </header>
-      {error && <div role="alert" style={{ color: 'var(--danger, var(--term-danger))', border: '1px solid var(--danger, var(--term-danger))', padding: 10, marginBottom: 16, fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}>{error}</div>}
+      {error && <div role="alert" style={{ color: 'var(--term-danger-text)', border: '1px solid var(--term-danger)', padding: 10, marginBottom: 16, fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}>{error}</div>}
       {loading && definitions.length === 0 ? <div style={emptyStyle}>loading agent library…</div> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 30 }}>
           <LibrarySection title="WORKSPACE AGENTS" scope="workspace" resources={workspace} activeCount={activeCount} onEdit={onEdit} onEnable={onEnable} onDisable={onDisable} onDuplicate={onDuplicate} onDelete={onDelete} />
@@ -76,6 +76,6 @@ function AgentRow({ resource, activeRuns, onEdit, onEnable, onDisable, onDuplica
 
 function RowAction({ label, name, danger, onClick }: { label: string; name: string; danger?: boolean; onClick: () => void }) { return <Button size="sm" aria-label={`${label} ${name}`} onClick={onClick} danger={danger}>{label.toLowerCase()}</Button>; }
 function ScopeBadge({ scope }: { scope: 'global' | 'workspace' }) { return <span style={{ border: '1px solid var(--term-line)', padding: '1px 5px', color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase' }}>{scope}</span>; }
-function StatusBadge({ status }: { status: AgentDefinitionStatus }) { const color = status === AgentDefinitionStatus.Enabled ? 'var(--term-digest)' : status === AgentDefinitionStatus.Disabled ? 'var(--term-muted)' : 'var(--term-select, var(--accent))'; return <span style={{ color, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{status}</span>; }
+function StatusBadge({ status }: { status: AgentDefinitionStatus }) { const color = status === AgentDefinitionStatus.Enabled ? 'var(--term-digest)' : status === AgentDefinitionStatus.Disabled ? 'var(--term-muted)' : 'var(--term-waiting-text)'; return <span style={{ color, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{status}</span>; }
 const eyebrowStyle: React.CSSProperties = { color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase' };
 const emptyStyle: React.CSSProperties = { border: '1px dashed var(--term-line)', padding: 18, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' };

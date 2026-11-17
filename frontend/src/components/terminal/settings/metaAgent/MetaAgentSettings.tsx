@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
+import { WarningIcon } from '../../icons';
 import { toast } from 'sonner';
 import {
   META_AGENT_DEFAULT_FIRST_RUN_DAYS,
@@ -346,7 +346,7 @@ function StoppedAlert({ info, onChangeRuntime }: { info: MetaAgentInfo; onChange
   };
   return (
     <div className="meta-set__alert" role="alert">
-      <TriangleAlert className="meta-set__alert-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
+      <WarningIcon className="meta-set__alert-icon" size="lg" aria-hidden="true" />
       <div className="meta-set__alert-body">
         <b>{status.kind === 'stopped' ? UPKEEP_HEADLINE.stopped : UPKEEP_HEADLINE.unsupported}</b>
         <p>{sentence(status.reason ?? 'The reason is unknown')} {status.stop?.reason === 'signed-out'

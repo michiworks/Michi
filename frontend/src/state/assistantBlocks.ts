@@ -2,6 +2,7 @@ import { stripSentinelsStreamingSafe } from './assistantParsing';
 import type { AssistantBlock, ChatMessage, SubagentInfo, ToolCallState } from './chatTypes';
 import {
   applyTurnEvent,
+  contentWithBlocksFallback,
   extractTurnMetadata,
   finalizeTurnContent,
   extractKiroSteering,
@@ -31,6 +32,7 @@ export function isValidAssistantBlocks(value: unknown): value is AssistantBlock[
     if (typeof b.id !== 'string' || b.id.length === 0) return false;
     if (b.kind === 'answer' || b.kind === 'thinking') return typeof b.rawText === 'string';
     if (b.kind === 'image') return typeof (b as { path?: unknown }).path === 'string';
+    if (b.kind === 'blocks') return Array.isArray(b.blocks) && typeof b.fallbackText === 'string';
     if (b.kind === 'user-input') {
       return (
         typeof b.requestId === 'number' &&
@@ -73,7 +75,7 @@ export function assistantAnswerVisibleText(m: ChatMessage): string {
 }
 
 export function assistantPersistenceContent(m: ChatMessage): string {
-  return m.role === 'assistant' ? finalizeTurnContent(assistantAnswerRawText(m)) : m.text;
+  return m.role === 'assistant' ? contentWithBlocksFallback(finalizeTurnContent(assistantAnswerRawText(m)), m.blocks ?? []) : m.text;
 }
 
 export function assistantMetadata(m: ChatMessage): { title: string | null; branchOverview: string | null; followUps: string[] } {
@@ -85,8 +87,9 @@ export function assistantMetadata(m: ChatMessage): { title: string | null; branc
   };
 }
 
+/** A message as text: an assistant reply's visible answer, then the plain text of the blocks it showed. */
 export function visibleMessageText(m: ChatMessage): string {
-  return m.role === 'assistant' ? assistantAnswerVisibleText(m) : m.text;
+  return m.role === 'assistant' ? contentWithBlocksFallback(assistantAnswerVisibleText(m), m.blocks ?? []) : m.text;
 }
 
 /**

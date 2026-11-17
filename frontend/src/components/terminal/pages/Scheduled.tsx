@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarClock, Clock3, Ellipsis, Folder, Loader2, Play, Plus, Search, Sparkles, Square, X } from 'lucide-react';
+import { ClockIcon, CloseIcon, FolderIcon, MoreIcon, PlayIcon, PlusIcon, SearchIcon, SpinnerIcon, StopIcon } from '../icons';
+import { CompanionGlyph } from '../companion/CompanionGlyph';
 import { toast } from 'sonner';
 import { AnimatePresence } from 'motion/react';
+import { menuOpenKey } from '../../ContextMenu';
 import { plural, type ScheduledJobDto, type ScheduledJobRunDto } from 'michi-shared';
 import { useChatActions, useChatProjects } from '../../../state/chatStore';
 import type { PageId } from '../../../state/commands';
@@ -33,7 +35,7 @@ import { openCompanionPanel } from '../../../state/companion/companionPanel';
 import { useCompanionAssistant, useCompanionOff } from '../../../state/companion/companionStore';
 import { useCompanionName } from '../../../state/companion/companionName';
 import { publishCompanionScheduleWorkspace } from '../../../state/companion/companionScreen';
-import { openScheduledHome, requestScheduledJobDetail, requestScheduledRun, useScheduledRoute } from '../scheduled/scheduledNav';
+import { NEW_SCHEDULED_JOB_EVENT, openScheduledHome, requestScheduledJobDetail, requestScheduledRun, takeNewScheduledJobRequest, useScheduledRoute } from '../scheduled/scheduledNav';
 import { RUN_STATUS_LABELS, defaultScheduleDraft, describeSchedule, relativePastTime, relativeTime } from '../scheduled/scheduleModel';
 import { useMetaAgentOverview } from '../../../state/metaAgent/useMetaAgentOverview';
 import { navPageEvent } from '../../../state/appEvents';
@@ -171,6 +173,19 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
       setOpeningEditor(false);
     }
   };
+  // New job asked for from the sidebar's empty list, while this page shows or
+  // before it did; with nowhere to put a job, the request lapses.
+  const createJobRef = useRef(createJob);
+  createJobRef.current = createJob;
+  const canCreateJob = !unavailable && localProjects.length > 0;
+  const listSettled = hydrated && !loading;
+  useEffect(() => {
+    if (!listSettled) return;
+    const open = () => { if (takeNewScheduledJobRequest() && canCreateJob) void createJobRef.current(); };
+    open();
+    window.addEventListener(NEW_SCHEDULED_JOB_EVENT, open);
+    return () => window.removeEventListener(NEW_SCHEDULED_JOB_EVENT, open);
+  }, [listSettled, canCreateJob]);
   const duplicate = (job: ScheduledJobDto) => {
     const initial = formValueFromJob(job, { workspaceId: defaultWorkspaceId });
     const schedule = job.schedule.kind === 'at' && job.schedule.at <= Date.now() ? defaultScheduleDraft() : initial.schedule;
@@ -236,17 +251,17 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
           <header className="sched-heading">
             <div>
               <div className="sched-heading-title"><h1>Scheduled</h1>{total > 0 && <span aria-label={plural(total, 'job')}>{total}</span>}</div>
-              <p className="sched-subtitle"><Clock3 size={13} aria-hidden="true" />{subtitle}</p>
+              <p className="sched-subtitle"><ClockIcon aria-hidden="true" />{subtitle}</p>
             </div>
             <div className="sched-heading-actions" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {agentAvailable && (
                 <Button size="sm" onClick={createWithAgent}
                   title={`Describe a job to ${companionName}: what to do, where, and when`}>
-                  <Sparkles size={14} aria-hidden="true" />{CREATE_WITH_AGENT_LABEL}
+                  <CompanionGlyph />{CREATE_WITH_AGENT_LABEL}
                 </Button>
               )}
               <Button variant="primary" size="sm" disabled={unavailable || localProjects.length === 0 || openingEditor} onClick={() => void createJob()}>
-                <Plus size={14} aria-hidden="true" />New job
+                <PlusIcon aria-hidden="true" />New job
               </Button>
             </div>
           </header>
@@ -266,10 +281,10 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
 
           {total > 0 && (
             <div className="sched-toolbar">
-              <label className="trash-search"><Search size={14} aria-hidden="true" />
-                <input ref={search} type="search" aria-label="Search scheduled jobs" placeholder="Search jobs..."
+              <label className="trash-search"><SearchIcon aria-hidden="true" />
+                <input ref={search} type="search" aria-label="Search scheduled jobs" placeholder="Search jobs…"
                   value={query} onChange={(event) => setQuery(event.target.value)} />
-                {query && <button type="button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus(); }}><X size={14} aria-hidden="true" /></button>}
+                {query && <button type="button" aria-label="Clear search" onClick={() => { setQuery(''); search.current?.focus(); }}><CloseIcon aria-hidden="true" /></button>}
               </label>
               <span className="sched-result-count" role="status">{needle ? plural(filtered.length, 'result') : ''}</span>
             </div>
@@ -282,30 +297,30 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
             <div className="sched-loading" role="status" aria-label="Loading scheduled jobs"><span /><span /><span /></div>
           ) : unavailable ? (
             <div className="sched-empty">
-              <CalendarClock size={30} aria-hidden="true" />
+              <ClockIcon size={30} aria-hidden="true" />
               <h2>Scheduled jobs are not available</h2>
               <p>This Michi server does not run scheduled jobs.</p>
             </div>
           ) : <>
           {total === 0 ? (
             <div className="sched-empty">
-              <CalendarClock size={30} aria-hidden="true" />
+              <ClockIcon size={30} aria-hidden="true" />
               <h2>No scheduled jobs</h2>
               <p>Run a prompt on a schedule. Results appear in the job’s conversation, and Michi lets you know when it finishes.</p>
               {localProjects.length > 0
-                ? <Button size="sm" disabled={openingEditor} onClick={() => void createJob()}><Plus size={14} aria-hidden="true" />New job</Button>
+                ? <Button size="sm" disabled={openingEditor} onClick={() => void createJob()}><PlusIcon aria-hidden="true" />New job</Button>
                 : <Button size="sm" variant="ghost" onClick={() => onNav?.('workspaces')}>Create a workspace first</Button>}
             </div>
           ) : filtered.length === 0 ? (
             <div className="sched-empty">
-              <Search size={30} aria-hidden="true" />
+              <SearchIcon size={30} aria-hidden="true" />
               <h2>No matching jobs</h2>
               <p>Nothing matches “{query.trim()}”.</p>
             </div>
           ) : groups.map((group) => (
             <section className="trash-group" key={group.workspaceId}>
               <h2 className="trash-group-heading">
-                <Folder size={15} aria-hidden="true" style={{ color: group.project ? workspaceAccent(group.project.id) : undefined }} />
+                <FolderIcon aria-hidden="true" style={{ color: group.project ? workspaceAccent(group.project.id) : undefined }} />
                 <span className="trash-group-name">{group.project?.name ?? 'Unavailable workspace'}</span>
                 <span className="trash-group-count">{group.jobs.length}</span>
               </h2>
@@ -326,15 +341,15 @@ export default function TerminalScheduled({ onNav }: { onNav?: (page: PageId) =>
           </>}
         </div>
 
-        {menu && menuJob && (
-          <ScheduledJobMenu anchor={menu.anchor} row={menu.anchor.closest<HTMLElement>('.sched-row')} paused={!menuJob.enabled || menuJob.autoPaused} onClose={() => setMenu(null)} actions={{
+        <AnimatePresence>{menu && menuJob && (
+          <ScheduledJobMenu key={menuOpenKey(menu)} anchor={menu.anchor} row={menu.anchor.closest<HTMLElement>('.sched-row')} paused={!menuJob.enabled || menuJob.autoPaused} onClose={() => setMenu(null)} actions={{
             onEdit: () => setEditor({ job: menuJob }),
             onRuns: () => requestScheduledJobDetail(menuJob.id),
             onToggle: () => { void setEnabled(menuJob, !menuJob.enabled || menuJob.autoPaused); },
             onDuplicate: () => duplicate(menuJob),
             onDelete: () => { void removeJob(menuJob); },
           }} />
-        )}
+        )}</AnimatePresence>
         {/* Closing fades each dialog out with the props it last had open;
             Edit hands the detail over to the editor in one cross-fade. */}
         <AnimatePresence>
@@ -404,7 +419,7 @@ function JobRow({ job, now, query, busy, runBlocked, workspaceArchived, menuOpen
       <button type="button" className="trash-row-open" aria-label={`Open ${job.name}`} onClick={onOpen}>
         <span className="trash-row-icon">
           <RunSwap id={running ? 'running' : 'idle'} scale>
-            {running ? <Loader2 size={16} className="sched-spin" aria-hidden="true" /> : <Clock3 size={16} aria-hidden="true" />}
+            {running ? <SpinnerIcon size="lg" className="sched-spin" aria-hidden="true" /> : <ClockIcon size="lg" aria-hidden="true" />}
           </RunSwap>
         </span>
         <span className="trash-row-content">
@@ -432,12 +447,13 @@ function JobRow({ job, now, query, busy, runBlocked, workspaceArchived, menuOpen
       </div>
       <div className="trash-row-actions">
         {running
-          ? <TrashIconButton icon={Square} tooltip="Stop run" aria-label={`Stop ${job.name}`} disabled={busy} onClick={onStop} />
-          : <TrashIconButton icon={Play} tooltip={runBlocked ? 'Confirm the previous execution has stopped first' : 'Run now'} aria-label={`Run ${job.name} now`} disabled={busy || runBlocked} onClick={onRunNow} />}
+          ? <TrashIconButton icon={StopIcon} tooltip="Stop run" aria-label={`Stop ${job.name}`} disabled={busy} onClick={onStop} />
+          : <TrashIconButton icon={PlayIcon} tooltip="Run now" blockedReason={runBlocked ? 'Confirm the previous execution has stopped first' : undefined}
+            aria-label={`Run ${job.name} now`} disabled={busy} onClick={onRunNow} />}
         <span className="sched-switch">
           <Switch on={active} disabled={busy} onChange={onToggle} aria-label={active ? `Pause ${job.name}` : `Resume ${job.name}`} />
         </span>
-        <TrashIconButton icon={Ellipsis} tooltip="More actions" aria-label={`More actions for ${job.name}`}
+        <TrashIconButton icon={MoreIcon} tooltip="More actions" aria-label={`More actions for ${job.name}`}
           aria-haspopup="menu" aria-expanded={menuOpen} disabled={busy} onClick={(event) => onMenu(event.currentTarget)} />
       </div>
     </article>

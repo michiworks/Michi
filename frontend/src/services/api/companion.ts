@@ -6,6 +6,7 @@ import {
   COMPANION_SOURCE_KINDS,
   DEFAULT_COMPANION_SETTINGS,
   companionDelegationPath,
+  companionRaiseUntil,
   companionRunUndoPath,
   isCompanionChangedEvent,
   isReasoningLevel,
@@ -17,13 +18,9 @@ import {
   type CompanionPostChangeAction,
   type CompanionRunUndoResult,
   type CompanionTextOrigin,
-  type CompanionBriefCard,
-  type CompanionBriefDto,
   type CompanionCardDto,
-  type CompanionCatchUpDto,
   type CompanionChangedEvent,
   type CompanionConfigurableSource,
-  type CompanionFeedback,
   type CompanionGetStartedDto,
   type CompanionGetStartedInput,
   type CompanionGoalDto,
@@ -31,6 +28,7 @@ import {
   type CompanionHeartbeatMinutes,
   type CompanionItemAction,
   type CompanionItemDto,
+  type CompanionItemRaise,
   type CompanionItemSubtype,
   type CompanionPresenceInput,
   type CompanionReminderDto,
@@ -47,7 +45,7 @@ import { readSseStream, SseHttpError } from './sseParser';
 import { fetchStream } from './streamTransport';
 
 // The Companion on this machine's backend (backend/src/routes/companion.ts,
-// DESIGN R2.17): its snapshot, item actions, cards, brief, notes, rules,
+// DESIGN R2.17): its snapshot, item actions, cards, notes, rules,
 // goals, reminders, settings and the change feed. A backend without it (cloud
 // mode, an older build) answers 404; an answer of another shape (the e2e mock
 // answers unknown routes with `{__unmocked}`) counts the same: unavailable.
@@ -92,8 +90,7 @@ export interface CompanionSettingsPatch {
   paused?: boolean;
   displayName?: string;
   sources?: { [K in keyof Sources]?: Partial<Sources[K]> };
-  /** `days` replaces the list. */
-  brief?: Partial<CompanionSettings['brief']>;
+  autoContinueChats?: boolean;
 }
 
 // ── shape checks ───────────────────────────────────────────────────────────
@@ -148,6 +145,14 @@ function parseFacts(value: unknown): CompanionItemDto['facts'] {
   return facts;
 }
 
+/** Why a check-in raised the item, or null (an older backend sends none). */
+/** A raise; one from a backend that predates `until` holds until the local midnight after `at`, as the backend's own does. */
+function parseRaise(value: unknown): CompanionItemRaise | null {
+  if (!isObject(value) || !isString(value.reason) || !value.reason.trim()) return null;
+  const at = isNumber(value.at) ? value.at : 0;
+  return { reason: value.reason, at, until: isNumber(value.until) ? value.until : companionRaiseUntil(at) };
+}
+
 export function parseCompanionItem(value: unknown): CompanionItemDto | null {
   if (!isObject(value)) return null;
   if (!isString(value.id) || !oneOf(COMPANION_SOURCE_KINDS, value.source) || !isString(value.subtype)
@@ -175,6 +180,7 @@ export function parseCompanionItem(value: unknown): CompanionItemDto | null {
     createdAt: isNumber(value.createdAt) ? value.createdAt : value.changedAt,
     updatedAt: isNumber(value.updatedAt) ? value.updatedAt : value.changedAt,
     resolvedAt: nullableNumber(value.resolvedAt),
+    raised: parseRaise(value.raised),
   };
 }
 
@@ -195,7 +201,6 @@ function parseSettings(value: unknown): CompanionSettings | null {
   const cr = source('cr');
   const pipeline = source('pipeline');
   const heartbeat = isObject(value.heartbeat) ? value.heartbeat : {};
-  const brief = isObject(value.brief) ? value.brief : {};
   const quiet = isObject(value.quietHours) ? value.quietHours : {};
   const workdays = weekdays(value.workdays) ?? [...d.workdays];
   return {
@@ -223,15 +228,10 @@ function parseSettings(value: unknown): CompanionSettings | null {
       enabled: bool(heartbeat.enabled, d.heartbeat.enabled),
       intervalMinutes: (COMPANION_HEARTBEAT_MINUTES as readonly unknown[]).includes(heartbeat.intervalMinutes) ? heartbeat.intervalMinutes as CompanionHeartbeatMinutes : d.heartbeat.intervalMinutes,
     },
-    brief: {
-      enabled: bool(brief.enabled, d.brief.enabled),
-      time: clock(brief.time, d.brief.time),
-      // An older backend sends no brief days: its brief came on the workdays.
-      days: weekdays(brief.days) ?? weekdays(value.workdays) ?? [...d.brief.days],
-    },
     quietHours: { enabled: bool(quiet.enabled, d.quietHours.enabled), start: clock(quiet.start, d.quietHours.start), end: clock(quiet.end, d.quietHours.end) },
     workdays,
     reasoning: isReasoningLevel(value.reasoning) ? value.reasoning : null,
+    autoContinueChats: bool(value.autoContinueChats, d.autoContinueChats),
   };
 }
 
@@ -250,37 +250,9 @@ function parseStatus(value: unknown): CompanionStatusDto | null {
     lastCheckAt: nullableNumber(value.lastCheckAt),
     nextCheckAt: nullableNumber(value.nextCheckAt),
     nextHeartbeatAt: nullableNumber(value.nextHeartbeatAt),
-    nextBriefAt: nullableNumber(value.nextBriefAt),
     turnsToday: isNumber(value.turnsToday) ? value.turnsToday : 0,
     working: value.working === true,
     ...(value.firstLook === true ? { firstLook: true } : {}),
-  };
-}
-
-function parseBriefCard(value: unknown): CompanionBriefCard | null {
-  if (!isObject(value) || !isString(value.title) || !isString(value.body)) return null;
-  const action = isObject(value.action) && isString(value.action.label) && isString(value.action.prompt)
-    ? { label: value.action.label, prompt: value.action.prompt } : null;
-  return { title: value.title, body: value.body, itemIds: Array.isArray(value.itemIds) ? value.itemIds.filter(isString) : [], action };
-}
-
-export function parseCompanionBrief(value: unknown): CompanionBriefDto | null {
-  if (!isObject(value) || !isString(value.id) || !isString(value.headline) || !Array.isArray(value.cards)) return null;
-  const feedback: Record<number, CompanionFeedback> = {};
-  if (isObject(value.cardFeedback)) {
-    for (const [index, choice] of Object.entries(value.cardFeedback)) {
-      if (/^\d+$/.test(index) && (choice === 'up' || choice === 'down')) feedback[Number(index)] = choice;
-    }
-  }
-  return {
-    id: value.id,
-    date: isString(value.date) ? value.date : '',
-    headline: value.headline,
-    cards: value.cards.map(parseBriefCard).filter((card): card is CompanionBriefCard => card !== null),
-    closing: isString(value.closing) ? value.closing : '',
-    origin: value.origin === 'llm' ? 'llm' : 'fallback',
-    createdAt: isNumber(value.createdAt) ? value.createdAt : 0,
-    cardFeedback: feedback,
   };
 }
 
@@ -420,16 +392,6 @@ function parseCompanionRunUndoResult(value: unknown): CompanionRunUndoResult | n
   };
 }
 
-function parseCatchUp(value: unknown): CompanionCatchUpDto | null {
-  if (!isObject(value) || !isString(value.line) || !isNumber(value.awaySince)) return null;
-  return {
-    awaySince: value.awaySince,
-    returnedAt: isNumber(value.returnedAt) ? value.returnedAt : value.awaySince,
-    changedItemIds: Array.isArray(value.changedItemIds) ? value.changedItemIds.filter(isString) : [],
-    line: value.line,
-  };
-}
-
 function parseConversation(value: unknown): CompanionConversation | null {
   if (!isObject(value) || !isString(value.workspaceId) || !value.workspaceId || !isString(value.nodeId) || !value.nodeId) return null;
   const assistant = isAssistantInfo(value.assistant) && value.assistant.nodeId === value.nodeId ? value.assistant : null;
@@ -456,7 +418,6 @@ export function parseCompanionSnapshot(value: unknown): CompanionSnapshot | null
     status,
     conversation: parseConversation(value.conversation),
     items: list(value.items, parseCompanionItem),
-    brief: parseCompanionBrief(value.brief),
     cards: list(value.cards, parseCompanionCard),
     goals: list(value.goals, parseCompanionGoal),
     notes: isString(value.notes) ? value.notes : '',
@@ -464,7 +425,6 @@ export function parseCompanionSnapshot(value: unknown): CompanionSnapshot | null
     rules: isString(value.rules) ? value.rules : '',
     reminders: list(value.reminders, parseCompanionReminder),
     demotedSubtypes: Array.isArray(value.demotedSubtypes) ? value.demotedSubtypes.filter(isString) as CompanionItemSubtype[] : [],
-    catchUp: parseCatchUp(value.catchUp),
     activity: list(value.activity, parseRun),
     counts: {
       needsYou: isNumber(counts.needsYou) ? counts.needsYou : 0,
@@ -548,15 +508,14 @@ export async function postCompanionItemsSeen(ids: readonly string[]): Promise<vo
   await request('/items/seen', { method: 'POST', body: { ids } });
 }
 
-/** POST /companion/presence. Newer backends answer 204; older ones a catch-up this window ignores (POST /companion/view gives it). */
+/** POST /companion/presence. Newer backends answer 204; older ones a catch-up this window ignores. */
 export async function postCompanionPresence(input: CompanionPresenceInput): Promise<void> {
   await request('/presence', { method: 'POST', body: input });
 }
 
-/** POST /companion/view: the panel opened or got focus. The "Since you left" summary when the user was away long enough. */
-export async function postCompanionView(): Promise<CompanionCatchUpDto | null> {
-  const body = await request('/view', { method: 'POST', body: {} });
-  return isObject(body) ? parseCatchUp(body.catchUp) : null;
+/** POST /companion/view: the panel opened or got focus, so its messages are read. */
+export async function postCompanionView(): Promise<void> {
+  await request('/view', { method: 'POST', body: {} });
 }
 
 /** POST /companion/get-started: Get started's Start with the card's choices (D17). 409 scheduler_off: homes cannot run here. */
@@ -644,17 +603,6 @@ export async function removeCompanionReminder(id: string): Promise<void> {
 /** Undoes the feedback demotion of one subtype (back to its own severity). */
 export async function undoCompanionDemotion(subtype: CompanionItemSubtype): Promise<void> {
   await request(`/demotions/${encodeURIComponent(subtype)}`, { method: 'DELETE' });
-}
-
-/** "Tomorrow, focus on…": what the next morning brief should look at more. */
-export async function curateCompanionBrief(text: string): Promise<void> {
-  await request('/brief/curate', { method: 'POST', body: { text } });
-}
-
-export async function setCompanionBriefFeedback(briefId: string, index: number, feedback: CompanionFeedback | null): Promise<CompanionBriefDto> {
-  const brief = parseCompanionBrief(await request(`/brief/${encodeURIComponent(briefId)}/feedback`, { method: 'POST', body: { index, feedback } }));
-  if (!brief) throw unexpected();
-  return brief;
 }
 
 /**

@@ -2,8 +2,9 @@ import React from 'react';
 import { estimateTokens } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
 import type { BulkActions } from './ChatTreeList';
-import { confirmMoveThreadsToTrash } from '../../../lib/threadRowContextMenu';
 import FolderList from './FolderList';
+import { Button } from '../../ui/controls';
+import { EditIcon } from '../icons';
 import { isLocalProject } from '../../../config/backendConnections';
 
 interface Props {
@@ -21,7 +22,7 @@ interface Props {
 }
 
 const panelStyle: React.CSSProperties = {
-  background: 'var(--term-surface, #fff)',
+  background: 'var(--term-surface)',
   border: '1px solid var(--term-line)',
   padding: '16px 18px 14px',
   marginBottom: 14,
@@ -104,7 +105,7 @@ export default function ManageSidebar({
         <div style={panelHeader}>
           <h3 style={panelTitle}>Instructions</h3>
           <span style={{ flex: 1 }} />
-          <EditGlyph color="var(--term-muted)" />
+          <EditIcon style={{ color: 'var(--term-muted)' }} />
         </div>
         <textarea
           rows={9}
@@ -115,7 +116,6 @@ export default function ManageSidebar({
             width: '100%',
             border: 'none',
             background: 'transparent',
-            outline: 'none',
             fontFamily: 'var(--ui-font)',
             fontSize: 'var(--fs-lg)',
             lineHeight: 1.55,
@@ -138,27 +138,13 @@ export default function ManageSidebar({
           <span>
             {instr.length} chars · ~{estimateTokens(instr)} tokens
             {dirty && (
-              <span style={{ color: 'var(--term-accent)', marginLeft: 6 }}>· unsaved</span>
+              <span style={{ color: 'var(--term-accent-text)', marginLeft: 6 }}>· unsaved</span>
             )}
           </span>
           <span style={{ flex: 1 }} />
-          <button
-            type="button"
-            onClick={() => onSaveInstructions(instr)}
-            disabled={!dirty}
-            style={{
-              fontFamily: 'var(--ui-font)',
-              fontSize: 'var(--fs-md)',
-              padding: '4px 12px',
-              background: dirty ? 'var(--term-fg)' : 'var(--term-line)',
-              color: 'var(--term-bg, #fff)',
-              border: 'none',
-              cursor: dirty ? 'pointer' : 'default',
-              opacity: dirty ? 1 : 0.6,
-            }}
-          >
+          <Button variant="primary" size="sm" onClick={() => onSaveInstructions(instr)} disabled={!dirty}>
             Save
-          </button>
+          </Button>
         </div>
       </div>
       {/* Folders panel */}
@@ -184,24 +170,9 @@ export default function ManageSidebar({
         </div>
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
           {!manageMode ? (
-            <button
-              type="button"
-              onClick={onToggleManageMode}
-              style={{
-                border: '1px solid var(--term-line)',
-                background: 'transparent',
-                color: 'var(--term-fg)',
-                padding: '6px 14px',
-                fontFamily: 'var(--ui-font)',
-                fontSize: 'var(--fs-md)',
-                cursor: 'pointer',
-                letterSpacing: 'var(--ls-wide)',
-                width: '100%',
-                textAlign: 'left',
-              }}
-            >
+            <Button onClick={onToggleManageMode} style={{ width: '100%', justifyContent: 'flex-start' }}>
               ☐ Select threads…
-            </button>
+            </Button>
           ) : (
             <>
               <div style={{ ...bodyText, fontSize: 'var(--fs-md)', fontWeight: 600, color: 'var(--term-fg)' }}>
@@ -216,36 +187,13 @@ export default function ManageSidebar({
                     ) : (
                       <SidebarManageBtn label="Archive" onClick={() => bulkActions?.bulkArchiveTrees()} />
                     )}
-                    <SidebarManageBtn
-                      label="Delete"
-                      danger
-                      onClick={() => {
-                        const count = bulkActions?.treeSelection.size ?? 0;
-                        void confirmMoveThreadsToTrash(count).then((ok) => {
-                          if (ok) bulkActions?.bulkDeleteTrees();
-                        });
-                      }}
-                    />
+                    <SidebarManageBtn label="Delete" danger onClick={() => bulkActions?.bulkDeleteTrees()} />
                   </>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={onToggleManageMode}
-                style={{
-                  border: '1px solid var(--term-line)',
-                  background: 'transparent',
-                  color: 'var(--term-fg)',
-                  padding: '5px 14px',
-                  fontFamily: 'var(--ui-font)',
-                  fontSize: 'var(--fs-sm)',
-                  cursor: 'pointer',
-                  width: '100%',
-                  marginTop: 4,
-                }}
-              >
+              <Button size="sm" onClick={onToggleManageMode} style={{ width: '100%', marginTop: 4 }}>
                 Done
-              </button>
+              </Button>
             </>
           )}
         </div>
@@ -255,37 +203,5 @@ export default function ManageSidebar({
 }
 
 function SidebarManageBtn({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
-  return (
-    <span
-      role="button"
-      onClick={onClick}
-      style={{
-        cursor: 'pointer',
-        color: danger ? 'var(--term-danger, #e55)' : 'var(--term-muted)',
-        fontSize: 'var(--fs-sm)',
-        padding: '4px 10px',
-        border: '1px solid ' + (danger ? 'var(--term-danger, #e55)' : 'var(--term-line)'),
-        letterSpacing: 'var(--ls-wide)',
-      }}
-    >
-      {label}
-    </span>
-  );
-}
-
-function EditGlyph({ color }: { color: string }) {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke={color}
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M11 2.5l2.5 2.5L6 12.5 2.5 13.5 3.5 10 11 2.5z" />
-    </svg>
-  );
+  return <Button size="sm" danger={danger} onClick={onClick}>{label}</Button>;
 }

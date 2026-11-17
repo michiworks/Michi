@@ -21,6 +21,15 @@ describe('branch overview message metadata', () => {
 });
 
 describe('imported assistant content', () => {
+  test('a reply that showed blocks stores their plain text after its answer, as a finished turn does', () => {
+    const blocks = [
+      { id: 'a-b-0', kind: 'answer', rawText: '[TITLE: Days]\nPick one:' },
+      { id: 'a-b-1', kind: 'blocks', blocks: [{ type: 'poll', id: 'cb-1', question: 'Day?', options: ['Mon', 'Tue'] }], fallbackText: 'Day?\n- Mon\n- Tue' },
+    ];
+    assert.equal(contentFromIncomingMessage({ role: 'assistant', blocks }), 'Pick one:\n\nDay?\n- Mon\n- Tue');
+    assert.equal(contentFromIncomingMessage({ role: 'assistant', blocks: JSON.stringify(blocks.slice(1)) }), 'Day?\n- Mon\n- Tue');
+  });
+
   test('matches what a finished turn stores', () => {
     const answers = [
       '[TITLE: Plan]\nAnswer.\n\n\n\nMore.\n[FOLLOW-UP 1/3: unclosed?',

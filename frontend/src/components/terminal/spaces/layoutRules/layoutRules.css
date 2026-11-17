@@ -20,7 +20,7 @@
   border: 1px solid var(--term-line); border-radius: var(--ui-radius); padding: 10px 12px;
   background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); line-height: 1.55;
 }
-.layout-preferences-editor__input:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.layout-preferences-editor__input:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .layout-preferences-editor__input::placeholder { color: var(--term-muted); }
 .layout-preferences-editor__actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .layout-preferences-editor [role='alert'] { color: var(--term-danger-text); }

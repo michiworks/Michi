@@ -10,6 +10,7 @@ import {
   scrubberAvailable,
   thumbCenter,
 } from '../../lib/transcriptScrubber';
+import { strokeFor } from './icons';
 import './TranscriptScrubber.css';
 
 /** Height of the visible grip; its centre travels the track minus this. */
@@ -26,6 +27,7 @@ interface Label { index: number; total: number; text: string; time: string; dir?
 
 interface TranscriptScrubberProps {
   scrollRef: RefObject<HTMLDivElement | null>;
+  /** The conversation's questions (other messages are ignored). A new array re-reads whether the handle is available. */
   messages: readonly ChatMessage[];
   /** Older history exists that is not loaded: the question count is a lower bound. */
   hasOlder: boolean;
@@ -53,7 +55,7 @@ export function TranscriptScrubber({ scrollRef, messages, hasOlder, top, bottom,
   const [dragging, setDragging] = useState(false);
   const [label, setLabel] = useState<Label | null>(null);
 
-  const users = useMemo(() => new Map(messages.filter((m) => m.role === 'user').map((m) => [m.id, m])), [messages]);
+  const users = useMemo(() => new Map(messages.filter((m) => m.role === 'user' && !m.blockAnswer).map((m) => [m.id, m])), [messages]);
   const usersRef = useRef(users);
   const onScrubRef = useRef(onScrub);
   useLayoutEffect(() => {
@@ -98,8 +100,12 @@ export function TranscriptScrubber({ scrollRef, messages, hasOlder, top, bottom,
     // The handle is the transcript's thumb while it is available, so the
     // native scroll indicator is hidden (TranscriptScrubber.css).
     sc?.toggleAttribute('data-scrubber', ok);
-    availableRef.current = ok;
-    setAvailable(ok);
+    // Following a streamed reply scrolls on every chunk that grows the
+    // transcript: only a change of availability renders.
+    if (ok !== availableRef.current) {
+      availableRef.current = ok;
+      setAvailable(ok);
+    }
     return ok;
   }, [scrollRef]);
   const show = useCallback(() => {
@@ -249,7 +255,8 @@ export function TranscriptScrubber({ scrollRef, messages, hasOlder, top, bottom,
         onLostPointerCapture={end}
       >
         <span className="transcript-scrubber__grip">
-          <svg width="10" height="18" viewBox="0 0 10 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          {/* The scrubber's own up-and-down chevrons; no house icon has this shape. */}
+          <svg width="10" height="18" viewBox="0 0 10 18" fill="none" stroke="currentColor" strokeWidth={strokeFor(10, 10)} strokeLinecap="round" strokeLinejoin="round">
             <path d="M2 6.5 5 3.5 8 6.5M2 11.5 5 14.5 8 11.5" />
           </svg>
         </span>

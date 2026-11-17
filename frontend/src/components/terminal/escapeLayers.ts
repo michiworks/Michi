@@ -53,13 +53,17 @@ export const OTHER_LAYER_SELECTOR = liveLayers('[role="menu"]', '[role="listbox"
 
 /**
  * Focus something else holds, which a composer focusing itself must leave
- * alone: any form control (a checkbox and a select too), or anything in an
- * open dialog, menu or list other than one the composer (`home`) sits in.
+ * alone: any form control (a checkbox and a select too), a tab the keyboard
+ * is on (its arrows select the pane the composer is in, and the next arrow
+ * needs the focus where it was; a tab a click focused is not held), or
+ * anything in an open dialog, menu or list other than one the composer
+ * (`home`) sits in.
  */
 export function focusIsTaken(home?: Element | null, active: Element | null = document.activeElement): boolean {
   if (!(active instanceof HTMLElement) || active === document.body) return false;
   const tag = active.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || active.isContentEditable) return true;
+  if (active.getAttribute('role') === 'tab' && active.matches(':focus-visible')) return true;
   const layer = active.closest(OTHER_LAYER_SELECTOR);
   return !!layer && !(home && layer.contains(home));
 }

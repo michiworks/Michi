@@ -58,6 +58,13 @@ test('new pane opens an in-pane chooser and transforms the same slot', async ({ 
 
 
 test('Browser button opens a matching pinned pane with a standard topbar caption', async ({ page }) => {
+  // The button exists only in the desktop app, so stand in for its native surface.
+  await page.addInitScript(() => {
+    (window as any).electron = {
+      browserCreate: async (surfaceId: string, _project: string, url: string) => ({ surfaceId, url, title: 'Browser', loading: false, canGoBack: false, canGoForward: false }),
+      browserSetBounds: () => {}, browserDestroy: () => {},
+    };
+  });
   await installMockApi(page);
   await bootWithWorkspace(page);
   await page.locator(COMPOSER_EDITOR).first().fill('browser pane');

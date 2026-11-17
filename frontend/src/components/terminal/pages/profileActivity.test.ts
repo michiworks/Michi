@@ -1,4 +1,4 @@
-import { buildProfileActivity, buildProfileActivityFromSnapshot } from './profileActivity';
+import { buildProfileActivity, buildProfileActivityFromSnapshot, profileActivityEqual } from './profileActivity';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 
 const atNoon = (date: string) => new Date(`${date}T12:00:00`).getTime();
@@ -125,6 +125,16 @@ describe('buildProfileActivity', () => {
     expect(activity.metrics.messages.total).toBe(8);
     expect(activity.metrics.messages.longestStreak).toBe(2);
     expect(activity.metrics.messages.currentStreak).toBe(2);
+  });
+
+  it('counts a rebuilt activity as the same until a count changes', () => {
+    const now = atNoon('2026-05-25');
+    const asked = (text: string) => ({ id: text, role: 'user' as const, text, toolCalls: [], createdAt: now });
+    const build = (messages: ChatNodeState['messages'], title?: string) =>
+      buildProfileActivity([project({ chatIds: ['root'], edges: [] })], { root: node({ title, messages }) }, now);
+    const before = build([asked('one')]);
+    expect(profileActivityEqual(before, build([asked('one')], 'Renamed'))).toBe(true);
+    expect(profileActivityEqual(before, build([asked('one'), asked('two')]))).toBe(false);
   });
 
   it('falls back to the workspace created date for legacy messages without timestamps', () => {

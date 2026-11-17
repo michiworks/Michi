@@ -38,7 +38,7 @@ import type {
     RuntimeToolProfile,
 } from "../../contract/types";
 import type { NormalizedEvent, PlanEntry } from "../../contract/events";
-import { omitInlineImages, TOOL_PAYLOAD_MAX } from "../../contract/toolPayload";
+import { omitInlineImages, TOOL_PAYLOAD_MAX, truncateToolOutput } from "../../contract/toolPayload";
 import { ACPRequestNotSentError, type AcpClient, type AcpPromptBlock, type AcpUpdate } from "./acpClient";
 import type { AcpAgentRuntime } from "./AcpAgentRuntime";
 import { KIRO_FLAVOR, type AcpAgentFlavor } from "./acpAgentFlavor";
@@ -1033,7 +1033,7 @@ export class AcpAgentSession implements AgentSession {
                     kindType: delegation ? 'subagent' : update.kind || undefined,
                     detail: purpose,
                     inputJson: inputStr && inputStr.length > TOOL_PAYLOAD_MAX ? inputStr.slice(0, TOOL_PAYLOAD_MAX) : inputStr,
-                    output: outputStr && outputStr.length > TOOL_PAYLOAD_MAX ? outputStr.slice(0, TOOL_PAYLOAD_MAX) : outputStr,
+                    output: outputStr ? truncateToolOutput(outputStr) : outputStr,
                     ...acpToolIdentity(update, {
                         resolveName: resolveToolName,
                         calledAs: toolCallNames.get(update.toolCallId),

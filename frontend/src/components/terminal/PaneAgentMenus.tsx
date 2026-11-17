@@ -5,6 +5,7 @@ import type { ResolvedNodeBinding } from '../../state/nodeBindingResolution';
 import ContextMenu, { menuOpenKey, type MenuSection } from '../ContextMenu';
 import type { PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import { ComposerModelPicker, type ComposerUltracode } from './ComposerModelPicker';
+import { CheckIcon } from './icons';
 
 interface PaneAgentMenusProps {
   agentMenu: PaneMenuAnchor | null;
@@ -32,6 +33,9 @@ interface PaneAgentMenusProps {
   /** The chat's Ultracode switch; omitted where a chat cannot have one. */
   ultracode?: ComposerUltracode;
   onSaveUltracode?: (enabled: boolean) => void | Promise<void>;
+  /** The chat's speed tier (null: standard); omitted where a chat cannot have one. */
+  serviceTier?: string | null;
+  onSaveServiceTier?: (serviceTier: string | null) => void | Promise<void>;
   onCloseAgentMenu: () => void;
   onCloseModelMenu: () => void;
   primaryAgents?: readonly PrimaryAgentMenuOption[];
@@ -78,6 +82,8 @@ export function PaneAgentMenus({
   onSaveReasoning,
   ultracode,
   onSaveUltracode,
+  serviceTier,
+  onSaveServiceTier,
   onCloseAgentMenu,
   onCloseModelMenu,
   primaryAgents = [],
@@ -108,7 +114,7 @@ export function PaneAgentMenus({
           items: [{
             id: 'primary-default',
             label: defaultAgentLabel,
-            glyph: followsRuntimeDefault ? '✓' : undefined,
+            glyph: followsRuntimeDefault ? <CheckIcon size="sm" /> : undefined,
             sublabel: `${runtimeLabel} default agent · follows runtime and model controls`,
             run: onSelectDefaultAgent,
           }],
@@ -118,7 +124,7 @@ export function PaneAgentMenus({
           items: primaryAgents.filter((agent) => agent.scope === scope).map((agent) => ({
             id: `primary-${agent.id}`,
             label: agent.name,
-            glyph: selectedPrimaryAgentId === agent.id ? '✓' : undefined,
+            glyph: selectedPrimaryAgentId === agent.id ? <CheckIcon size="sm" /> : undefined,
             sublabel: agent.runtimeSummary,
             run: () => onSelectPrimaryAgent(agent.id),
           })),
@@ -156,7 +162,7 @@ export function PaneAgentMenus({
                 ...availableModes.map((m) => ({
                   id: m.id,
                   label: m.name,
-                  glyph: currentModeId === m.id ? '✓' : undefined,
+                  glyph: currentModeId === m.id ? <CheckIcon size="sm" /> : undefined,
                   sublabel: m.description || undefined,
                   run: () => {
                     if (m.id !== currentModeId) onSwitchAgent(m.id);
@@ -194,6 +200,8 @@ export function PaneAgentMenus({
           onSaveReasoning={onSaveReasoning}
           ultracode={ultracode}
           onSaveUltracode={onSaveUltracode}
+          serviceTier={serviceTier}
+          onSaveServiceTier={onSaveServiceTier}
           onClose={onCloseModelMenu}
         />
       )}</AnimatePresence>

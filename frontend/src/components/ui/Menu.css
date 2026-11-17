@@ -26,7 +26,7 @@
   --m-iconSize: 14px;
   --m-hoverMs: var(--t-soft);
   --m-enterMs: var(--t-soft);
-  --m-clickDelay: 160ms; /* = BLINK_MS in ContextMenu.tsx; a timing contract, not a style */
+  --m-clickDelay: 160ms; /* = MENU_CONFIRM_MS in useMenuConfirm.ts; a timing contract, not a style */
   --m-font: var(--ui-font);
   --m-shadow: var(--ui-popover-shadow);
 }
@@ -134,7 +134,11 @@
   transition: background var(--m-hoverMs) ease, color var(--m-hoverMs) ease;
 }
 :is(.michi-menu, .michi-menu-scope) .ui-menu-item[data-active='true']:not([data-danger='true']) { color: var(--term-fg); }
-:is(.michi-menu, .michi-menu-scope) .ui-menu-blink { animation-duration: var(--m-clickDelay); }
+/* ActionMenu's rows are buttons, and focus moves onto them: the focused row
+   takes the hover fill with the ring inside it. */
+.michi-menu button.ui-menu-item { width: 100%; text-align: left; }
+.michi-menu button.ui-menu-item:focus-visible { background: var(--term-hover-bg, var(--term-alt)); outline-offset: -2px; }
+@media (pointer: coarse) { .michi-menu button.ui-menu-item { min-height: 44px; } }
 .michi-menu-list { list-style: none; padding: 0; margin: 0; min-height: 0; overflow-y: auto; scrollbar-width: thin; overscroll-behavior: contain; }
 /* In a scope (the command palette) the container scrolls and its group lists
    are plain blocks. As scrollers of their own, a wheel over a group found a
@@ -147,10 +151,23 @@
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 36px), transparent);
 }
-/* The palette's one line when nothing shows: searching, or what found nothing. */
+/* The palette's one line when nothing shows: searching, or what found nothing.
+   A failed message search says so in danger words, above its Retry row. */
 .palette-empty { padding: 10px var(--m-rowX) 6px; color: var(--term-mid); font-size: var(--m-fontSize); }
+.palette-empty[role='alert'] { color: var(--term-danger-text); }
 /* The typed words inside a row's name. */
-.palette-match { background: none; color: var(--term-accent); font-weight: 500; }
+.palette-match { background: none; color: var(--term-accent-text); font-weight: 500; }
+/* A message snippet under its result is a row of its own, so ↑/↓ reach it;
+   a compact one under a mouse. */
+.michi-menu-scope[data-menu='palette'] .palette-snippet {
+  gap: 4px;
+  color: var(--term-mid);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+}
+@media (pointer: fine) {
+  .michi-menu-scope[data-menu='palette'] .palette-snippet { --m-minHeight: 24px; --m-rowY: 2px; }
+}
 .michi-menu-divider { height: 1px; margin: 4px var(--m-separatorInset); background: var(--term-line); list-style: none; }
 .michi-menu-section { padding: 6px var(--m-rowX) 4px; color: var(--term-muted); font-size: var(--m-captionSize); list-style: none; }
 .michi-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

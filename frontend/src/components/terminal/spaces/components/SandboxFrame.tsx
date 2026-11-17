@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { COMPONENT_SANDBOX_IFRAME, COMPONENT_SANDBOX_METHODS, COMPONENT_SANDBOX_THEME_VARS, COMPONENT_SANDBOX_TIMEOUT_MS, PAGE_COMPONENT_LIMITS, isComponentSandboxThemeValue, parseComponentSandboxMessage, type ComponentSandboxMethod, type ComponentSandboxTheme } from 'michi-shared';
 import { backendApiBase } from '../../../../config/backendConnections';
+import { Button } from '../../../ui/controls';
 import './components.css';
 
 export interface SandboxFrameProps {
@@ -102,7 +103,7 @@ function StableSandboxFrame(input: SandboxFrameProps) {
     {candidates}
     {failure && <div className="page-component-error" role="status">
       <p>{displayed ? 'The update could not be displayed. The previous view is kept.' : 'The component could not be displayed.'} {failure}</p>
-      <button type="button" onClick={() => setRetry(value => value + 1)}>Retry update</button>
+      <Button size="sm" onClick={() => setRetry(value => value + 1)}>Retry update</Button>
     </div>}
   </div>;
 }
@@ -289,6 +290,6 @@ function SandboxRunner({ connectionId, name, code, versionKey, props, data, prev
   return <section className="page-component-frame" aria-label={`${name} component`} data-preview={preview || undefined}>
     {!stopped && <iframe ref={iframe} key={`${mount}:${versionKey ?? ''}:${code}`} src={src} sandbox={COMPONENT_SANDBOX_IFRAME} referrerPolicy="no-referrer" title={`${name} preview`} style={{ height }} onLoad={onLoad} />}
     {stopped && <div className="page-component-error" role="status">Component stopped. Remove it or reload to run it again.</div>}
-    {failure && !stopped && <div className="page-component-error" role="alert"><p>{failure}</p><button type="button" onClick={() => setShowCode(value => !value)}>{showCode ? 'Hide code' : 'View code'}</button><button type="button" onClick={() => setFailure(null)}>Dismiss</button><button type="button" onClick={() => { const now = Date.now(); reloads.current = reloads.current.filter(stamp => now - stamp < 15_000); if (reloads.current.length >= 3) { setFailure('Reload is temporarily paused after repeated failures. Disable this component or wait a moment before trying again.'); return; } reloads.current.push(now); loads.current = 0; live.current = false; pending.current = 0; setFailure(null); setMount(value => value + 1); }}>Reload</button><button type="button" onClick={() => onAskDraft?.(`The component “${name}” failed: ${failure}\nPlease help fix it.`)}>Ask assistant to fix</button><button type="button" onClick={() => { live.current = false; pending.current = 0; setStopped(true); onStop?.(); }}>Stop component</button>{showCode && <pre className="page-component-source">{code}</pre>}</div>}
+    {failure && !stopped && <div className="page-component-error" role="alert"><p>{failure}</p><Button size="sm" onClick={() => setShowCode(value => !value)}>{showCode ? 'Hide code' : 'View code'}</Button><Button size="sm" onClick={() => setFailure(null)}>Dismiss</Button><Button size="sm" onClick={() => { const now = Date.now(); reloads.current = reloads.current.filter(stamp => now - stamp < 15_000); if (reloads.current.length >= 3) { setFailure('Reload is temporarily paused after repeated failures. Disable this component or wait a moment before trying again.'); return; } reloads.current.push(now); loads.current = 0; live.current = false; pending.current = 0; setFailure(null); setMount(value => value + 1); }}>Reload</Button><Button size="sm" onClick={() => onAskDraft?.(`The component “${name}” failed: ${failure}\nPlease help fix it.`)}>Ask assistant to fix</Button><Button size="sm" onClick={() => { live.current = false; pending.current = 0; setStopped(true); onStop?.(); }}>Stop component</Button>{showCode && <pre className="page-component-source">{code}</pre>}</div>}
   </section>;
 }

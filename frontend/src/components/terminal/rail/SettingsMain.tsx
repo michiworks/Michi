@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ChevronRight, Search, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { ChevronRightIcon, CloseIcon, SearchIcon } from '../icons';
 import type { PageId } from '../../../state/commands';
 import type { ChatNodeState } from '../../../state/chatTypes';
 import { useChatProjects, useStructuralSelector } from '../../../state/chatStore';
@@ -14,8 +15,8 @@ import { useCompanionName } from '../../../state/companion/companionName';
 import { getElectron } from '../../../lib/electronBridge';
 import { AppearancePane } from '../pages/settings/AppearancePane';
 import {
-  SettingsBackContext, SettingsHeaderActionContext, SettingsLayoutContext, SettingsOpenContext, SettingsPageLabelContext, SettingsPageTitleContext,
-  SettingsTargetContext, type SettingsHeaderAction,
+  SETTINGS_TOC_WIDTH, SettingsAsideContext, SettingsBackContext, SettingsHeaderActionContext, SettingsLayoutContext, SettingsOpenContext,
+  SettingsPageLabelContext, SettingsPageTitleContext, SettingsTargetContext, useSettingsAsideRoom, type SettingsHeaderAction,
 } from '../pages/settings/settingsPhone';
 import { SettingsToc } from './SettingsToc';
 import { Button } from '../../ui/controls';
@@ -37,6 +38,10 @@ const TrashPane = React.lazy(() => import('../pages/settings/TrashPane').then(mo
 const ArchivedPane = React.lazy(() => import('../pages/settings/ArchivedPane').then(module => ({ default: module.ArchivedPane })));
 const SkillsPane = React.lazy(() => import('../pages/settings/SkillsPane').then(module => ({ default: module.SkillsPane })));
 const CompanionSettings = React.lazy(() => import('../companion/CompanionSettings'));
+
+/** How long a picked search result stays marked: the settings-search-hit
+ *  highlight in Settings.css runs this long, so the two must match. */
+const SEARCH_HIT_MS = 2400;
 
 function SectionContent({ children }: { children: React.ReactNode }) {
   return <React.Suspense fallback={<div role="status">Loading settings…</div>}>{children}</React.Suspense>;
@@ -104,7 +109,7 @@ function WindowNav({ page, name, query, onQuery, onOpen, onSubmit, history, meta
   return (
     <nav className="settings-window__nav term-scrollbar" aria-label="Settings sections">
       <div className="settings-window__search">
-        <Search size={14} strokeWidth={1.75} aria-hidden="true" />
+        <SearchIcon aria-hidden="true" />
         <input ref={searchRef} type="search" aria-label="Search settings" placeholder="Search settings" autoFocus
           value={query} onChange={(event) => onQuery(event.target.value)}
           onKeyDown={(event) => {
@@ -114,7 +119,7 @@ function WindowNav({ page, name, query, onQuery, onOpen, onSubmit, history, meta
             if (event.key === 'Enter' && query) { event.preventDefault(); onSubmit(); }
           }} />
         {query && <button type="button" className="settings-window__clear" aria-label="Clear search" onClick={() => { onQuery(''); searchRef.current?.focus(); }}>
-          <X size={13} strokeWidth={1.75} aria-hidden="true" />
+          <CloseIcon aria-hidden="true" />
         </button>}
       </div>
       {SETTINGS_GROUPS.map((group, index) => {
@@ -123,7 +128,7 @@ function WindowNav({ page, name, query, onQuery, onOpen, onSubmit, history, meta
           <h2 id={headingId} className="settings-window__heading">{group.title}</h2>
           {group.pages.map((item) => {
             const info = SETTINGS_PAGES[item];
-            if ((item === 'account' && !signedIn) || info.only === 'phone') return null;
+            if ((item === 'account' && !signedIn) || info.only === 'phone' || (info.only === 'app' && !getElectron())) return null;
             const Icon = info.icon;
             const label = settingsPageLabel(item, name);
             const status = alert[item];
@@ -134,7 +139,7 @@ function WindowNav({ page, name, query, onQuery, onOpen, onSubmit, history, meta
               aria-label={status ? `${label}, ${status}` : undefined}
               aria-describedby={count ? countId : undefined}
               onClick={() => onOpen(item)}>
-              <Icon size={14} strokeWidth={1.75} aria-hidden="true" /><span>{label}</span>
+              <Icon aria-hidden="true" /><span>{label}</span>
               {count && <em id={countId} aria-hidden="true">{count}</em>}
               {status && <i className="settings-window__alert" aria-hidden="true" />}
             </button>;
@@ -158,7 +163,7 @@ function SearchResults({ query, results, onPick }: { query: string; results: Set
             <span className="settings-window__path">{result.path}</span>
             <span className="settings-window__name">{result.label}</span>
             {result.description && <span className="settings-window__desc">{result.description}</span>}
-            <ChevronRight className="settings-window__chevron" size={14} strokeWidth={1.75} aria-hidden="true" />
+            <ChevronRightIcon className="settings-window__chevron" aria-hidden="true" />
           </button>
         </li>)}
       </ul>}
@@ -216,6 +221,9 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
   const [titled, setTitled] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLElement>(null);
+  // The panel beside the window that "On this page" and the Appearance preview render into.
+  const [aside, setAside] = useState<HTMLDivElement | null>(null);
+  const tocRoom = useSettingsAsideRoom(SETTINGS_TOC_WIDTH);
   // Switching level in a stacked drawer hides what has focus (the picked row,
   // or the page the header Back left), so focus follows: to the page's
   // heading, or back to the row of the page just left.
@@ -252,7 +260,7 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
   }, [page]);
 
   const results = useMemo(() => stacked ? [] : searchSettings(query,
-    (Object.keys(SETTINGS_PAGES) as SettingsPage[]).filter((id) => SETTINGS_PAGES[id].only !== 'phone'),
+    (Object.keys(SETTINGS_PAGES) as SettingsPage[]).filter((id) => SETTINGS_PAGES[id].only !== 'phone' && (SETTINGS_PAGES[id].only !== 'app' || !!getElectron())),
     (id) => SETTINGS_GROUPS.find((group) => group.pages.includes(id))?.title ?? '',
     { name, vibrancy: !!getElectron()?.hasVibrancy }),
   [query, stacked, name]);
@@ -273,7 +281,7 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
       if (setting) {
         setting.scrollIntoView?.({ block: 'center' });
         setting.setAttribute('data-search-hit', '');
-        timer = setTimeout(() => setting.removeAttribute('data-search-hit'), 2400);
+        timer = setTimeout(() => setting.removeAttribute('data-search-hit'), SEARCH_HIT_MS);
         return;
       }
       // Pages load lazily; stop looking after about a second and a half.
@@ -336,7 +344,7 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
       key={`${page}:${target?.seq ?? 0}`}>
       {/* The heading keeps its place as an action comes and goes, so focus on it stays. */}
       {!titled && <div className="settings-titlebar" data-action={action ? '' : undefined}>{heading}
-        {action && <Button variant="primary" onClick={action.onClick}>{action.icon && <action.icon size={13} aria-hidden="true" />}{action.label}</Button>}
+        {action && <Button variant="primary" onClick={action.onClick}>{action.icon && <action.icon aria-hidden="true" />}{action.label}</Button>}
       </div>}
       <SettingsTargetContext.Provider value={target?.label ?? null}>
         <SettingsOpenContext.Provider value={openPage}>
@@ -367,18 +375,23 @@ export default function SettingsMain({ page, onPageChange, workspaceReady = true
       </div>
     </SettingsLayoutContext.Provider>
   );
+  const searching = query.trim() !== '';
   return (
     <SettingsLayoutContext.Provider value="window">
-      <div className="terminal-settings terminal-settings--window" data-page={page} data-cards="">
-        <WindowNav page={page} name={name} query={query} onQuery={setQuery} onOpen={(next) => openPage(next)}
-          onSubmit={() => { if (results[0]) pick(results[0]); }}
-          history={workspaceReady ? history : { trash: 0, archived: 0 }} metaAgentAlert={metaAgentAlert} searchRef={searchRef} />
-        {query.trim() ? <SearchResults query={query} results={results} onPick={pick} /> : <>
-          {content}
-          {/* A long page lists its groups beside it; keyed as the page is, so it reads the page shown. */}
-          {!titled && <SettingsToc key={`toc:${page}:${target?.seq ?? 0}`} contentRef={contentRef} />}
-        </>}
-      </div>
+      <SettingsAsideContext.Provider value={aside}>
+        <div className="terminal-settings terminal-settings--window" data-page={page} data-cards="">
+          <WindowNav page={page} name={name} query={query} onQuery={setQuery} onOpen={(next) => openPage(next)}
+            onSubmit={() => { if (results[0]) pick(results[0]); }}
+            history={workspaceReady ? history : { trash: 0, archived: 0 }} metaAgentAlert={metaAgentAlert} searchRef={searchRef} />
+          {searching ? <SearchResults query={query} results={results} onPick={pick} /> : content}
+        </div>
+        {/* Beside the window, outside its edge; drawn only while something is in it. Inside the
+            dialog, so it shares the window's focus, Escape and motion, and a click on it is not one on the scrim. */}
+        <div ref={setAside} className="settings-window__aside term-scrollbar" />
+        {/* A long page lists its groups there; keyed as the page is, so it reads the page shown. */}
+        {!searching && !titled && aside && tocRoom
+          && createPortal(<SettingsToc key={`toc:${page}:${target?.seq ?? 0}`} contentRef={contentRef} />, aside)}
+      </SettingsAsideContext.Provider>
     </SettingsLayoutContext.Provider>
   );
 }

@@ -1,0 +1,2 @@
+/* The metadata takes focus from script only when it has no control (ST-08, exception 2). */
+.agent-run-pane__meta:focus { outline: none; }

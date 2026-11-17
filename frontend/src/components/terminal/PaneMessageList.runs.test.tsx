@@ -59,7 +59,9 @@ describe('PaneMessageList reply runs', () => {
 
 describe('PaneMessageList answer meta lines', () => {
   const actionsOf = (container: HTMLElement, id: string) =>
-    container.querySelector(`[data-msg-id="${id}"] .t-answer-meta .t-msg-actions`) as HTMLElement | null;
+    container.querySelector(`[data-msg-id="${id}"] .t-answer-meta`) as HTMLElement | null;
+  /** Shown at rest; the others show on hover (index.css). */
+  const pinned = (line: HTMLElement | null) => line?.getAttribute('data-msg-actions') === 'pinned';
   const thread = [
     message('u1', 'user', 'First'),
     message('a1', 'assistant', 'Earlier answer.'),
@@ -80,23 +82,24 @@ describe('PaneMessageList answer meta lines', () => {
 
   it('keeps the latest answer\'s line shown and earlier ones for hover', () => {
     const { container } = render(at('idle'));
-    expect(actionsOf(container, 'a2')!.style.opacity).toBe('1');
-    expect(actionsOf(container, 'a1')!.style.opacity).toBe('0');
+    expect(pinned(actionsOf(container, 'a2'))).toBe(true);
+    expect(pinned(actionsOf(container, 'a1'))).toBe(false);
   });
 
   it('shows none under an answer still streaming, and leaves the earlier one to hover', () => {
     const { container } = render(at('streaming'));
     expect(actionsOf(container, 'a2')).toBeNull();
-    expect(actionsOf(container, 'a1')!.style.opacity).toBe('0');
+    expect(pinned(actionsOf(container, 'a1'))).toBe(false);
   });
 
   it('does not pin a failed answer: its error row has the actions', () => {
     const { container } = render(at('error'));
-    expect(actionsOf(container, 'a2')!.style.opacity).toBe('0');
+    expect(pinned(actionsOf(container, 'a2'))).toBe(false);
   });
 
   it('pins nothing while the latest message is the user\'s', () => {
     const { container } = render(at('idle', [...thread, message('u3', 'user', 'Third')]));
-    expect(actionsOf(container, 'a2')!.style.opacity).toBe('0');
+    expect(actionsOf(container, 'a2')).not.toBeNull();
+    expect(pinned(actionsOf(container, 'a2'))).toBe(false);
   });
 });

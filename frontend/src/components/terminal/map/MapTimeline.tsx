@@ -22,7 +22,6 @@ const CHIP_W = 240;
 const CHIP_H = 56;
 const ROW_GAP = 6;
 const LANE_PADDING = 14;
-const ACCENT_DARK = 'color-mix(in srgb, var(--term-accent) 80%, var(--term-fg))';
 
 /**
  * Events shown for one lane. Prefer the agent-authored overview trail; when a
@@ -198,8 +197,10 @@ function LaneRow({ node, events, streaming, isRoot, scale, now, onFocus }: LaneR
 
   return (
     <div
-      className={streaming ? 'map-card map-card--breathe' : 'map-card'}
+      className={streaming ? 'map-timeline__lane map-card--breathe' : 'map-timeline__lane'}
       style={{
+        // The streaming glow's layer (.map-card--breathe::after) is placed over this box.
+        position: 'relative',
         display: 'flex', gap: 18, alignItems: 'flex-start',
         background: 'var(--term-surface)',
         border: `1px solid ${streaming
@@ -214,13 +215,13 @@ function LaneRow({ node, events, streaming, isRoot, scale, now, onFocus }: LaneR
       <div style={{ flex: `0 0 ${RAIL_W}px`, minWidth: 0 }}>
         <div style={{
           fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-lg)', fontWeight: 700, lineHeight: 1.35,
-          color: isRoot ? ACCENT_DARK : 'var(--term-fg)',
+          color: isRoot ? 'var(--term-accent-text)' : 'var(--term-fg)',
         }}>{node.title ?? ''}</div>
         {(streaming || isRoot) && (
           <span style={{
             display: 'inline-block', marginTop: 7,
             fontFamily: 'var(--message-code-font)', fontSize: 'var(--fs-xs)', padding: '2px 8px',
-            color: streaming ? 'var(--term-run)' : ACCENT_DARK,
+            color: streaming ? 'var(--term-run)' : 'var(--term-accent-text)',
             background: streaming ? 'var(--term-run-f)' : 'var(--term-accent-f)',
           }}>
             {streaming
@@ -281,17 +282,12 @@ function LaneRow({ node, events, streaming, isRoot, scale, now, onFocus }: LaneR
               type="button"
               onClick={() => onFocus(node.nodeId)}
               className="map-timeline__chip"
+              data-live={live || undefined}
               style={{
                 position: 'absolute',
                 top: layout.row * (CHIP_H + ROW_GAP),
                 left: layout.x,
-                width: CHIP_W, textAlign: 'left', cursor: 'pointer', border: '1px solid',
-                borderColor: live
-                  ? 'color-mix(in srgb, var(--term-accent) 30%, transparent)'
-                  : 'color-mix(in srgb, var(--term-line) 70%, var(--term-bg))',
-                background: live
-                  ? 'color-mix(in srgb, var(--term-accent-f) 40%, var(--term-surface))'
-                  : 'var(--term-bg)',
+                width: CHIP_W, textAlign: 'left', cursor: 'pointer',
                 padding: '7px 10px', borderRadius: 0,
               }}
             >

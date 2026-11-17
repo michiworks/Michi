@@ -1,29 +1,22 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { TopbarIconButton } from './TopbarIconButton';
 
 describe('TopbarIconButton', () => {
-  it('shows its hint on hover and on keyboard focus, and drops it on press', () => {
-    render(<TopbarIconButton onClick={() => {}} label="Map" tooltip="Map" tooltipKbd="⌘M"><svg /></TopbarIconButton>);
-    const button = screen.getByRole('button', { name: 'Map' });
-    fireEvent.mouseEnter(button);
-    expect(screen.getByRole('tooltip').textContent).toBe('Map⌘M');
-    fireEvent.pointerDown(button);
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.mouseLeave(button);
-    fireEvent.keyDown(document, { key: 'Tab' });
-    fireEvent.focus(button);
-    expect(screen.getByRole('tooltip').textContent).toBe('Map⌘M');
-    fireEvent.blur(button);
-    expect(screen.queryByRole('tooltip')).toBeNull();
-  });
-
-  it('shows no hint while disabled', () => {
-    render(<TopbarIconButton onClick={() => {}} label="Artifacts" tooltip="Artifacts" disabled><svg /></TopbarIconButton>);
-    const button = screen.getByRole('button', { name: 'Artifacts' });
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.mouseEnter(button);
-    fireEvent.focus(button);
-    expect(screen.queryByRole('tooltip')).toBeNull();
+  it('announces what its on look means: a panel open, the page shown, or nothing', () => {
+    const noop = () => {};
+    render(<>
+      <TopbarIconButton onClick={noop} label="Artifacts" tooltip="Artifacts" expanded>A</TopbarIconButton>
+      <TopbarIconButton onClick={noop} label="Map" tooltip="Map" current>M</TopbarIconButton>
+      <TopbarIconButton onClick={noop} label="Digest" tooltip="Digest" current={false}>D</TopbarIconButton>
+      <TopbarIconButton onClick={noop} label="Sign in" tooltip="Sign in" active>K</TopbarIconButton>
+    </>);
+    const artifacts = screen.getByRole('button', { name: 'Artifacts', expanded: true });
+    const map = screen.getByRole('button', { name: 'Map', current: 'page' });
+    const digest = screen.getByRole('button', { name: 'Digest' });
+    const signIn = screen.getByRole('button', { name: 'Sign in' });
+    expect([artifacts, map, digest, signIn].map((button) => button.classList.contains('is-on'))).toEqual([true, true, false, true]);
+    expect(digest.hasAttribute('aria-current')).toBe(false);
+    expect(['aria-pressed', 'aria-expanded', 'aria-current'].some((name) => signIn.hasAttribute(name))).toBe(false);
   });
 });

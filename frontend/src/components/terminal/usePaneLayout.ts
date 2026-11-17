@@ -1,13 +1,12 @@
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { resolvePaneLayout, type PaneWidthMode } from '../../state/paneLayout';
-import { PANE_ENTER_MS, PANE_EXIT_MS, PANE_EASE, paneMotionTiming, type PaneMotion } from './paneMotion';
+import { PANE_ENTER_MS, PANE_EXIT_MS, PANE_EASE, SINGLE_PANE_EXIT } from './paneMotion';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 
 const NO_EXITS: ReadonlySet<string> = new Set();
 type Clip = { left: number; right: number };
 const unclipped: Clip = { left: 0, right: 0 };
 const inset = (clip: Clip) => `inset(0px ${clip.right}px 0px ${clip.left}px)`;
-const singlePaneTiming = paneMotionTiming('soft-fade');
 
 interface Options {
   paneIds: readonly string[];
@@ -19,7 +18,6 @@ interface Options {
   exitingIds?: ReadonlySet<string>;
   /** The zoomed pane fills the strip; the others stay mounted, hidden at their own width. */
   zoomedId?: string | null;
-  motion?: PaneMotion;
   /** App-level reduce-motion pref (combines with OS media query). */
   appReduceMotion?: boolean;
   onExitStart?: (ids: readonly string[]) => void;
@@ -28,7 +26,7 @@ interface Options {
 
 /** Final text widths are committed once; only the pane surfaces move. */
 export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Options) {
-  const { paneIds, customWidths, mode = 'adaptive', defaultPaneWidth, enabled, scope, exitingIds = NO_EXITS, zoomedId = null, motion, appReduceMotion, onExitStart, onExitComplete } = options;
+  const { paneIds, customWidths, mode = 'adaptive', defaultPaneWidth, enabled, scope, exitingIds = NO_EXITS, zoomedId = null, appReduceMotion, onExitStart, onExitComplete } = options;
   const [geometry, setGeometry] = useState({ width: 0, gap: 0, padding: 0 });
   const [settledVersion, setSettledVersion] = useState(0);
   const animationRef = useRef<Animation | null>(null);
@@ -224,7 +222,7 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
         [{ transform: `translateX(${delta}px)`, ...(clipping ? { clipPath: inset(from) } : {}), ...(fading ? { opacity } : {}) },
           { transform: layout.waitingForExit ? `translateX(${delta}px)` : 'translateX(0px)',
             ...(clipping ? { clipPath: inset(to) } : {}), ...(fading ? { opacity: layout.waitingForExit ? '0' : '1' } : {}) }],
-        { duration: layout.waitingForExit ? singlePaneTiming.exit : expandingSingle ? singlePaneTiming.exitLayout
+        { duration: layout.waitingForExit ? SINGLE_PANE_EXIT.exit : expandingSingle ? SINGLE_PANE_EXIT.exitLayout
           : closing ? PANE_EXIT_MS : PANE_ENTER_MS, easing: PANE_EASE, fill: 'both' },
       );
       animations.current.set(id, { animation, from, to });
@@ -247,7 +245,7 @@ export function usePaneLayout(ref: RefObject<HTMLDivElement | null>, options: Op
         });
       };
     }
-  }, [ref, enabled, paneIds, layout, mode, geometry, defaultPaneWidth, scope, exitingIds, motion, onExitStart, onExitComplete]);
+  }, [ref, enabled, paneIds, layout, mode, geometry, defaultPaneWidth, scope, exitingIds, onExitStart, onExitComplete]);
 
   useLayoutEffect(() => {
     const running = animations.current;

@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useIsPresent } from 'motion/react';
 import { PopoverSurface } from '../../../ui/Popover';
+import { useOverlayFocus } from '../../../ui/useOverlayFocus';
 import { useBackLayer } from '../../../../lib/backStack';
 import { placeBelowAnchor } from '../../../ui/useAnchoredPosition';
 import { ChatIcon, FileIcon } from '../../icons';
@@ -43,10 +45,16 @@ export function SourcesPopover({
   onClose: () => void;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  useBackLayer(true, { back: () => { anchor.focus({ preventScroll: true }); onCloseRef.current(); } });
+  // Closed, it fades out for a moment (PopoverSurface) and takes no keys, presses or Back.
+  const present = useIsPresent();
+  useBackLayer(present, { back: () => { anchor.focus({ preventScroll: true }); onCloseRef.current(); } });
+  // Focus goes to the first source, and back to the Sources button however the
+  // popover closes (ST-10), as its fade starts.
+  useOverlayFocus({ open: present, panelRef: bodyRef, trap: false, deferInitialFocus: true });
 
   useLayoutEffect(() => {
     const box = surfaceRef.current?.getBoundingClientRect();
@@ -54,6 +62,7 @@ export function SourcesPopover({
   }, [anchor]);
 
   useEffect(() => {
+    if (!present) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
@@ -61,12 +70,15 @@ export function SourcesPopover({
       anchor.focus({ preventScroll: true });
       onCloseRef.current();
     };
+    const dismiss = () => {
+      if (surfaceRef.current?.contains(document.activeElement)) anchor.focus({ preventScroll: true });
+      onCloseRef.current();
+    };
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (target && (surfaceRef.current?.contains(target) || anchor.contains(target))) return;
-      onCloseRef.current();
+      dismiss();
     };
-    const dismiss = () => onCloseRef.current();
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('pointerdown', onPointer, true);
     window.addEventListener('resize', dismiss);
@@ -77,7 +89,7 @@ export function SourcesPopover({
       window.removeEventListener('resize', dismiss);
       window.removeEventListener('scroll', dismiss, true);
     };
-  }, [anchor]);
+  }, [present, anchor]);
 
   return (
     <PopoverSurface
@@ -89,14 +101,13 @@ export function SourcesPopover({
       maxWidth={`calc(100vw - ${PAD * 2}px)`}
       left={position?.left ?? 0}
       top={position?.top ?? 0}
-      animate={false}
       style={position ? undefined : { visibility: 'hidden' }}
     >
-      <div className="michi-doc-sources">
+      <div ref={bodyRef} className="michi-doc-sources" tabIndex={-1}>
         <div className="michi-doc-caption">Sources · <span className="michi-doc-mono">{count}</span></div>
         <ul className="michi-doc-sources__list">
           {rows.map((row) => {
-            const glyph = row.kind === 'file' ? <FileIcon size={12} /> : <ChatIcon size={12} />;
+            const glyph = row.kind === 'file' ? <FileIcon size="sm" /> : <ChatIcon size="sm" />;
             const body = (
               <>
                 <span className="michi-doc-sources__glyph" aria-hidden="true">{glyph}</span>
@@ -111,6 +122,7 @@ export function SourcesPopover({
                     type="button"
                     className="michi-doc-sources__row michi-doc-sources__row--link"
                     onClick={() => {
+                      anchor.focus({ preventScroll: true });
                       onCloseRef.current();
                       if (row.onOpen) row.onOpen();
                       else onOpenThread(row.threadId!);

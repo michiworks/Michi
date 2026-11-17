@@ -26,7 +26,7 @@ vi.mock('../services/api', () => apiMocks);
 import { useWorkspacePersistence } from './workspacePersistence';
 import { MemoryRemoteCacheStorage, RemoteSnapshotCache } from './remoteSnapshotCache';
 import { markRemoteFirstPaint, remoteFirstPainted, resetRemoteFirstPaint } from './remoteFirstPaint';
-import { REMOTE_FIRST_PAGE_LIMIT, TreeMessageRequests } from './treeMessageRequests';
+import { TREE_FIRST_PAGE, TreeMessageRequests } from './treeMessageRequests';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -136,7 +136,7 @@ describe('boot on a remote workspace', () => {
     const { result } = renderHook(() => useHarness({}));
     await act(async () => { await vi.advanceTimersByTimeAsync(10); });
     // Started before the remote's metadata answered.
-    expect(apiMocks.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith(WS, TREE, connection.id, expect.any(AbortSignal), { limit: REMOTE_FIRST_PAGE_LIMIT });
+    expect(apiMocks.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith(WS, TREE, connection.id, expect.any(AbortSignal), TREE_FIRST_PAGE);
     expect(result.current.activeProjectId).toBe('ws-1');
     expect(remoteFirstPainted(connection.id)).toBe(false);
 

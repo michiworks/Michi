@@ -9,6 +9,7 @@ import { recentConversations, type RecentConversation } from './recentConversati
 import { withoutCredentials } from './secrets';
 import { vouchedForRecall } from './typedText';
 import { currentProfileLines, readUserProfile, type ProfileLine } from './userProfile';
+import { freshFirst, isExpired, isStale, lastValidDay } from './validity';
 
 /**
  * The memory pack (spec §5): the <michi-memory> block a turn carries in its
@@ -72,6 +73,10 @@ import { currentProfileLines, readUserProfile, type ProfileLine } from './userPr
  *    retrieval).
  *
  * What the user typed elsewhere is shown without credentials (secrets.ts).
+ * A memory past its end (validity.ts) is in no section, nor is a profile line
+ * citing one; a line of a memory with an end says its last day. Michi's own
+ * workspace notes that went unused and unconfirmed for 90 days come after the
+ * others, in Preferences and conventions and in Related.
  *
  * Scope: chat and job turns see the user scope and their workspace, and
  * recall that workspace's conversations (Recent spans the workspaces recall
@@ -89,7 +94,8 @@ import { currentProfileLines, readUserProfile, type ProfileLine } from './userPr
  *
  * Delivery per session (MemoryPackHolder): the header and the pinned
  * sections on the session's first turn; the pinned sections again, whole and
- * marked updated, once memoryVersion or the profile changed what they show;
+ * marked updated, once memoryVersion or the profile changed what they show,
+ * or on a new day what they show changed (a note reached its end);
  * recent and related lines every turn, never one the session already holds.
  * Nothing is withdrawn line by line: the updated sections replace the
  * earlier ones, and a newer date wins. A memory written in a turn that read
@@ -163,11 +169,6 @@ export interface MemoryPackItem {
   turnId: string | null;
   /** When the user said it (ms). */
   at: number;
-  /**
-   * A past-conversation item's text exactly as the line shows it, without its ref, date or title: what reply sources
-   * (replySources.ts) check a reply against. Absent for memories.
-   */
-  shown?: string;
   /** A recent item whose line shows only the start and the end of the user's message. */
   cut?: true;
 }
@@ -438,20 +439,21 @@ function savedBy(origin: MemoryOrigin | null, importSource: MemoryImportSource |
  * A memory line; `by` given: the line says who saved it (the pinned sections' headings say it for theirs, except for
  * an imported note, which says which tool's memory it came from).
  */
-function memoryLine(ref: string, stored: { body: string; at: number; title: string | null; by?: string | null }, bodyTokens: number): string {
+function memoryLine(ref: string, stored: { body: string; at: number; title: string | null; by?: string | null; validUntil?: number | null }, bodyTokens: number): string {
   const from = stored.title ? `, from "${stored.title}"` : '';
   const by = stored.by ? `, ${stored.by}` : '';
-  return `- [${ref}] ${clip(flat(stored.body), bodyTokens)} (${memoryDay(stored.at)}${by}${from})`;
+  const until = typeof stored.validUntil === 'number' ? `, until ${lastValidDay(stored.validUntil)}` : '';
+  return `- [${ref}] ${clip(flat(stored.body), bodyTokens)} (${memoryDay(stored.at)}${until}${by}${from})`;
 }
 
-/** A past-conversation line: the user's words and the reply, each a window around what the query matched; `shown`, its text alone. */
-function conversationLine(ref: string, hit: RecallHit): { text: string; shown: string } {
+/** A past-conversation line: the user's words and the reply, each a window around what the query matched. */
+function conversationLine(ref: string, hit: RecallHit): string {
   const excerpt = turnExcerpt(hit, { user: CONVERSATION_USER_TOKENS, reply: CONVERSATION_REPLY_TOKENS }, tokenCost);
   const user = flat(withoutCredentials(excerpt.user));
   const reply = flat(withoutCredentials(excerpt.reply));
   const named = title(hit.title);
   const shown = `${user}${reply ? ` → ${reply}` : ''}`;
-  return { text: `- [${ref}] ${memoryDay(hit.at)}${named ? ` "${named}"` : ''}: ${shown}`, shown };
+  return `- [${ref}] ${memoryDay(hit.at)}${named ? ` "${named}"` : ''}: ${shown}`;
 }
 
 // ── selection ────────────────────────────────────────────────────────────────
@@ -468,7 +470,7 @@ function storedLine(stored: StoredMemory, section: MemoryPackItem['section'], bo
   const at = record.observedAt ?? record.createdAt;
   // A related line says who saved it; the pinned sections' headings do, except where a note came from another tool.
   const by = section === 'related' || record.importSource ? savedBy(record.origin, record.importSource) : null;
-  const text = memoryLine(ref, { body: record.body, at, title: title(stored.sourceTitle), by }, bodyTokens);
+  const text = memoryLine(ref, { body: record.body, at, title: title(stored.sourceTitle), by, validUntil: record.validUntil }, bodyTokens);
   return {
     item: { ref, section, kind: 'memory', id: record.id, nodeId: record.source?.nodeId ?? null, turnId: record.source?.turnId ?? null, at },
     text,
@@ -542,20 +544,23 @@ interface PinnedSections {
   preferences: Line[];
 }
 
-function pinnedSections(ownerUserId: string, scopeWorkspaceId: string | null, consumer: MemoryPackConsumer): PinnedSections {
+function pinnedSections(ownerUserId: string, scopeWorkspaceId: string | null, consumer: MemoryPackConsumer, now: number): PinnedSections {
   // A check-in reads no summary of the user, and only memories from trusted sources.
   const checkin = consumer === 'checkin';
   const profile = checkin ? null : readUserProfile(ownerUserId);
-  const shownProfile = profile ? currentProfileLines(ownerUserId, profile) : null;
+  const shownProfile = profile ? currentProfileLines(ownerUserId, profile, now) : null;
   const about = shownProfile && shownProfile.lines.length > 0 ? aboutSection(shownProfile.lines, shownProfile.cited) : null;
-  const candidates = packMemoryRows(ownerUserId, scopeWorkspaceId, PINNED_CANDIDATES)
+  const candidates = packMemoryRows(ownerUserId, scopeWorkspaceId, PINNED_CANDIDATES, now)
     .filter((stored) => (checkin ? stored.record.sourceRisk === null : vouched(stored)));
   const savedPick = within(candidates.filter((stored) => stored.record.origin === 'explicit').map((stored) => storedLine(stored, 'saved')), SAVED_TOKENS);
-  // About the user carries the gist of the preferences it cites: those go last, in what its lines leave of the budget.
+  // About the user carries the gist of the preferences it cites: those go last, in what its lines leave of the budget,
+  // and Michi's stale workspace notes after them.
   const citedIds = about?.citedIds ?? new Set<string>();
   const others = candidates.filter((stored) => stored.record.origin !== 'explicit');
-  const preferencePick = within([...others.filter((stored) => !citedIds.has(stored.record.id)), ...others.filter((stored) => citedIds.has(stored.record.id))]
-    .map((stored) => storedLine(stored, 'preferences')), Math.max(PREFERENCE_MIN_TOKENS, PREFERENCE_TOKENS - (about?.tokens ?? 0)));
+  const ordered = freshFirst([...others.filter((stored) => !citedIds.has(stored.record.id)), ...others.filter((stored) => citedIds.has(stored.record.id))],
+    (stored) => isStale(stored.idleSince, now));
+  const preferencePick = within(ordered.map((stored) => storedLine(stored, 'preferences')),
+    Math.max(PREFERENCE_MIN_TOKENS, PREFERENCE_TOKENS - (about?.tokens ?? 0)));
   return { saved: savedPick.kept, savedLeft: savedPick.left, about: about && about.lines.length > 0 ? about : null, preferences: preferencePick.kept };
 }
 
@@ -617,7 +622,7 @@ function recentSection(conversations: readonly RecentConversation[], held: Reado
     const fresh = conversation.turns.filter((turn) => !held.has(conversationRef(turn.docId)));
     if (fresh.length === 0) continue;
     const heading = recentHeading(conversation, workspaceId, consumer);
-    const messages: Array<{ text: string; shown: string; cut: boolean; tokens: number; turn: (typeof fresh)[number] }> = [];
+    const messages: Array<{ text: string; cut: boolean; tokens: number; turn: (typeof fresh)[number] }> = [];
     let cost = estimateTokens(heading) + 1;
     // Newest first within the budget, shown oldest first: a later "don't keep that" stays with what it is about.
     for (const turn of [...fresh].reverse()) {
@@ -627,17 +632,17 @@ function recentSection(conversations: readonly RecentConversation[], held: Reado
       const text = `  [${conversationRef(turn.docId)}] ${memoryDay(turn.at)}: ${shown}`;
       const lineTokens = estimateTokens(text) + 1;
       if (tokens + cost + lineTokens > budget) break;
-      messages.unshift({ text, shown, cut: shown !== whole, tokens: lineTokens, turn });
+      messages.unshift({ text, cut: shown !== whole, tokens: lineTokens, turn });
       cost += lineTokens;
     }
     if (messages.length === 0) continue;
     tokens += cost;
     lines.push(heading, ...messages.map((message) => message.text));
-    for (const { turn, shown, cut } of messages) {
+    for (const { turn, cut } of messages) {
       if (!cut) wholeDocIds.add(turn.docId);
       items.push({
         ref: conversationRef(turn.docId), section: 'recent', kind: 'conversation', id: turn.turnId, nodeId: conversation.nodeId,
-        turnId: turn.turnId, at: turn.at, shown, ...(cut ? { cut: true as const } : {}),
+        turnId: turn.turnId, at: turn.at, ...(cut ? { cut: true as const } : {}),
       });
     }
   }
@@ -724,7 +729,9 @@ function packScope(input: BuildMemoryPackInput): PackScope | 'none' | 'off' {
  */
 export function memoryPackSignature(input: BuildMemoryPackInput): string | null {
   const scope = packScope(input);
-  return typeof scope === 'string' ? null : pinnedSignature(pinnedSections(scope.ownerUserId, scope.scopeWorkspaceId, scope.consumer));
+  if (typeof scope === 'string') return null;
+  const now = typeof input.now === 'number' && Number.isFinite(input.now) ? input.now : Date.now();
+  return pinnedSignature(pinnedSections(scope.ownerUserId, scope.scopeWorkspaceId, scope.consumer, now));
 }
 
 /**
@@ -760,8 +767,10 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
   // ── pinned: the whole sections for a new session, then again whenever what they show changed ──
   let pinned: PinnedSections | null = null;
   let signature: string | null = null;
-  if (fresh || holder.version !== version) {
-    const sections = pinnedSections(ownerUserId, scopeWorkspaceId, consumer);
+  const day = memoryDay(now);
+  // A new day may have taken a note past its end (validity.ts) with no version change.
+  if (fresh || holder.version !== version || holder.day !== day) {
+    const sections = pinnedSections(ownerUserId, scopeWorkspaceId, consumer, now);
     const shown = pinnedSignature(sections);
     if (fresh || shown !== holder.signature) {
       pinned = sections;
@@ -816,7 +825,7 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
     const words = flat(withoutCredentials(turnExcerpt({ ...hit, matched: memory.matched ? [...memory.matched] : hit.matched }, { user: QUOTE_TOKENS, reply: 0 }, tokenCost).user));
     // Words that say no more than the note itself add nothing.
     if (!words || words.toLowerCase().replace(/[\s\p{P}]+/gu, '') === memory.body.toLowerCase().replace(/[\s\p{P}]+/gu, '')) return null;
-    const item: MemoryPackItem = { ref, section: 'related', kind: 'conversation', id: hit.refId, nodeId: hit.nodeId, turnId: hit.turnId, at: hit.at, shown: words };
+    const item: MemoryPackItem = { ref, section: 'related', kind: 'conversation', id: hit.refId, nodeId: hit.nodeId, turnId: hit.turnId, at: hit.at };
     return { docId, item, text: ` The user wrote there: "${words}"` };
   };
   /** A related memory line, with the user's words it came from when they may be shown and it still fits; false when it was not taken. */
@@ -834,12 +843,12 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
   };
   /** A memory hit the session may be shown and does not hold yet, as a related line; false when it was not taken. */
   const takeMemory = (hit: RecallHit): boolean => {
-    if (!hit.memory) return false;
+    if (!hit.memory || isExpired(hit.memory.validUntil, now)) return false;
     const ref = memoryRef(hit.memory.rowId, hit.memory.version);
     if (!unseen(hit.refId, ref)) return false;
     if (!vouchedForRecall({ body: hit.snippet, sourceRisk: hit.memory.sourceRisk, nodeId: hit.nodeId, turnId: hit.turnId })) return false;
     const by = savedBy(hit.memory.origin, hit.memory.importSource);
-    const text = memoryLine(ref, { body: hit.snippet, at: hit.at, title: title(hit.title), by }, RELATED_BODY_TOKENS);
+    const text = memoryLine(ref, { body: hit.snippet, at: hit.at, title: title(hit.title), by, validUntil: hit.memory.validUntil }, RELATED_BODY_TOKENS);
     return takeQuoted({
       item: { ref, section: 'related', kind: 'memory', id: hit.refId, nodeId: hit.nodeId, turnId: hit.turnId, at: hit.at },
       text, tokens: estimateTokens(text) + 1,
@@ -852,14 +861,15 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
     // cap, a fact), its words weighed against the owner's memories alone, so that a store of long conversations full
     // of the same everyday words does not drown them out.
     let fromMemories = 0;
-    for (const hit of recallSearch({
+    const staleNote = (hit: RecallHit) => hit.kind === 'memory' && isStale(hit.memory?.idleSince, now);
+    for (const hit of freshFirst(recallSearch({
       ownerUserId, workspaceIds: memoryWorkspaceIds, includeUserScope: true, memoryWorkspaceIds, currentWorkspaceId: workspaceId,
       query, kinds: ['memory'], limit: RELATED_CANDIDATES, now,
-    })) {
+    }), staleNote)) {
       if (fromMemories >= MEMORY_PASS_ITEMS || related.length >= RELATED_ITEMS) break;
       if (hit.memory?.status === 'active' && takeMemory(hit)) fromMemories += 1;
     }
-    const hits = recallSearch({
+    const hits = freshFirst(recallSearch({
       ownerUserId,
       workspaceIds: consumer === 'assistant' ? 'all' : own,
       includeUserScope: true,
@@ -871,12 +881,13 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
       includeInactive: true,
       limit: RELATED_CANDIDATES,
       now,
-    });
+    }), staleNote);
     for (const hit of hits) {
       if (related.length >= RELATED_ITEMS) break;
       if (hit.kind === 'memory' && hit.memory && hit.memory.status !== 'active') {
         const current = currentCorrection(ownerUserId, hit.refId);
-        if (current && inScope(current) && vouched(current) && unseen(current.record.id, memoryRef(current.rowId, current.record.version))) {
+        if (current && inScope(current) && vouched(current) && !isExpired(current.record.validUntil, now)
+          && unseen(current.record.id, memoryRef(current.rowId, current.record.version))) {
           const source = current.record.source;
           takeQuoted(storedLine(current, 'related', RELATED_BODY_TOKENS),
             { body: current.record.body, version: current.record.version, nodeId: source?.nodeId ?? null, turnId: source?.turnId ?? null });
@@ -896,9 +907,9 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
           // History a branch was opened with is already in its context.
           if (lineageNow.above.has(hit.nodeId) && hit.at < lineageNow.since) continue;
         }
-        const { text, shown } = conversationLine(ref, hit);
+        const text = conversationLine(ref, hit);
         take({
-          item: { ref, section: 'related', kind: 'conversation', id: hit.refId, nodeId: hit.nodeId, turnId: hit.turnId, at: hit.at, shown },
+          item: { ref, section: 'related', kind: 'conversation', id: hit.refId, nodeId: hit.nodeId, turnId: hit.turnId, at: hit.at },
           text, tokens: estimateTokens(text) + 1,
         });
       }
@@ -908,7 +919,6 @@ export function buildMemoryPack(input: BuildMemoryPackInput): MemoryPack {
   // A session shown pinned notes before (what they show changed, so it was not this) is told when none apply any more.
   const retract = !!pinned && !fresh && pinnedLines.length === 0;
   const nothing = pinnedLines.length === 0 && related.length === 0 && !retract && !recent;
-  const day = memoryDay(now);
   const base = { version, signature, off: false, mode } as const;
   if (nothing) {
     // A check-in has no tool to find anything more: with no notes to show, it gets no block.

@@ -1,5 +1,6 @@
 // Hydration reads: whole-workspace loads, the lean meta payload and tree message pages,
 // with each error node's latest turn receipt.
+import type { StatementSync } from 'node:sqlite';
 import { LEAN_NODE_FIELD_COLUMNS } from 'michi-shared';
 import { getDb, runInTransaction } from '../db';
 import { getWorkspace, listWorkspaces, type WorkspaceRow } from './workspaces';
@@ -340,15 +341,52 @@ export interface TreeMessagePageEntry {
   node?: TreePageNodeFields;
 }
 
+/** The server's cap on one node's page, in messages. */
+export const MAX_PAGE_MESSAGES = 200;
+
+export interface TreeMessagePageOptions {
+  limit: number;
+  nodeId?: string;
+  before?: MessagePageCursor;
+  /**
+   * Whole turns, newest first: a page starts at a user message and stops
+   * before the turn that would take it past `limit` messages or `maxBytes`
+   * of the rows `project` returns. The newest turn always comes whole.
+   * Without it, a page is the newest `limit` messages.
+   */
+  maxBytes?: number;
+  /**
+   * Each row as the response carries it (what maxBytes counts). `active`: the
+   * assistant message of a turn still running.
+   */
+  project?: (row: MessageRow, context: { active: boolean }) => MessageRow;
+}
+
 /** Keyset pages of display history; never used as the runtime's full context. */
 export function loadTreeMessagePage(workspaceId: string, treeId: string,
-  options: { limit: number; nodeId?: string; before?: MessagePageCursor }, userId?: string,
+  options: TreeMessagePageOptions, userId?: string,
 ): {
   messages: MessageRow[];
   pages: TreeMessagePageEntry[];
   turns: LatestTurnRow[];
 } {
   return runInTransaction(() => readTreeMessagePage(treeNodes(workspaceId, treeId, userId, options.nodeId), options));
+}
+
+/** The most messages one tool-call read names. */
+export const MAX_TOOL_CALL_MESSAGES = 50;
+
+/**
+ * The stored tool calls of these messages of one node in one tree (what a
+ * display page deferred). Workspace, tree and user scoped like the pages; a
+ * message no longer there is left out.
+ */
+export function loadMessageToolCalls(workspaceId: string, treeId: string, nodeId: string, messageIds: readonly string[],
+  userId?: string): Array<Pick<MessageRow, 'id' | 'node_id' | 'tool_calls'>> {
+  if (messageIds.length === 0 || treeNodes(workspaceId, treeId, userId, nodeId).length === 0) return [];
+  return getDb().prepare(
+    `SELECT id, node_id, tool_calls FROM messages WHERE node_id = ? AND id IN (${messageIds.map(() => '?').join(',')})`,
+  ).all(nodeId, ...messageIds) as unknown as Array<Pick<MessageRow, 'id' | 'node_id' | 'tool_calls'>>;
 }
 
 function pageNodeFields(node: NodeRow): TreePageNodeFields {
@@ -360,21 +398,101 @@ function pageNodeFields(node: NodeRow): TreePageNodeFields {
   };
 }
 
-function readTreeMessagePage(nodes: NodeRow[], options: { limit: number; before?: MessagePageCursor }) {
+/** The assistant messages of these nodes' turns still running. */
+function activeTurnMessageIds(nodeIds: string[]): Set<string> {
+  const ids = new Set<string>();
+  const CHUNK = 900;
+  for (let i = 0; i < nodeIds.length; i += CHUNK) {
+    const chunk = nodeIds.slice(i, i + CHUNK);
+    const rows = getDb().prepare(
+      `SELECT assistant_message_id FROM turns WHERE node_id IN (${chunk.map(() => '?').join(',')}) AND completed_at IS NULL`,
+    ).all(...chunk) as unknown as Array<{ assistant_message_id: string }>;
+    for (const row of rows) ids.add(row.assistant_message_id);
+  }
+  return ids;
+}
+
+/** What a row adds to a response, in UTF-8 bytes of its text columns. */
+function rowBytes(row: MessageRow): number {
+  return Buffer.byteLength(row.content ?? '') + Buffer.byteLength(row.blocks ?? '')
+    + Buffer.byteLength(row.tool_calls ?? '') + Buffer.byteLength(row.metadata ?? '');
+}
+
+type PageStatements = { recent: StatementSync; older: StatementSync };
+
+/**
+ * One node's turn page (TreeMessagePageOptions.maxBytes), newest first. Rows
+ * are read a chunk at a time and projected as they are read, so a turn past
+ * the budget costs at most one budget of work.
+ */
+function readTurnPage(nodeId: string, statements: PageStatements, options: {
+  limit: number; maxBytes: number; before?: MessagePageCursor; project: (row: MessageRow) => MessageRow;
+}): MessageRow[] {
+  const chunk = Math.min(options.limit, MAX_PAGE_MESSAGES) + 1;
+  const selected: MessageRow[] = [];
+  let selectedBytes = 0;
+  let turn: MessageRow[] = [];
+  let turnBytes = 0;
+  let cursor = options.before;
+  // A turn the page leaves for the next one: it would go past the limits.
+  const overflows = () => selected.length > 0
+    && (selected.length + turn.length > options.limit || selectedBytes + turnBytes > options.maxBytes);
+  for (;;) {
+    const rows = (cursor
+      ? statements.older.all(nodeId, cursor.seq, cursor.seq, cursor.id, chunk)
+      : statements.recent.all(nodeId, chunk)) as unknown as MessageRow[];
+    for (const raw of rows) {
+      const row = options.project(raw);
+      turn.push(row);
+      turnBytes += rowBytes(row);
+      if (overflows()) return selected;
+      if (raw.role === 'user') {
+        selected.push(...turn);
+        selectedBytes += turnBytes;
+        turn = [];
+        turnBytes = 0;
+        if (selected.length >= options.limit || selectedBytes >= options.maxBytes) return selected;
+      } else if (selected.length + turn.length >= MAX_PAGE_MESSAGES) {
+        // A newest turn longer than a page is cut at the cap.
+        return selected.length > 0 ? selected : turn;
+      }
+    }
+    if (rows.length < chunk) break;
+    const last = rows[rows.length - 1];
+    cursor = { seq: last.seq, id: last.id };
+  }
+  // The start of the history: what came before its first user message.
+  selected.push(...turn);
+  return selected;
+}
+
+function readTreeMessagePage(nodes: NodeRow[], options: TreeMessagePageOptions) {
   const db = getDb();
   const messages: MessageRow[] = [];
   const pages: TreeMessagePageEntry[] = [];
   const count = db.prepare('SELECT COUNT(*) AS total FROM messages WHERE node_id = ?');
   const recent = db.prepare('SELECT * FROM messages WHERE node_id = ? ORDER BY seq DESC, id DESC LIMIT ?');
   const older = db.prepare('SELECT * FROM messages WHERE node_id = ? AND (seq < ? OR (seq = ? AND id < ?)) ORDER BY seq DESC, id DESC LIMIT ?');
+  const anyOlder = db.prepare('SELECT 1 AS found FROM messages WHERE node_id = ? AND (seq < ? OR (seq = ? AND id < ?)) LIMIT 1');
+  const active = options.project ? activeTurnMessageIds(nodes.map(n => n.id)) : new Set<string>();
+  const project = options.project
+    ? (row: MessageRow) => options.project!(row, { active: active.has(row.id) })
+    : (row: MessageRow) => row;
   for (const node of nodes) {
     const nodeId = node.id;
     const cursor = options.before;
-    const rows = (cursor
-      ? older.all(nodeId, cursor.seq, cursor.seq, cursor.id, options.limit + 1)
-      : recent.all(nodeId, options.limit + 1)) as unknown as MessageRow[];
-    const hasMore = rows.length > options.limit;
-    const page = rows.slice(0, options.limit).reverse();
+    let page: MessageRow[];
+    let hasMore: boolean;
+    if (options.maxBytes !== undefined) {
+      page = readTurnPage(nodeId, { recent, older }, { limit: options.limit, maxBytes: options.maxBytes, before: cursor, project }).reverse();
+      hasMore = page.length > 0 && !!anyOlder.get(nodeId, page[0].seq, page[0].seq, page[0].id);
+    } else {
+      const rows = (cursor
+        ? older.all(nodeId, cursor.seq, cursor.seq, cursor.id, options.limit + 1)
+        : recent.all(nodeId, options.limit + 1)) as unknown as MessageRow[];
+      hasMore = rows.length > options.limit;
+      page = rows.slice(0, options.limit).reverse().map(project);
+    }
     messages.push(...page);
     pages.push({ nodeId, total: (count.get(nodeId) as { total: number }).total,
       before: hasMore ? { seq: page[0].seq, id: page[0].id } : null,

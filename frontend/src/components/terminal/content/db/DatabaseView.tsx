@@ -1,6 +1,6 @@
 import type { MichiNoticeTone } from '../page/editorTypes';
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Plus } from 'lucide-react';
+import { PlusIcon } from '../../icons';
 import { plural, type MichiDatabase, type MichiDbView, type MichiDbViewType, type DatabaseRowStatus, type MichiThreadState } from 'michi-shared';
 import { openMichiAssistant, type MichiAssistantPage } from '../../../../state/content/assistantBridge';
 import { EMPTY_SELECTION, applySelectionClick, type ThreadSelection } from '../threads/selection';
@@ -292,7 +292,7 @@ export function DatabaseView({
         {/* All tasks adds no task: a task is added on its workspace's own board. */}
         {!db.merged && (
           <button type="button" className="michi-db-btn michi-db-btn--primary michi-db__new" onClick={addRow}>
-            <Plus size={13} strokeWidth={1.8} aria-hidden="true" />
+            <PlusIcon aria-hidden="true" />
             New
           </button>
         )}

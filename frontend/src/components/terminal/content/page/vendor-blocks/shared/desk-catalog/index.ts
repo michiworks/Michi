@@ -71,7 +71,7 @@ export function settleChildren(b:PageBlockWithSources,used:Set<string>):PageBloc
   let k=0;
   return withSlots(b,slots.map(s=>s.map(c=>settleIds(c,used,clip(`${b.id||'b'}.${k++}`,ID)))));
 }
-export const settleIds=(b:PageBlockWithSources,used:Set<string>,fallback:string)=>settleChildren({...b,id:unique(used,b.id||fallback)},used);
+export function settleIds(b:PageBlockWithSources,used:Set<string>,fallback:string):PageBlockWithSources{return settleChildren({...b,id:unique(used,b.id||fallback)},used)}
 
 /** One block by the catalog's rules, as a person or the assistant sent it. Its own id comes back cleaned, '' when missing, since the
  * caller assigns it; the ids inside it are made distinct. A number is the depth it will sit at; past MAX_DEPTH nothing is read. */

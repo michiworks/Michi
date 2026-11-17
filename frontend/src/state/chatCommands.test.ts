@@ -43,3 +43,11 @@ it('runs compact through Michi and other commands through the runtime, with visi
   vi.mocked(executeChatCommand).mockResolvedValue({ success: false, message: 'Unsupported by server' });
   expect((await executeComposerCommand('node', { name: 'unknown' })).message).toBe('Unsupported by server');
 });
+
+it('drains a block answer alone, so it stays one message', () => {
+  const answer = { messageId: 'a-1', blockId: 'cb-form', title: 'Trip' };
+  const queue = [queued('one'), queued('Plan it\n\n{}', { blockAnswer: answer }), queued('two'), queued('three')];
+  expect(nextQueuedBatch(queue, entries)).toEqual(queue.slice(0, 1));
+  expect(nextQueuedBatch(queue.slice(1), entries)).toEqual(queue.slice(1, 2));
+  expect(nextQueuedBatch(queue.slice(2), entries)).toEqual(queue.slice(2));
+});

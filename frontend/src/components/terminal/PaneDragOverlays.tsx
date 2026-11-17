@@ -49,7 +49,7 @@ export function FileDropOverlay({
         style={{
           background: 'var(--term-bg)',
           border: '1px solid var(--term-accent)',
-          color: 'var(--term-accent)',
+          color: 'var(--term-accent-text)',
           padding: '8px 18px',
           fontFamily: 'var(--ui-font)',
           fontSize: 'var(--fs-md)',

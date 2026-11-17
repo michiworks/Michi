@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { MessageSquare } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ChatIcon } from '../icons';
 import { MarkdownLinkRendererContext, type MarkdownLinkRenderer } from '../../markdownLinkRenderer';
-import { useChatActions, useChatNode, useChatNodeReader, useChatProjects } from '../../../state/chatStore';
+import { useChatActions, useChatNodeReader, useChatProjects, useStructuralSelector } from '../../../state/chatStore';
+import type { ChatNodeState } from '../../../state/chatTypes';
 import { parseAssistantLink, type AssistantLink } from '../../../state/assistant/assistantLinks';
 import { fetchWorkspaceHoldingNode } from '../../../state/assistant/locateNode';
 import { AssistantScopeContext } from './assistantScope';
@@ -16,6 +17,11 @@ function textOf(children: React.ReactNode): string {
   return '';
 }
 
+/** What a chip reads of its thread: structural fields, which a streaming reply leaves as they are. */
+type ChipThread = { title: string | undefined; projectId: string; deleted: boolean };
+const sameChipThread = (a: ChipThread | undefined, b: ChipThread | undefined) => a === b
+  || (!!a && !!b && a.title === b.title && a.projectId === b.projectId && a.deleted === b.deleted);
+
 /**
  * A Michi thread. One this window doesn't have yet (made in another window
  * since this one loaded: the assistant reads the backend) is loaded with
@@ -27,7 +33,10 @@ function textOf(children: React.ReactNode): string {
  * link opens the thread at that message.
  */
 function NodeChip({ id, messageId, children }: { id: string; messageId?: string; children: React.ReactNode }) {
-  const node = useChatNode(id);
+  const node = useStructuralSelector(useCallback((nodes: Record<string, ChatNodeState>) => {
+    const held = nodes[id];
+    return held && { title: held.title, projectId: held.projectId, deleted: held.deletedAt != null };
+  }, [id]), sameChipThread);
   const { projects } = useChatProjects();
   const { revealNode, installWorkspaceSnapshot } = useChatActions();
   const readNode = useChatNodeReader();
@@ -54,7 +63,7 @@ function NodeChip({ id, messageId, children }: { id: string; messageId?: string;
   useEffect(() => () => lookupRef.current?.abort(), []);
 
   // A thread found missing stays so unless the store gets it live after all.
-  const missing = lookup === 'missing' && (!node || node.deletedAt != null);
+  const missing = lookup === 'missing' && (!node || node.deleted);
   const failed = !node && lookup === 'failed';
   const open = () => {
     if (missing || lookup === 'loading') return;
@@ -100,7 +109,7 @@ function NodeChip({ id, messageId, children }: { id: string; messageId?: string;
       title={missing ? `${label} — not found in Michi` : failed ? `${label} — couldn't load it; click to try again` : label}
       onClick={open}
     >
-      <span className="assistant-cite__icon" aria-hidden="true"><MessageSquare size={11} /></span>
+      <span className="assistant-cite__icon" aria-hidden="true"><ChatIcon size="sm" /></span>
       <span className="assistant-cite__text">{label}</span>
       {missing && <span className="assistant-cite__note">not found</span>}
       {failed && <span className="assistant-cite__note">couldn't load</span>}

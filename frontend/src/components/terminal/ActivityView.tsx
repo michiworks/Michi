@@ -8,13 +8,14 @@ import { buildBranchChildrenOf, buildTree, findTreeIdForNode } from '../../state
 import ThreadRow from './ThreadRow';
 import BranchRow from './BranchRow';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
-import { rowGeom, spinePadding, branchBlockGap } from './sidebarRowStyle';
+import { rowGeom, spinePadding, branchBlockGap, activityIndent } from './sidebarRowStyle';
 import { flattenBranchIds, useSidebarTreeController, type ThreadRowClick } from './sidebar/useSidebarTreeController';
 import {
   nodeOpenState,
   subtreeOpenState,
   selectProjectNodeStatuses,
   orderPinnedFirst,
+  flattenBranches,
   treeHasUnread,
   type NodePinnedAt,
   type OpenState,
@@ -158,10 +159,13 @@ export function deriveActivityData(
 export default function ActivityView({
   onActivate,
   chatViewActive = true,
+  phoneDrawer = false,
 }: {
   onActivate?: () => void;
   /** False on Home and other pages: no row reads as the one on screen. */
   chatViewActive?: boolean;
+  /** The list is the phone drawer's: its folder rows follow ST-36 (useSidebarTreeController). */
+  phoneDrawer?: boolean;
 }) {
   const { projects: allProjects, activeProjectId, focusedNodeId } = useChatProjects();
   // The assistant's system workspace has no place in the activity list.
@@ -184,7 +188,7 @@ export default function ActivityView({
   const nodes = useChatNodesSnapshot();
   // Conversations whose workflow or background agents still run after their turn ended.
   const workRunning = useRunningWorkNodeIds();
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
 
   // Trees under Unread at the last commit: opening one marks it read in the
   // same update that focuses it, so only the list's previous state knows it
@@ -280,7 +284,7 @@ export default function ActivityView({
     isBranchMenuTarget,
     renamingNodeId,
     endRename,
-  } = useSidebarTreeController({ onActivate, branchIdsForProject });
+  } = useSidebarTreeController({ onActivate, branchIdsForProject, phoneDrawer });
 
   // ── Node status for open-state bars ──
   const allChatIds = useMemo(
@@ -408,6 +412,7 @@ export default function ActivityView({
               renamingNodeId={renamingNodeId}
               onRenameNode={renameNode}
               onRenameEnd={endRename}
+              phoneDrawer={phoneDrawer}
             />
           )),
         ];
@@ -500,6 +505,7 @@ function ActivityTreeEntry({
   renamingNodeId,
   onRenameNode,
   onRenameEnd,
+  phoneDrawer,
 }: {
   /** The list's re-sort motion (see RESORT_MOVE): rows glide only when this changes. */
   resortDependency: string;
@@ -533,15 +539,22 @@ function ActivityTreeEntry({
   renamingNodeId: string | null;
   onRenameNode: (nodeId: string, title: string) => void;
   onRenameEnd: () => void;
+  /** In the phone drawer: the thread's branches are drawn at one level (ST-36). */
+  phoneDrawer: boolean;
 }) {
   const { prefs } = usePrefs();
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const { tree, project } = item;
-  const root = orderPinnedFirst(buildTree(tree.rootNodeId, project.edges, isAlive), nodePinnedAt);
+  const rawRoot = buildTree(tree.rootNodeId, project.edges, isAlive);
+  const root = phoneDrawer
+    ? flattenBranches(rawRoot, project.edges, nodePinnedAt)
+    : orderPinnedFirst(rawRoot, nodePinnedAt);
   const hasBranches = root.children.length > 0;
   const isActive = tree.id === project.activeTreeId && project.id === activeProjectId;
   // In Activity view, threads default to expanded to show their branches
   const threadOpen = isThreadExpandedFn(tree.id, project.activeTreeId);
+  // The phone drawer marks one row: the current branch while it shows, else its thread (ST-36).
+  const marked = isActive && !(phoneDrawer && threadOpen && root.children.some((child) => child.nodeId === focusedNodeId));
   const threadOpenState = getSubtreeOpenState(tree.rootNodeId, project.edges);
 
   return (
@@ -554,7 +567,7 @@ function ActivityTreeEntry({
       <ThreadRow
         tree={tree}
         projectId={project.id}
-        isActive={isActive}
+        isActive={marked}
         hasBranches={hasBranches}
         expanded={threadOpen}
         openState={threadOpenState}
@@ -578,6 +591,7 @@ function ActivityTreeEntry({
         }}
         moveTargets={moveTargets}
         subtitle={project.name}
+        indent={activityIndent(geom)}
       />
       {/* Workspace name. Card modes render it INSIDE the row (see ThreadRow's
           `subtitle`) so the focus fill covers both lines; classic keeps it as a
@@ -619,6 +633,7 @@ function ActivityTreeEntry({
               key={child.nodeId}
               node={child}
               depth={1}
+              baseIndent={activityIndent(geom)}
               expanded={isBranchExpanded(child.nodeId)}
               isFocused={(id) => id === focusedNodeId}
               isSelected={isBranchSelected}

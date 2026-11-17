@@ -2,6 +2,7 @@ import { ChildProcess } from "child_process";
 import { killProcessTree, spawnAgentProcess } from "../../core/processTree";
 import type { RuntimeObservability } from "../../contract/host";
 import { HEARTBEAT_INTERVAL_MS } from "../../core/constants";
+import { utf8LineReader } from "../../core/lineReader";
 import { nextInteractionRequestId } from "../../core/pendingInteractions";
 import { ACPError, ACPProcessExitedError, ACPRequestNotSentError, ACPNotRunningError, ACPSessionRecoveryRequiredError } from "./errors";
 import type {
@@ -165,7 +166,6 @@ export class AcpClient {
     protected proc: ChildProcess | null = null;
     protected nextId = 0;
     protected pending = new Map<number, AcpPendingRequest>();
-    protected buffer = "";
     protected sessionQueues = new Map<string, SessionQueue>();
     protected readonly quarantinedSessions = new Set<string>();
     protected readonly cancelTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -370,7 +370,7 @@ export class AcpClient {
             });
         });
 
-        this.proc.stdout!.on("data", (chunk: Buffer) => this.onStdout(chunk));
+        this.proc.stdout!.on("data", utf8LineReader((line) => this.onStdoutLine(line)));
         this.proc.stderr!.on("data", (chunk: Buffer) => {
             const text = chunk.toString();
             this.onChildStderr(text);
@@ -425,21 +425,16 @@ export class AcpClient {
         return this.profile.spawnEnv && this.spawnEnv ? { ...this.spawnEnv(), ...this.profile.spawnEnv } : undefined;
     }
 
-    private onStdout(chunk: Buffer): void {
-        this.buffer += chunk.toString();
-        let idx: number;
-        while ((idx = this.buffer.indexOf("\n")) !== -1) {
-            const line = this.buffer.slice(0, idx).trim();
-            this.buffer = this.buffer.slice(idx + 1);
-            if (!line) continue;
-            let msg: any;
-            try {
-                msg = JSON.parse(line);
-            } catch {
-                continue;
-            }
-            this.dispatch(msg);
+    private onStdoutLine(raw: string): void {
+        const line = raw.trim();
+        if (!line) return;
+        let msg: any;
+        try {
+            msg = JSON.parse(line);
+        } catch {
+            return;
         }
+        this.dispatch(msg);
     }
 
     /**

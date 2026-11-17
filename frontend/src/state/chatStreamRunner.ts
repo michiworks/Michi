@@ -49,6 +49,10 @@ interface RunChatStreamOptions {
     comments?: Array<Record<string, unknown>>;
     /** What a message to the agent referred to, kept on the stored row so a retry after a reload still sends it. */
     companionRefs?: import('michi-shared').CompanionTurnRef[];
+    /** It answers a block a reply showed (ChatMessage.blockAnswer). */
+    blockAnswer?: import('michi-shared').BlockAnswerSource;
+    /** The chats and artifacts it @-mentioned, so an edit or retry after a reload still attaches them. */
+    mentions?: Array<{ kind: 'context' | 'node'; refId: string; label: string }>;
   };
   /** The skill this message runs; see streamMessage. */
   skill?: import('michi-shared').SkillInvocationRequest;
@@ -327,6 +331,18 @@ export function runChatStream({
         size: data.size,
       });
     },
+    onBlocks: (data) => {
+      // currentAssistantId, as for an image: the blocks land on the live message.
+      dispatch({
+        type: 'chat-blocks',
+        nodeId,
+        assistantId: currentAssistantId,
+        blocks: data.blocks,
+        ...(data.title !== undefined ? { title: data.title } : {}),
+        fallbackText: data.fallbackText,
+        observedAt: data.observedAt,
+      });
+    },
     onHeartbeat: (idleMs) => dispatch({ type: 'heartbeat', nodeId, idleMs }),
     onTitle: (title) => dispatch({ type: 'set-title', nodeId, title }),
     onBranchOverview: (overview, seq, _assistantId, turnId) => {
@@ -377,7 +393,8 @@ export function runChatStream({
       if (turnId) currentTurnId = turnId;
       const { error, aborted } = doneOutcome(stopReason, persisted);
       if (error) {
-        dispatch({ type: 'error', nodeId, assistantId: currentAssistantId, ...error, turnId: currentTurnId });
+        // The done frame's time is the failure's: the sidebar marks it Failed until it is seen.
+        dispatch({ type: 'error', nodeId, assistantId: currentAssistantId, ...error, completedAt, turnId: currentTurnId });
         cleanup();
         onTurnEnd?.('error', nodeId);
         return;
@@ -386,12 +403,13 @@ export function runChatStream({
       effects.end(!aborted);
       dispatch({
         type: 'done', nodeId, assistantId: currentAssistantId, completedAt, aborted,
+        ...(stopReason ? { stopReason } : {}),
         ...(currentTurnId ? { turnId: currentTurnId } : {}),
         ...(completion ? { completion } : {}),
       });
       cleanup();
-      onTurnEnd?.('done', nodeId);
       // A turn cancelled elsewhere (another window, the phone) did not finish; like onAborted below.
+      onTurnEnd?.(aborted ? 'cancel' : 'done', nodeId);
       if (!aborted) onStreamComplete?.();
     },
     onAborted: () => {

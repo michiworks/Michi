@@ -82,12 +82,18 @@ test('the Topbar button opens the Companion: Today lists what needs you, Snooze 
   const companion = createCompanionMock({
     conversation,
     items: [
-      companionItem('cmi-cr', 'CR-123456 needs attention', { summary: '2 unresolved comments on revision 3' }),
-      companionItem('cmi-pipe', 'MyService pipeline is blocked', {
-        source: 'pipeline', subtype: 'pipeline_blocked', itemKey: 'pipeline:MyService',
+      companionItem('cmi-cr', 'CR-123456 needs attention', {
+        summary: '2 unresolved comments on revision 3', facts: { cr: 'CR-123456', threadsAwaitingYou: 2 },
+      }),
+      companionItem('cmi-pipe', 'Pipeline MyService is blocked', {
+        source: 'pipeline', subtype: 'pipeline_blocked', itemKey: 'pipeline:MyService', summary: '1 failed prod deployment',
+        facts: { pipeline: 'MyService', failing: true, failingProd: true },
         target: { kind: 'url', url: 'https://builds.example.com/pipelines/MyService' },
       }),
-      companionItem('cmi-mail', 'Quarterly planning', { source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest', itemKey: 'email:conv-1' }),
+      companionItem('cmi-mail', 'Email from Alex', {
+        source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest', itemKey: 'email:conv-1',
+        summary: 'Quarterly planning — 3 unread',
+      }),
     ],
   });
   await boot(page, companion, seeded, { openedBefore: true });
@@ -103,25 +109,32 @@ test('the Topbar button opens the Companion: Today lists what needs you, Snooze 
   await panel.getByRole('tab', { name: /Today/ }).click();
 
   const today = panel.getByRole('tabpanel', { name: 'Today' });
-  await expect(today.getByText('CR-123456 needs attention')).toBeVisible();
+  // The header counts the rows below it, and each row says what waits and the one next step.
+  const cr = 'CR-123456 has 2 comments waiting for your reply';
+  await expect(today.getByRole('heading', { name: '2 things waiting on you' })).toBeVisible();
+  await expect(today.getByText(cr)).toBeVisible();
   await expect(today.getByText('2 unresolved comments on revision 3')).toBeVisible();
-  await expect(today.getByText('MyService pipeline is blocked')).toBeVisible();
-  // Updates wait behind View all.
+  await expect(today.getByText('MyService failed in production')).toBeVisible();
+  await expect(today.getByRole('button', { name: `Open the CR: ${cr}` })).toBeVisible();
+  // Mail waits on nobody: it is tucked away until the user opens it.
   await expect(today.getByText('Quarterly planning')).toHaveCount(0);
-  await today.getByRole('button', { name: 'View all (1)' }).click();
+  await today.getByRole('button', { name: /Tucked away/ }).click();
   await expect(today.getByText('Quarterly planning')).toBeVisible();
   await page.screenshot({ path: info.outputPath('companion-today.png') });
   // The new items on screen were marked seen: the badge clears.
   await expect.poll(() => companion.writes).toContain('POST /companion/items/seen');
   await expect(button).toHaveAccessibleName('Michi');
 
-  await today.getByRole('button', { name: 'Snooze: CR-123456 needs attention' }).click();
-  await page.getByRole('menuitem', { name: 'For 1 hour' }).click();
-  await expect(today.getByText('CR-123456 needs attention')).toHaveCount(0);
-  await today.getByRole('button', { name: 'Done: MyService pipeline is blocked' }).click();
-  await expect(today.getByText('MyService pipeline is blocked')).toHaveCount(0);
+  await today.getByRole('button', { name: `More actions for ${cr}` }).click();
+  await page.getByRole('menuitem', { name: 'Snooze for 1 hour' }).click();
+  await expect(today.getByText(cr)).toHaveCount(0);
+  await today.getByRole('button', { name: 'More actions for MyService failed in production' }).click();
+  await page.getByRole('menuitem', { name: 'Done' }).click();
+  await expect(today.getByText('MyService failed in production')).toHaveCount(0);
   expect(companion.actions.map(({ id, body }) => [id, body.action])).toEqual([['cmi-cr', 'snooze'], ['cmi-pipe', 'dismiss']]);
   expect(companion.actions[0].body.until).toBeGreaterThan(Date.now());
+  // Nothing waits any more, and the header says so rather than a line written hours ago.
+  await expect(today.getByRole('heading', { name: 'Nothing is waiting on you' })).toBeVisible();
 
   await panel.getByRole('tab', { name: /Chat/ }).click();
   const chat = panel.getByRole('tabpanel', { name: 'Chat' });
@@ -191,19 +204,18 @@ test('a proposal shows all that Apply will do before it can be applied, and noth
   expect(errors).toEqual([]);
 });
 
-test('a Needs you record the backend sends opens Today at its item: past View all, briefly highlighted', async ({ page }, info) => {
+test('a Needs you record the backend sends opens Today at its item: the fold it sits in opens, briefly highlighted', async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(9, 0, 0, 0);
   const companion = createCompanionMock({
     conversation,
     items: [
-      companionItem('cmi-cr', 'CR-123456 needs attention'),
-      companionItem('cmi-mail', 'Quarterly planning', { source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest', itemKey: 'email:conv-1' }),
+      companionItem('cmi-cr', 'CR-123456 needs attention', { facts: { cr: 'CR-123456' } }),
+      companionItem('cmi-mail', 'Email from Alex', {
+        source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest', itemKey: 'email:conv-1',
+        summary: 'Quarterly planning — 3 unread',
+      }),
     ],
-    status: { nextBriefAt: tomorrow.getTime() },
     // Michi's notices are attention records on the background feed, as every window gets them.
     records: [{
       id: 'attn-1', key: 'agent:item:cmi-mail', kind: 'needs_input', reason: 'needs_you', title: 'Companion', body: 'Mail from Alex: Quarterly planning',
@@ -219,16 +231,16 @@ test('a Needs you record the backend sends opens Today at its item: past View al
   const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
   const today = panel.getByRole('tabpanel', { name: 'Today' });
   await expect(today).toBeVisible();
-  // The item waits behind View all: it opens, and the row is in view and highlighted for a moment.
-  await expect(today.getByRole('button', { name: 'Show less' })).toBeVisible();
+  // The item is tucked away: its fold opens, and the row is in view and highlighted for a moment.
+  await expect(today.getByRole('button', { name: /Tucked away/ })).toHaveAttribute('aria-expanded', 'true');
   const row = today.locator('[data-item-id="cmi-mail"]');
   await expect(row).toBeInViewport();
   await expect(row).toHaveAttribute('data-focused', '');
   await page.screenshot({ path: info.outputPath('companion-notice-item.png') });
   await expect(row).not.toHaveAttribute('data-focused', { timeout: 5_000 });
-  // The next brief, as the backend reports it, and it can be steered already.
-  await expect(today.getByText('Your first brief arrives tomorrow at 09:00.')).toBeVisible();
-  await expect(today.getByRole('textbox', { name: 'Tomorrow, focus on' })).toBeVisible();
+  // Nothing promises a brief any more: the header counts what waits, and that is all Today says.
+  await expect(today.getByText(/brief/i)).toHaveCount(0);
+  await expect(today.getByRole('heading', { name: '1 thing waiting on you' })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -274,7 +286,6 @@ test('the first open shows Get started in Chat: nothing starts before Start, and
   await expect(panel.getByText(/I’m Michi\. I keep a home page for each workspace/)).toBeVisible();
   await expect(card.getByRole('checkbox', { name: /Keep workspace homes up to date/ })).toBeChecked();
   await expect(card.getByRole('checkbox', { name: 'Watch: Code reviews · Pipelines · Email · Calendar' })).not.toBeChecked();
-  await expect(card.getByText('Morning brief: Weekdays 09:00')).toBeVisible();
   await expect(card.getByText(/Learn from conversations: Off/)).toBeVisible();
   await page.screenshot({ path: info.outputPath('companion-get-started.png') });
   // Opened once: no New dot any more. Nothing started: no welcome, no Start.
@@ -380,15 +391,19 @@ test('Today lists what a check-in took off it, by the agent’s name with its re
     // The user, or the item's own snooze running out, moved these on since (W3-F3-review #1): not the check-in's doing any more.
     { ...change, id: 'crc-3', targetId: 'cmi-done', action: 'snooze', reason: 'after standup', title: 'CR-999 needs attention',
       standing: false, snoozedUntil: now - 60_000 },
-    { ...change, id: 'crc-4', targetId: 'cmi-woke', action: 'restore', reason: 'it was urgent', title: 'CR-555 needs attention', standing: false },
+    { ...change, id: 'crc-4', targetId: 'cmi-woke', action: 'restore', reason: 'it was urgent', title: 'Fix the flaky test', standing: false },
   ];
   const companion = createCompanionMock({
     conversation,
     items: [
-      companionItem('cmi-merged', 'CR-777 needs attention', { status: 'dismissed', itemKey: 'cr:CR-777:mine' }),
-      companionItem('cmi-back', 'CR-888 needs attention', { status: 'seen', itemKey: 'cr:CR-888:mine' }),
-      companionItem('cmi-done', 'CR-999 needs attention', { status: 'dismissed', itemKey: 'cr:CR-999:mine' }),
-      companionItem('cmi-woke', 'CR-555 needs attention', { status: 'new', itemKey: 'cr:CR-555:mine' }),
+      companionItem('cmi-merged', 'CR-777 needs attention', { status: 'dismissed', itemKey: 'cr:CR-777:mine', facts: { cr: 'CR-777' } }),
+      companionItem('cmi-back', 'CR-888 needs attention', { status: 'seen', itemKey: 'cr:CR-888:mine', facts: { cr: 'CR-888' } }),
+      companionItem('cmi-done', 'CR-999 needs attention', { status: 'dismissed', itemKey: 'cr:CR-999:mine', facts: { cr: 'CR-999' } }),
+      // Another kind, so each of the two on Today reads as its own row.
+      companionItem('cmi-woke', 'Fix the flaky test', {
+        source: 'michi', subtype: 'michi_waiting', status: 'new', itemKey: 'michi:node-1',
+        facts: { wait: 'question' }, target: { kind: 'url', url: 'https://localhost/ws-work' },
+      }),
     ],
     checkinChanges: changes,
   });
@@ -409,8 +424,11 @@ test('Today lists what a check-in took off it, by the agent’s name with its re
   await page.screenshot({ path: info.outputPath('companion-today-moved.png') });
   await moved.getByRole('button', { name: 'Undo: CR-777 needs attention' }).click();
   await expect.poll(() => companion.actions.map(({ id, body }) => [id, body.action])).toEqual([['cmi-merged', 'restore']]);
-  // Back on Today, and no longer listed as moved.
-  await expect(today.getByRole('region', { name: 'Needs you' }).getByText('CR-777 needs attention')).toBeVisible();
+  // Back on Today, counted with the other CR that waits for an answer, and no longer listed as moved.
+  const waiting = today.getByRole('region', { name: 'Waiting on you' });
+  await expect(waiting.getByText('2 of your CRs need an answer')).toBeVisible();
+  await expect(waiting.locator('[data-item-ids~="cmi-merged"]')).toHaveCount(1);
+  await expect(today.getByRole('heading', { name: '3 things waiting on you' })).toBeVisible();
   await expect(today.getByRole('region', { name: 'Moved by Michi' })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
@@ -460,6 +478,24 @@ test('a follow-up from the agent in the conversation it started reads “From Mi
   await source.getByRole('button', { name: 'Michi' }).click();
   await expect(page.getByRole('complementary', { name: 'Michi', exact: true })).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test('docked beside the panes, the panel narrows their captions with them, so each caption stays over its pane', async ({ page }, info) => {
+  const companion = createCompanionMock({ conversation });
+  await boot(page, companion, seeded, {
+    openedBefore: true,
+    workMessages: [{ id: 'u-seed', node_id: 'n-worker', role: 'user', seq: 0, content: 'Fix the failing pipeline.' }],
+  });
+  await openThreadFromSidebar(page, 'Fix the failing pipeline');
+  await page.locator('[data-companion-button]').click();
+  await expect(page.getByRole('complementary', { name: 'Michi', exact: true })).toBeVisible();
+  const geometry = () => page.evaluate(() => {
+    const pane = document.querySelector('.terminal-dashboard > [data-node-id]')!.getBoundingClientRect();
+    const caption = document.querySelector('[data-pane-caption-id]')!.getBoundingClientRect();
+    return { left: Math.abs(pane.left - caption.left), width: Math.abs(pane.width - caption.width) };
+  });
+  await expect.poll(async () => { const g = await geometry(); return g.left < 2 && g.width < 2; }).toBe(true);
+  await page.screenshot({ path: info.outputPath('companion-docked-captions.png') });
 });
 
 test('why a turn’s tools ask reads below its message, not under the bubble', async ({ page }, info) => {
@@ -540,4 +576,82 @@ test('while Michi is off its button, ⌘J and its palette rows are gone; Setting
   await expect(panel).toHaveCount(0);
   await expect(button).toHaveCount(0);
   expect(errors).toEqual([]);
+});
+
+test('on a phone a swipe right on an item marks it done, and a swipe left snoozes it until tomorrow', async ({ browser, baseURL }, info) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    const companion = createCompanionMock({
+      conversation,
+      items: [
+        companionItem('cmi-cr', 'CR-123456 needs attention', {
+          summary: '2 unresolved comments on revision 3', facts: { cr: 'CR-123456', threadsAwaitingYou: 2 },
+        }),
+        companionItem('cmi-pipe', 'Pipeline MyService is blocked', {
+          source: 'pipeline', subtype: 'pipeline_blocked', itemKey: 'pipeline:MyService', facts: { pipeline: 'MyService', failing: true, failingProd: true },
+        }),
+      ],
+    });
+    await boot(page, companion, seeded, { openedBefore: true });
+    await page.keyboard.press('ControlOrMeta+j');
+    const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+    await panel.getByRole('tab', { name: /Today/ }).tap();
+    const today = panel.getByRole('tabpanel', { name: 'Today' });
+    const cdp = await context.newCDPSession(page);
+    const swipe = async (row: Locator, from: number, to: number, look: (row: Locator) => Promise<void>) => {
+      const box = (await row.boundingBox())!;
+      const y = Math.round(box.y + 16);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: from, y }] });
+      for (let i = 1; i <= 8; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: Math.round(from + ((to - from) * i) / 8), y }] });
+        await page.waitForTimeout(16);
+      }
+      await look(row);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+
+    const cr = today.locator('[data-item-id="cmi-cr"]');
+    await swipe(cr, 80, 260, async (row) => {
+      await expect(row).toHaveAttribute('data-swipe-armed', '');
+      await expect(row.locator('.companion-row__reveal--done')).toBeVisible();
+      await page.screenshot({ path: info.outputPath('companion-swipe-done.png') });
+    });
+    await expect(today.getByText('CR-123456 has 2 comments waiting for your reply')).toHaveCount(0);
+    expect(companion.actions.map(({ id, body }) => [id, body.action])).toEqual([['cmi-cr', 'dismiss']]);
+
+    const pipe = today.locator('[data-item-id="cmi-pipe"]');
+    await swipe(pipe, 300, 120, async (row) => {
+      await expect(row).toHaveAttribute('data-swipe-armed', '');
+      await expect(row.locator('.companion-row__reveal--snooze')).toBeVisible();
+      await page.screenshot({ path: info.outputPath('companion-swipe-snooze.png') });
+    });
+    await expect(today.getByText('MyService failed in production')).toHaveCount(0);
+    expect(companion.actions.map(({ id, body }) => [id, body.action])).toEqual([['cmi-cr', 'dismiss'], ['cmi-pipe', 'snooze']]);
+    expect(companion.actions[1].body.until).toBeGreaterThan(Date.now() + 3_600_000);
+  } finally {
+    await context.close();
+  }
+});
+
+test('on a phone the panel lies over the page: the page takes no focus, and Esc hands focus back to where it was', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  try {
+    const companion = createCompanionMock({ conversation });
+    await boot(page, companion, seeded, { openedBefore: true });
+    const content = page.locator('.terminal-content-col');
+    const composer = page.locator('.home-page [contenteditable="true"]').first();
+    await composer.focus();
+    await page.keyboard.press('ControlOrMeta+j');
+    const panel = page.getByRole('complementary', { name: 'Michi', exact: true });
+    await expect(panel).toBeVisible();
+    await expect(content).toHaveAttribute('inert', '');
+    await page.keyboard.press('Escape');
+    await expect(panel).toHaveCount(0);
+    await expect(content).not.toHaveAttribute('inert');
+    await expect(composer).toBeFocused();
+  } finally {
+    await context.close();
+  }
 });

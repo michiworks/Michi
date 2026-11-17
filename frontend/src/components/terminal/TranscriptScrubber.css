@@ -42,7 +42,7 @@
   height: 42px;
   border: 1px solid var(--term-line);
   border-right: 0;
-  border-radius: 12px 0 0 12px;
+  border-radius: var(--ui-radius-pill) 0 0 var(--ui-radius-pill);
   background: var(--term-surface);
   color: var(--term-muted);
   box-shadow: var(--term-float-shadow);
@@ -51,7 +51,6 @@
   transition:
     transform var(--t-enter) var(--t-ease),
     opacity var(--t-soft) var(--t-ease),
-    width var(--t-soft) var(--t-ease),
     background var(--t-soft),
     color var(--t-soft),
     border-color var(--t-soft);

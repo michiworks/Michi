@@ -84,6 +84,7 @@ export function buildExtractionInstructions(opts: { toolName: string | null }): 
     '- keywords: 3 to 10 search terms in both Chinese and English, with the categories they belong to.',
     '- topic: the broad area of the user\'s life or work it belongs to, one that other memories share (Work, Home, Travel, Health, or a named project, person or pet), in the language of the turn; reuse one from "Topics in use" unless none fits.',
     '- event_date: YYYY-MM-DD when the memory is about a dated event, past or planned; otherwise leave it out.',
+    '- valid_until: YYYY-MM-DD, the last day the memory is true, when the user said when it ends; otherwise leave it out.',
     '- quote: the user\'s own words that state it, copied exactly from the turn\'s "user" text.',
     '- source_turn: the "turn" id it comes from.',
     '- explicit: true when the user asked in their own words to remember it; otherwise leave it out. When an existing memory not marked savedByUser already says it, make that one theirs: op "update" with it as target and explicit true.',

@@ -2,6 +2,7 @@ import React from 'react';
 import { toast } from 'sonner';
 import type { DesktopBootstrapParam } from 'michi-shared';
 import { getElectron, type ScheduledRunTarget } from '../../../lib/electronBridge';
+import { leaveOverlaysEvent } from '../../../state/appEvents';
 import { onOpenScheduledRunRequest } from '../../../state/attentionOpenRequests';
 import { useChatActions } from '../../../state/chatStore';
 import type { PageId } from '../../../state/commands';
@@ -66,7 +67,11 @@ export function useScheduledRunOpening({ hydrated, onNav }: { hydrated: boolean;
       if (hydratedRef.current) void open(target);
       else pending.current = target;
     };
-    const detachOpen = electron?.onScheduledRunOpen?.(request);
+    // Electron main's banner; the window's own toasts and notifications ask through the policy.
+    const detachOpen = electron?.onScheduledRunOpen?.((target) => {
+      leaveOverlaysEvent.dispatch({});
+      request(target);
+    });
     const detachRequest = onOpenScheduledRunRequest(request);
     return () => {
       detachOpen?.();

@@ -26,6 +26,7 @@ import { showOsNotification } from './desktop';
 import { playAttentionSound } from './sound';
 import { dismissNotificationCard, showNotificationCard } from './toast';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../config/backendConnections';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 
 export type AttentionTarget =
   | { type: 'node'; nodeId: string; workspaceId?: string; backendConnectionId?: string }
@@ -219,7 +220,9 @@ function deliver(key: string): void {
   closeShown(key);
   const toastId = `attention:${++toastSequence}`;
   const sendOs = intent.osNotification !== 'never' && !windowAttended() && !alreadySent;
-  const open = intent.onOpen;
+  const onOpen = intent.onOpen;
+  // The target takes the screen: overlays that would cover it leave first.
+  const open = onOpen ? () => { leaveOverlaysEvent.dispatch({}); onOpen(); } : undefined;
   if (check(intent.showToast, true)) {
     for (const oldest of shown.keys()) {
       if (shown.size < MAX_SHOWN) break;

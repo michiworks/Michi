@@ -201,5 +201,10 @@ describe('explicit workspace command projection', () => {
     const placeholder = { n1: { ...unanswered.n1, messagesLoaded: false, messageCount: 2 } };
     expect(buildExplicitWorkspaceCommands(project, placeholder, delta, known, undefined, new Map([['n1', 500]])).commands)
       .toEqual([{ type: 'node.patch', payload: { id: 'n1', viewed_at: 900 } }]);
+    // A turn that failed with nothing to show still takes the mark: the sidebar's
+    // Failed mark reads it, and it must not come back after a reload.
+    const failed = { n1: { ...unanswered.n1, status: 'error' as const, error: 'Agent exited' } };
+    expect(buildExplicitWorkspaceCommands(project, failed, delta, known, undefined, new Map([['n1', 500]])).commands)
+      .toEqual([{ type: 'node.patch', payload: { id: 'n1', viewed_at: 900 } }]);
   });
 });

@@ -90,16 +90,16 @@ describe('the topbar’s temporary-chat switch', () => {
     expect(ghostButton()).toBeNull();
   });
 
-  it('turns Home’s switch on and off, and says which it does', () => {
+  it('turns Home’s switch on and off, and says which it is', () => {
     const draft = renderHook(() => useTemporaryChatDraft());
     render(topbar('home'));
     fireEvent.click(ghostButton()!);
     expect(draft.result.current).toBe(true);
-    const on = screen.getByRole('button', { name: 'Turn off temporary chat' });
+    const on = screen.getByRole('button', { name: 'Temporary chat', pressed: true });
     expect(on.classList.contains('is-on')).toBe(true);
     fireEvent.click(on);
     expect(draft.result.current).toBe(false);
-    expect(screen.getByRole('button', { name: 'Temporary chat' }).classList.contains('is-on')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Temporary chat', pressed: false }).classList.contains('is-on')).toBe(false);
   });
 
   it('turns off once Home is left, so a later chat is not temporary by accident', () => {
@@ -115,7 +115,7 @@ describe('the topbar’s temporary-chat switch', () => {
     H.openPanes = [];
     H.focusedPane = null;
     view.rerender(topbar('home'));
-    expect(screen.getByRole('button', { name: 'Temporary chat' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Temporary chat', pressed: false })).toBeTruthy();
   });
 
   it('stays on when the palette turns it on beside a chat and then opens Home', () => {
@@ -128,7 +128,7 @@ describe('the topbar’s temporary-chat switch', () => {
     H.focusedPane = null;
     view.rerender(topbar('home'));
     expect(draft.result.current).toBe(true);
-    expect(screen.getByRole('button', { name: 'Turn off temporary chat' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Temporary chat', pressed: true })).toBeTruthy();
   });
 });
 

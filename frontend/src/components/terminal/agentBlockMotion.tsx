@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, MotionGlobalConfig, PresenceContext, motion, useIsPresent, usePresenceData, useReducedMotionConfig, type TargetAndTransition, type Transition } from 'motion/react';
-import { DUR, EASE, LINE_MOTION, SPRING } from '../../motion/tokens';
+import { DUR, EASE, LINE_MOTION, SPRING, cssBezier } from '../../motion/tokens';
+import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 
 /**
- * Motion for the agent blocks: tool-call groups (ToolCallGroup and the
- * AgentBlockVariants chromes), subagent lines, agent-run and workflow cards.
+ * Motion for the agent blocks: tool-call lines, subagent lines, agent-run and
+ * workflow cards.
  *
  * Only transitions animate. Whatever is there when its list, disclosure or
  * glyph slot mounts renders settled (`AnimatePresence initial={false}`, or the
@@ -64,11 +65,26 @@ type RevealPreset = keyof typeof REVEAL;
 const FLOW_ROOT: React.CSSProperties = { display: 'flow-root' };
 
 /**
+ * Set by the click handler that opens a Reveal (`ref.current = true`): the
+ * body that click mounts scrolls itself into view and clears it. Opens that
+ * state causes (a running group's defaultExpanded or holdOpen, an auto-open
+ * on failure, the live thought tail) never set it, so they never scroll.
+ */
+export type ScrollOnOpen = React.RefObject<boolean>;
+
+/**
  * A height-animated body. While it leaves it is out of the a11y tree and
  * inert. `flow-root` keeps child margins inside it whether or not it clips,
  * so its measured height is the height it collapses from.
  */
-function RevealBody({ preset, children }: { preset: RevealPreset; children: React.ReactNode }) {
+function RevealBody({ preset, settled = false, style = FLOW_ROOT, scrollOnOpen, children }: {
+  preset: RevealPreset;
+  /** Mount at rest, though its list was already there (RevealList `enter`). */
+  settled?: boolean;
+  style?: React.CSSProperties;
+  scrollOnOpen?: ScrollOnOpen;
+  children: React.ReactNode;
+}) {
   const present = useIsPresent();
   // A leaving body keeps the props it last rendered with; a closing timing
   // decided as it hides reaches it through AnimatePresence's `custom`.
@@ -89,16 +105,35 @@ function RevealBody({ preset, children }: { preset: RevealPreset; children: Reac
     el.style.overflow = 'hidden';
     el.style.height = `${exitFromRef.current}px`;
   }, [present]);
+  // Opened by a click: in the opening commit, from the height the body grows
+  // to (it opens from 1px, so its own rect is not where it will end), and
+  // once more when it has that height: at the end of the transcript there is
+  // no room to scroll into until then.
+  const revealingRef = useRef(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !scrollOnOpen?.current) return;
+    scrollOnOpen.current = false;
+    revealingRef.current = true;
+    revealOpened(el, smoothReveal(), el.getBoundingClientRect().top + el.scrollHeight);
+  }, [scrollOnOpen]);
+  const opened = () => {
+    const el = ref.current;
+    if (!revealingRef.current || !present || !el) return;
+    revealingRef.current = false;
+    revealOpened(el, smoothReveal());
+  };
   return (
     <motion.div
       ref={ref}
-      initial={from}
+      initial={settled ? false : from}
       animate={enter}
       exit={exitFrom === null ? exit : { ...exit, height: [exitFrom, 0] }}
+      onAnimationComplete={opened}
       aria-hidden={present ? undefined : true}
       inert={!present}
       data-reveal={preset}
-      style={FLOW_ROOT}
+      style={style}
     >
       {children}
     </motion.div>
@@ -108,17 +143,19 @@ function RevealBody({ preset, children }: { preset: RevealPreset; children: Reac
 /**
  * Shows/hides `children` with a height + opacity disclosure. Present on the
  * first render: shown settled. `exitTransition`, read as it hides, replaces
- * the preset's closing timing.
+ * the preset's closing timing. A body a click opened (`scrollOnOpen`) is
+ * scrolled into view; closing scrolls nothing back.
  */
-export function Reveal({ show, preset = 'disclosure', exitTransition, children }: {
+export function Reveal({ show, preset = 'disclosure', exitTransition, scrollOnOpen, children }: {
   show: boolean;
   preset?: RevealPreset;
   exitTransition?: Transition;
+  scrollOnOpen?: ScrollOnOpen;
   children: React.ReactNode;
 }) {
   return (
     <AnimatePresence initial={false} custom={exitTransition}>
-      {show && <RevealBody key="reveal" preset={preset}>{children}</RevealBody>}
+      {show && <RevealBody key="reveal" preset={preset} scrollOnOpen={scrollOnOpen}>{children}</RevealBody>}
     </AnimatePresence>
   );
 }
@@ -130,77 +167,42 @@ export interface RevealRow {
 
 /**
  * Rows that grow in (height 0→auto + fade) when they arrive and collapse when
- * they leave. Rows there when the list mounts render settled. `gap` is
+ * they leave. Rows there when the list mounts render settled, and so do later
+ * ones when `enter` was false then (a list under history). `gap` is
  * padding inside each row's animated box, so it grows in with the row
- * instead of appearing at once like a flex gap.
+ * instead of appearing at once like a flex gap. `rowStyle` lays out a row's
+ * boxes instead of flow-root, for rows that share their list's grid.
  */
-export function RevealList({ rows, gap = 0 }: { rows: readonly RevealRow[]; gap?: number }) {
+export function RevealList({ rows, gap = 0, enter = true, rowStyle }: {
+  rows: readonly RevealRow[];
+  gap?: number;
+  enter?: boolean;
+  rowStyle?: React.CSSProperties;
+}) {
+  const [grows] = useState(enter);
   return (
     <AnimatePresence initial={false}>
       {rows.map((row, i) => (
-        <RevealBody key={row.key} preset="arrive">
-          <div style={{ paddingTop: i > 0 ? gap : 0 }}>{row.node}</div>
+        <RevealBody key={row.key} preset="arrive" settled={!grows} style={rowStyle}>
+          <div style={{ ...rowStyle, paddingTop: i > 0 ? gap : 0 }}>{row.node}</div>
         </RevealBody>
       ))}
     </AnimatePresence>
   );
 }
 
-const SCROLL_MAX_HEIGHT = 400;
-/** How long a new row keeps a scrolled list pinned while it grows in. */
-const PIN_MS = 260;
-
-/**
- * A RevealList that scrolls past `scroll` and stays pinned to the newest row
- * unless the user scrolled away. A new row starts at height 0, so the list
- * re-pins every frame while it grows; opening a payload does not scroll.
- */
-export function ScrollingRevealList({ rows, gap, scroll }: {
-  rows: readonly RevealRow[];
-  gap?: number;
-  scroll: boolean;
-}) {
-  const listRef = useRef<HTMLDivElement>(null);
-  const stickyRef = useRef(true);
-  const count = rows.length;
-  useEffect(() => {
-    const el = listRef.current;
-    if (!el || !scroll || !stickyRef.current) return;
-    const until = performance.now() + PIN_MS;
-    let frame = 0;
-    const pin = () => {
-      if (!stickyRef.current) return;
-      el.scrollTop = el.scrollHeight;
-      if (performance.now() < until) frame = requestAnimationFrame(pin);
-    };
-    pin();
-    return () => cancelAnimationFrame(frame);
-  }, [count, scroll]);
-  return (
-    <div
-      ref={listRef}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-      }}
-      className={scroll ? 'term-scrollbar' : undefined}
-      style={scroll ? { maxHeight: SCROLL_MAX_HEIGHT, overflowY: 'auto' } : undefined}
-    >
-      <RevealList rows={rows} gap={gap} />
-    </div>
-  );
-}
-
 /**
  * A section that appears after its card mounted grows in (160ms); one shown
- * from the start renders settled. Hiding is immediate: nothing lingers.
+ * from the start renders settled, and so does a later one when `enter` was
+ * false at mount (a host that came with history). Hiding is immediate:
+ * nothing lingers.
  */
-export function RevealOnShow({ show, children }: { show: boolean; children: React.ReactNode }) {
-  const [shownAtMount] = useState(show);
+export function RevealOnShow({ show, enter = true, children }: { show: boolean; enter?: boolean; children: React.ReactNode }) {
+  const [settled] = useState(show || !enter);
   if (!show) return null;
   return (
     <OwnEntrance>
-      <motion.div initial={shownAtMount ? false : HIDDEN} animate={REVEAL.arrive.enter} style={FLOW_ROOT}>{children}</motion.div>
+      <motion.div initial={settled ? false : HIDDEN} animate={REVEAL.arrive.enter} style={FLOW_ROOT}>{children}</motion.div>
     </OwnEntrance>
   );
 }
@@ -240,56 +242,6 @@ export function GlyphSwap({ glyph, justify = 'start', style, children }: {
         <GlyphLayer key={glyph}>{children}</GlyphLayer>
       </AnimatePresence>
     </span>
-  );
-}
-
-const DRAW_FROM = { pathLength: 0 } as const;
-const DRAW_TO: TargetAndTransition = { pathLength: 1, transition: { duration: 0.22, ease: EASE.out } };
-
-/** An SVG stroke drawn in (220ms) when its glyph swaps in; settled otherwise. */
-export function DrawnPath({ d }: { d: string }) {
-  return <motion.path d={d} initial={DRAW_FROM} animate={DRAW_TO} />;
-}
-
-const DIGIT_FROM = { opacity: 0, y: '0.6em' } as const;
-const DIGIT_IN: TargetAndTransition = { opacity: 1, y: 0, transition: { duration: DUR.enter, ease: EASE.out } };
-const DIGIT_OUT: TargetAndTransition = { opacity: 0, y: '-0.6em', transition: { duration: 0.12, ease: EASE.out } };
-const DIGIT_LAYER: React.CSSProperties = { gridArea: '1 / 1' };
-
-function DigitLayer({ children }: { children: React.ReactNode }) {
-  const present = useIsPresent();
-  return (
-    <motion.span initial={DIGIT_FROM} animate={DIGIT_IN} exit={DIGIT_OUT} style={DIGIT_LAYER} aria-hidden={present ? undefined : true}>
-      {children}
-    </motion.span>
-  );
-}
-
-/**
- * A counter that rolls: each place whose digit changes sends the old digit up
- * and out as the new one rises in, and places that hold stay still, so a
- * ticking clock reads as a count rather than a re-printed string. The digits
- * it mounts with render settled; a place gained later (9 → 10) rolls in.
- * Tabular figures keep every place one width.
- */
-export function RollingNumber({ value }: { value: number }) {
-  const digits = String(Math.max(0, Math.floor(value))).split('');
-  const [placesAtMount] = useState(digits.length);
-  return (
-    <OwnEntrance>
-      <span style={{ display: 'inline-flex', fontVariantNumeric: 'tabular-nums' }}>
-        {digits.map((digit, i) => {
-          const place = digits.length - 1 - i;
-          return (
-            <span key={place} style={{ display: 'inline-grid' }}>
-              <AnimatePresence initial={place >= placesAtMount}>
-                <DigitLayer key={digit}>{digit}</DigitLayer>
-              </AnimatePresence>
-            </span>
-          );
-        })}
-      </span>
-    </OwnEntrance>
   );
 }
 
@@ -362,29 +314,6 @@ export function FadeOnChange({ k, variant = 'fade', style, className, children }
       <motion.span key={k} initial={k === mountKey ? false : from} animate={to} style={style} className={className}>
         {children}
       </motion.span>
-    </OwnEntrance>
-  );
-}
-
-const FLASH_STYLE: React.CSSProperties = {
-  position: 'absolute',
-  inset: 0,
-  background: 'var(--term-danger)',
-  pointerEvents: 'none',
-};
-const FLASH_FROM = { opacity: 0.14 } as const;
-const FLASH_TO: TargetAndTransition = { opacity: 0, transition: { duration: DUR.slow, ease: 'easeOut' } };
-
-/**
- * One danger-tinted fade (600ms) over a row that fails while shown. A row
- * failed when it mounted does not flash. The parent must be positioned.
- */
-export function FailFlash({ failed }: { failed: boolean }) {
-  const [failedAtMount] = useState(failed);
-  if (!failed || failedAtMount) return null;
-  return (
-    <OwnEntrance>
-      <motion.span aria-hidden data-fail-flash="" initial={FLASH_FROM} animate={FLASH_TO} style={FLASH_STYLE} />
     </OwnEntrance>
   );
 }
@@ -515,7 +444,6 @@ interface DrawerSnapshot {
 }
 
 const MAX_FOLLOWERS = 40;
-const cssBezier = ([a, b, c, d]: readonly number[]) => `cubic-bezier(${a}, ${b}, ${c}, ${d})`;
 
 function scrollParentOf(el: HTMLElement): HTMLElement | null {
   for (let n = el.parentElement; n; n = n.parentElement) {
@@ -523,6 +451,41 @@ function scrollParentOf(el: HTMLElement): HTMLElement | null {
     if (overflow === 'auto' || overflow === 'scroll') return n;
   }
   return null;
+}
+
+/**
+ * Scrolls each scroller around an opened body (a step list, then the
+ * transcript) until the body shows, never past its row: a body taller than
+ * the view leaves the row at the top. Only down; the page never scrolls. A
+ * scroller's scroll-padding (the transcript's composer and top fade) does not
+ * count as shown. The row is the body's parent, or the parent of a wrapper
+ * that holds only the body (an `aria-controls` target that stays mounted).
+ * `bottom` is where a body still growing to its height will end.
+ */
+export function revealOpened(body: HTMLElement, smooth: boolean, bottom = body.getBoundingClientRect().bottom) {
+  let row = body.parentElement;
+  if (row && row.childElementCount === 1 && row.parentElement) row = row.parentElement;
+  if (!row) return;
+  let top = row.getBoundingClientRect().top;
+  for (let el = scrollParentOf(body); el && el !== document.body; el = scrollParentOf(el)) {
+    const style = getComputedStyle(el);
+    const viewTop = el.getBoundingClientRect().top + el.clientTop;
+    const shownTop = viewTop + (parseFloat(style.scrollPaddingTop) || 0);
+    const shownBottom = viewTop + el.clientHeight - (parseFloat(style.scrollPaddingBottom) || 0);
+    const by = Math.min(bottom - shownBottom, top - shownTop, el.scrollHeight - el.clientHeight - el.scrollTop);
+    if (by > 0) {
+      el.scrollBy({ top: by, behavior: smooth ? 'smooth' : 'auto' });
+      top -= by;
+      bottom -= by;
+    }
+    // Further out, only what this scroller shows can show.
+    top = Math.max(top, shownTop);
+    bottom = Math.min(bottom, shownBottom);
+  }
+}
+
+function smoothReveal(): boolean {
+  return !prefersReducedMotion() && !MotionGlobalConfig.skipAnimations;
 }
 
 /** Everything after `el` inside its scroller: what the drawer's edge pushes. */
@@ -552,11 +515,12 @@ export interface LineDrawer {
  * row (260ms) or back under it (180ms) on the drawer curve, clipped to its own
  * box, and the blocks below follow its edge (FLIP from where they were drawn,
  * composited, so a toggle mid-way reverses from where things are). Under
- * reduced motion an open fades in (140ms) and a close is instant.
+ * reduced motion an open fades in (140ms) and a close is instant. Opening
+ * scrolls the body into view (revealOpened); closing scrolls nothing back.
  */
-export function useLineDrawer(initialOpen = false): LineDrawer {
+export function useLineDrawer(): LineDrawer {
   const reduce = !!useReducedMotionConfig();
-  const [state, setState] = useState<{ open: boolean; ghostTop: number | null }>({ open: initialOpen, ghostTop: null });
+  const [state, setState] = useState<{ open: boolean; ghostTop: number | null }>({ open: false, ghostTop: null });
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const snapRef = useRef<DrawerSnapshot | null>(null);
   const animsRef = useRef<Animation[]>([]);
@@ -635,6 +599,15 @@ export function useLineDrawer(initialOpen = false): LineDrawer {
       }
     };
   }, [state.open]);
+
+  // After the slide's reads, so an instant scroll cannot skew them.
+  const shownRef = useRef(state.open);
+  useLayoutEffect(() => {
+    const opened = state.open && !shownRef.current;
+    shownRef.current = state.open;
+    const body = bodyRef.current;
+    if (opened && body) revealOpened(body, !reduce && !MotionGlobalConfig.skipAnimations);
+  }, [state.open, reduce]);
 
   useEffect(() => () => { for (const a of animsRef.current) a.cancel(); }, []);
 

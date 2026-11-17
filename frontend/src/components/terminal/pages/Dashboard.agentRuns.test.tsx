@@ -57,10 +57,10 @@ vi.mock('../../../services/attention/policy', async (importOriginal) => ({
 }));
 vi.mock('../../../lib/electronBridge', () => ({ getElectron: () => null }));
 vi.mock('../agentRuns/AgentRunPane', () => ({
-  AgentRunPane: ({ onClose, onRespondInteraction, run, attempts }: AgentRunPaneProps) => <div>
+  AgentRunPane: ({ onClose, onRespondInteraction, run, attempts, busy }: AgentRunPaneProps) => <div>
     <span>{run.value.id}</span><span>attempts: {attempts?.length ?? 0}</span>
     <button onClick={() => onClose({ backendConnectionId: run.backendConnectionId, id: run.value.id })}>Run pane</button>
-    <button disabled={!onRespondInteraction} onClick={() => onRespondInteraction?.(
+    <button aria-disabled={busy || undefined} onClick={() => !busy && onRespondInteraction?.(
       { backendConnectionId: run.backendConnectionId, id: run.value.id },
       { id: 'interaction-1' } as Parameters<NonNullable<AgentRunPaneProps['onRespondInteraction']>>[1],
       { decision: 'allow' },
@@ -217,7 +217,7 @@ describe('Dashboard Agent Run panes', () => {
     await waitFor(() => expect(mocks.dispatch).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Respond' }));
     expect((await screen.findByRole('alert')).textContent).toContain('Interaction response could not be confirmed');
-    expect((screen.getByRole('button', { name: 'Respond' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Respond' }).getAttribute('aria-disabled')).toBe('true');
     expect(mocks.getAgentRunDetail).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Check current status' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
@@ -248,7 +248,7 @@ describe('Dashboard Agent Run panes', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('Could not load Agent Run details: read failed');
     expect(screen.getByRole('button', { name: 'Run pane' })).not.toBeNull();
     expect(screen.getByText('attempts: 1')).not.toBeNull();
-    expect((screen.getByRole('button', { name: 'Respond' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Respond' }).getAttribute('aria-disabled')).toBe('true');
     expect(mocks.respondAgentRunInteraction).toHaveBeenCalledTimes(1);
   });
 

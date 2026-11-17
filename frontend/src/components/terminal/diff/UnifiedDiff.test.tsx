@@ -18,7 +18,7 @@ describe('UnifiedDiff', () => {
       ['index 1..2', 'var(--term-muted)', ''],
       ['--- a/x', 'var(--term-muted)', ''],
       ['+++ b/x', 'var(--term-muted)', ''],
-      ['@@ -1 +1 @@', 'var(--term-accent)', 'color-mix(in srgb, var(--term-accent) 7%, transparent)'],
+      ['@@ -1 +1 @@', 'var(--term-accent-text)', 'color-mix(in srgb, var(--term-accent) 7%, transparent)'],
       ['+added', 'var(--term-digest)', 'color-mix(in srgb, var(--term-digest) 8%, transparent)'],
       ['-removed', 'var(--term-danger-text)', 'color-mix(in srgb, var(--term-danger) 8%, transparent)'],
       [' context', 'var(--term-mid)', ''],

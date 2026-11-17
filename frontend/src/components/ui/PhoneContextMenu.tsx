@@ -2,48 +2,49 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom';
 import { usePresence } from 'motion/react';
 import {
-  Archive,
-  ArchiveRestore,
-  ArrowUpRight,
-  AtSign,
-  Combine,
-  Copy,
-  Download,
-  Eye,
-  EyeOff,
-  FilePlus,
-  FileText,
-  FolderInput,
-  FolderOpen,
-  GitBranch,
-  GitMerge,
-  History,
-  MessageSquare,
-  Pause,
-  Pencil,
-  Play,
-  Pin,
-  PinOff,
-  Scissors,
-  SquareArrowOutUpRight,
-  SquareCheck,
-  SquareX,
-  Star,
-  StarOff,
-  Trash2,
-  X,
-  type LucideIcon,
-} from 'lucide-react';
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  ArrowUpRightIcon,
+  AtSignIcon,
+  BranchIcon,
+  ChatIcon,
+  CloseIcon,
+  CopyIcon,
+  DigestIcon,
+  EditIcon,
+  ExportIcon,
+  ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FilePlusIcon,
+  FolderInputIcon,
+  FolderOpenIcon,
+  HistoryIcon,
+  MergeIcon,
+  PauseIcon,
+  PinIcon,
+  PinOffIcon,
+  PlayIcon,
+  ScissorsIcon,
+  SquareCheckIcon,
+  SquareCloseIcon,
+  StarIcon,
+  StarOffIcon,
+  TrashIcon,
+  WeaveIcon,
+  type IconComponent,
+} from '../terminal/icons';
 import type { MenuItem, MenuSection } from '../ContextMenu';
 import { isLongPressHolding, onLongPressHold, releasePressFeedback } from '../../lib/touchContextMenu';
 import { useBackLayer } from '../../lib/backStack';
 import { isImeComposing } from '../../lib/ime';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
+import { EASE } from '../../motion/tokens';
 import './PhoneContextMenu.css';
 
 /*
  * The phone's right-click menu. The element it belongs to lifts out of a
- * blurred page in its own shape (a square full-width row stays square and
+ * dimmed page in its own shape (a square full-width row stays square and
  * flush, a pill stays a pill: iOS's targeted preview with the element's own
  * visible path), and the menu springs out beside it. When neither side has
  * room the lifted element moves up to make it. A finger still down from the
@@ -71,63 +72,73 @@ const SMALL_GROWTH = 1.03;
 /** How far a held finger must travel before lifting it chooses an item. */
 const SLIDE_MIN = 12;
 const SPRING = 'cubic-bezier(.22, 1.18, .36, 1)';
-const SETTLE = 'cubic-bezier(.32, .72, 0, 1)';
+const SETTLE = `cubic-bezier(${EASE.drawer.join(', ')})`;
 const LIFT_MS = 440;
 const SETTLE_MS = 270;
+/** The menu grows in from .45 just after the lift starts, as the scrim fades in. */
+const MENU_GROW_MS = 360;
+const MENU_GROW_DELAY_MS = 60;
+const SCRIM_IN_MS = 240;
+/** Dismissed: the menu folds away as the copy settles and the scrim clears. */
+const MENU_FOLD_MS = 150;
+const SCRIM_OUT_MS = 200;
+/** Removed by its caller while already closing: the menu and scrim fade, then the layer goes. */
+const LEAVE_MENU_FADE_MS = 140;
+const LEAVE_SCRIM_FADE_MS = 160;
 
 /** Icons by the menus' stable ids, else by their (product-copy) labels. */
-const ICON_BY_ID: Record<string, LucideIcon> = {
-  manage: ArrowUpRight,
-  folder: FolderOpen,
-  'open-folder': FolderOpen,
-  rename: Pencil,
-  edit: Pencil,
-  runs: History,
-  pin: Pin,
-  unpin: PinOff,
-  archive: Archive,
-  'archive-nodes': Archive,
-  unarchive: ArchiveRestore,
-  delete: Trash2,
-  export: Download,
-  open: SquareArrowOutUpRight,
-  branch: GitBranch,
-  'extract-tree': GitMerge,
-  select: SquareCheck,
-  trim: Scissors,
-  weave: Combine,
-  digest: FileText,
-  clear: X,
-  close: X,
-  'close-others': SquareX,
-  duplicate: Copy,
-  hide: EyeOff,
-  show: Eye,
-  download: Download,
-  cite: AtSign,
-  goto: MessageSquare,
-  favorite: Star,
-  unfavorite: StarOff,
+const ICON_BY_ID: Record<string, IconComponent> = {
+  manage: ArrowUpRightIcon,
+  folder: FolderOpenIcon,
+  'open-folder': FolderOpenIcon,
+  rename: EditIcon,
+  edit: EditIcon,
+  runs: HistoryIcon,
+  pin: PinIcon,
+  unpin: PinOffIcon,
+  archive: ArchiveIcon,
+  'archive-nodes': ArchiveIcon,
+  unarchive: ArchiveRestoreIcon,
+  delete: TrashIcon,
+  export: ExportIcon,
+  open: ExternalLinkIcon,
+  branch: BranchIcon,
+  'extract-tree': MergeIcon,
+  select: SquareCheckIcon,
+  trim: ScissorsIcon,
+  weave: WeaveIcon,
+  digest: DigestIcon,
+  clear: CloseIcon,
+  close: CloseIcon,
+  'close-others': SquareCloseIcon,
+  duplicate: CopyIcon,
+  hide: EyeOffIcon,
+  show: EyeIcon,
+  download: ExportIcon,
+  cite: AtSignIcon,
+  goto: ChatIcon,
+  favorite: StarIcon,
+  unfavorite: StarOffIcon,
 };
-const ICON_BY_LABEL: Array<[RegExp, LucideIcon]> = [
-  [/^Rename/, Pencil],
-  [/^Pause\b/, Pause],
-  [/^Resume\b/, Play],
-  [/^Unpin\b/, PinOff],
-  [/^Pin\b/, Pin],
-  [/^Unarchive\b/, ArchiveRestore],
-  [/^Archive\b/, Archive],
-  [/^Export\b/, Download],
-  [/^Move to (trash|Trash)|^Move page to trash/, Trash2],
-  [/^Move\b/, FolderInput],
-  [/^Delete\b/, Trash2],
-  [/^Clear selection/, X],
-  [/^Add a page inside/, FilePlus],
-  [/^Manage workspace/, ArrowUpRight],
-  [/^(Change|Link) folder/, FolderOpen],
+const ICON_BY_LABEL: Array<[RegExp, IconComponent]> = [
+  [/^Rename/, EditIcon],
+  [/^Pause\b/, PauseIcon],
+  [/^Resume\b/, PlayIcon],
+  [/^Unpin\b/, PinOffIcon],
+  [/^Pin\b/, PinIcon],
+  [/^Unarchive\b/, ArchiveRestoreIcon],
+  [/^Archive\b/, ArchiveIcon],
+  [/^Export\b/, ExportIcon],
+  [/^Move to (trash|Trash)|^Move page to trash/, TrashIcon],
+  [/^Move\b/, FolderInputIcon],
+  [/^Delete\b/, TrashIcon],
+  [/^Clear selection/, CloseIcon],
+  [/^Add a page inside/, FilePlusIcon],
+  [/^Manage workspace/, ArrowUpRightIcon],
+  [/^(Change|Link) folder/, FolderOpenIcon],
 ];
 
-function phoneMenuIcon(item: MenuItem): LucideIcon | null {
+function phoneMenuIcon(item: MenuItem): IconComponent | null {
   return ICON_BY_ID[item.id] ?? ICON_BY_LABEL.find(([pattern]) => pattern.test(item.label))?.[1] ?? null;
 }
 
@@ -319,13 +330,35 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
     menu.style.transformOrigin = place.origin;
     menu.style.visibility = '';
     if (canAnimate(menu)) {
-      menu.animate([{ opacity: 0, transform: 'scale(.45)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 360, delay: 60, easing: SPRING, fill: 'backwards' });
-      scrimRef.current?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 240, easing: 'ease-out' });
+      menu.animate([{ opacity: 0, transform: 'scale(.45)' }, { opacity: 1, transform: 'scale(1)' }], { duration: MENU_GROW_MS, delay: MENU_GROW_DELAY_MS, easing: SPRING, fill: 'backwards' });
+      scrimRef.current?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: SCRIM_IN_MS, easing: 'ease-out' });
     }
     // The element always comes back, however the menu goes away (and the
     // copy goes with it, or StrictMode's second pass would lift a second one).
     return restoreAnchor;
     // Placed once, at the press; the menu does not chase later layout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Focus moves onto the first item the menu offers (ST-10), and back as the
+  // menu closes: to what had it, else the element the menu belongs to.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const takeFocus = useCallback(() => {
+    const before = document.activeElement;
+    if (before instanceof HTMLElement && before !== document.body && !layerRef.current?.contains(before)) returnFocusRef.current = before;
+    else if (anchor && anchor.tabIndex >= 0) returnFocusRef.current = anchor;
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true });
+  }, [anchor]);
+  const returnFocus = useCallback(() => {
+    const target = returnFocusRef.current;
+    returnFocusRef.current = null;
+    const active = document.activeElement;
+    if (target?.isConnected && (active === document.body || layerRef.current?.contains(active))) target.focus({ preventScroll: true });
+  }, []);
+  useLayoutEffect(() => {
+    takeFocus();
+    return returnFocus;
+    // Once, after the menu is placed: an anchor that changes does not move the focus again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -335,8 +368,8 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
     const lift = liftRef.current;
     const scrim = scrimRef.current;
     if (!menu || !canAnimate(menu)) { restoreAnchor(); done(); return; }
-    menu.animate([{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(.82)' }], { duration: 150, easing: 'ease-in', fill: 'forwards' });
-    scrim?.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: 'ease-out', fill: 'forwards' });
+    menu.animate([{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(.82)' }], { duration: MENU_FOLD_MS, easing: 'ease-in', fill: 'forwards' });
+    scrim?.animate([{ opacity: 1 }, { opacity: 0 }], { duration: SCRIM_OUT_MS, easing: 'ease-out', fill: 'forwards' });
     if (lift) {
       // Back to where the element is now: the list under the menu may have scrolled.
       const now = lift.anchor.isConnected ? lift.anchor.getBoundingClientRect() : null;
@@ -344,14 +377,15 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
       lift.wrap.animate([boxFrames(lift.to, lift.shadow), boxFrames(back, NO_SHADOW)], { duration: SETTLE_MS, easing: SETTLE, fill: 'forwards' });
       lift.copy.animate([{ transform: `scale(${lift.toScale})` }, { transform: `scale(${lift.backScale})` }], { duration: SETTLE_MS, easing: SETTLE, fill: 'forwards' });
     }
-    window.setTimeout(() => { restoreAnchor(); done(); }, lift ? SETTLE_MS + 10 : 200);
+    window.setTimeout(() => { restoreAnchor(); done(); }, lift ? SETTLE_MS + 10 : SCRIM_OUT_MS);
   }, [restoreAnchor]);
 
   const dismiss = useCallback(() => {
     if (closingRef.current) return;
     closingRef.current = true;
+    returnFocus();
     animateOut(() => onCloseRef.current());
-  }, [animateOut]);
+  }, [animateOut, returnFocus]);
   useBackLayer(isPresent, { back: dismiss });
 
   // An item runs in the same tap (or finger lift) that chose it, so a rename
@@ -363,9 +397,11 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
     if (!current || current.disabled) return;
     closingRef.current = true;
     restoreAnchor();
+    // First, so an item that moves the focus (a rename field) keeps it.
+    returnFocus();
     current.run();
     onCloseRef.current();
-  }, [restoreAnchor]);
+  }, [restoreAnchor, returnFocus]);
 
   // Reopened during the fade-out (a same-key child revived by AnimatePresence):
   // a menu still closing would ignore every tap behind its faded-out layer.
@@ -374,9 +410,10 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
     if (isPresent && !wasPresent.current) {
       closingRef.current = false;
       for (const el of [menuRef.current, scrimRef.current]) el?.getAnimations?.().forEach((animation) => animation.cancel());
+      takeFocus();
     }
     wasPresent.current = isPresent;
-  }, [isPresent]);
+  }, [isPresent, takeFocus]);
 
   // Closed from outside (the caller's AnimatePresence): settle, then leave.
   useEffect(() => {
@@ -384,17 +421,21 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
     if (closingRef.current) {
       const menu = menuRef.current;
       if (menu && canAnimate(menu)) {
-        menu.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: 'ease-in', fill: 'forwards' });
-        scrimRef.current?.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 160, easing: 'ease-out', fill: 'forwards' });
-        const timer = window.setTimeout(() => safeToRemove?.(), 170);
+        // From where it is: a menu its own dismissal already folded away stays hidden.
+        const from = (el: HTMLElement) => ({ opacity: getComputedStyle(el).opacity });
+        menu.animate([from(menu), { opacity: 0 }], { duration: LEAVE_MENU_FADE_MS, easing: 'ease-in', fill: 'forwards' });
+        const scrim = scrimRef.current;
+        scrim?.animate([from(scrim), { opacity: 0 }], { duration: LEAVE_SCRIM_FADE_MS, easing: 'ease-out', fill: 'forwards' });
+        const timer = window.setTimeout(() => safeToRemove?.(), LEAVE_SCRIM_FADE_MS + 10);
         return () => window.clearTimeout(timer);
       }
       safeToRemove?.();
       return;
     }
     closingRef.current = true;
+    returnFocus();
     animateOut(() => safeToRemove?.());
-  }, [isPresent, safeToRemove, animateOut]);
+  }, [isPresent, safeToRemove, animateOut, returnFocus]);
 
   // A finger still down from the long press slides onto an item; lifting chooses it.
   useEffect(() => {
@@ -455,7 +496,7 @@ export function PhoneContextMenu({ anchor, x, y, sections, onClose }: PhoneConte
                   disabled={item.disabled}
                   onClick={() => choose(item)}
                 >
-                  {Icon && <Icon size={18} strokeWidth={1.7} aria-hidden="true" />}
+                  {Icon && <Icon size="lg" aria-hidden="true" />}
                   <span className="phone-menu__text">
                     <span>{item.label}</span>
                     {item.sublabel && <span className="phone-menu__sub">{item.sublabel}</span>}

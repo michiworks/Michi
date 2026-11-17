@@ -6,7 +6,7 @@ import { CODEX_META_AGENT_UNREMOVABLE_TOOLS, codexMetaAgentCatalog } from './cod
 import type { RuntimeToolProfile } from '../../contract/types';
 import { RuntimeModelCatalog } from '../../core/modelCatalog';
 import { PendingSessionAcquisitions, assertSessionReusable, sessionIdentity } from '../../core/sessionAcquisition';
-import { isReasoningLevel, sanitizeReasoningLevels } from 'michi-shared';
+import { isReasoningLevel, isServiceTierId, sanitizeReasoningLevels } from 'michi-shared';
 import type {
   AgentCapabilities,
   AgentRuntime,
@@ -122,6 +122,13 @@ const SKILL_LOOKUP_TIMEOUT_MS = 5_000;
 function codexMethodMissing(error: unknown, method: string): boolean {
   return error instanceof CodexRpcError
     && (error.code === -32601 || error.rpcMessage.includes(`unknown variant \`${method}\``));
+}
+
+/** A `model/list` entry's speed tiers as the catalog keeps them; nothing for an app-server that lists none. */
+function codexServiceTiers(tiers: CodexModel['serviceTiers']): Pick<ModelInfo, 'serviceTiers'> {
+  const kept = (Array.isArray(tiers) ? tiers : []).flatMap((tier) => isServiceTierId(tier?.id) && typeof tier.name === 'string' && tier.name
+    ? [{ id: tier.id, name: tier.name, ...(typeof tier.description === 'string' && tier.description ? { description: tier.description } : {}) }] : []);
+  return kept.length ? { serviceTiers: kept } : {};
 }
 
 /** What the agent menu says about each Codex collaboration mode (collaborationMode/list names them only). */
@@ -385,6 +392,7 @@ export class CodexRuntime implements AgentRuntime {
             supportsReasoning: m.supportedReasoningEfforts.length > 0,
           } : {}),
           ...(isReasoningLevel(m.defaultReasoningEffort) ? { defaultReasoning: m.defaultReasoningEffort } : {}),
+          ...codexServiceTiers(m.serviceTiers),
         }));
       },
       persist: (models) => options.modelCache?.save(this.id, models),
@@ -545,6 +553,13 @@ export class CodexRuntime implements AgentRuntime {
       if (reloadPending) this.skillsReloadPending = true;
     });
     return listing;
+  }
+
+  /** The speed tier ids the catalog lists for `modelId` (null: the default model). */
+  private serviceTierIds(modelId: string | null): string[] {
+    const models = this.modelCatalog.current();
+    const model = modelId ? models.find((entry) => entry.id === modelId) : models.find((entry) => entry.isDefault);
+    return model?.serviceTiers?.map((tier) => tier.id) ?? [];
   }
 
   /**
@@ -757,6 +772,7 @@ export class CodexRuntime implements AgentRuntime {
         // session's own app-server (another home, no host roots): its skill
         // turns send the skill as text.
         ...(opts.ephemeral ? {} : { skillInput: (skill: SkillTurnInvocation, cwd: string) => this.skillInputFor(skill, cwd) }),
+        serviceTiers: (model) => this.serviceTierIds(model),
       });
 
       // A native fork copies the parent's history, and with it the mode Codex
@@ -904,6 +920,7 @@ export class CodexRuntime implements AgentRuntime {
       permissionBroker: opts.permissionBroker,
       recover: (s) => this.recoverSession(s),
       skillInput: (skill, cwd) => this.skillInputFor(skill, cwd),
+      serviceTiers: (model) => this.serviceTierIds(model),
     });
 
     const slotId = session.createMcpSlot();

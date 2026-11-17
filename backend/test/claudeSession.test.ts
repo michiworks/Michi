@@ -486,7 +486,7 @@ describe('ClaudeSession', () => {
     }
   });
 
-  test('the Michi Memory block reaches the model ahead of the Pages context and stays out of history', async () => {
+  test('the workspace instructions and Michi Memory blocks reach the model, in that order, ahead of the Pages context and stay out of history', async () => {
     const child = new MockClaudeChild();
     stubSpawnClaude(() => child);
     setTimeout(() => child.emitInit('ext-memory'), 20);
@@ -498,6 +498,7 @@ describe('ClaudeSession', () => {
     try {
       setTimeout(() => child.emitResult('success'), 20);
       for await (const _event of session.send('first question', {
+        instructionsContext: 'Workspace instructions as they are now:\n\nUse pnpm.',
         memoryContext: '<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>',
         pageContext: 'Michi Pages manifest (JSON): {}',
       })) void _event;
@@ -505,7 +506,7 @@ describe('ClaudeSession', () => {
       for await (const _event of session.send('second question')) void _event;
       const prompts = lines.map((line) => JSON.parse(line)).filter((message) => message.type === 'user')
         .map((message) => String(message.message.content));
-      assert.ok(prompts[0]!.startsWith('<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question'));
+      assert.ok(prompts[0]!.startsWith('Workspace instructions as they are now:\n\nUse pnpm.\n\n---\n\n<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question'));
       assert.ok(prompts[1]!.startsWith('second question'), 'a turn without a block sends none');
       assert.deepEqual(session.getHistory().filter((m) => m.role === 'user').map((m) => m.content), ['first question', 'second question']);
     } finally {

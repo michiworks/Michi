@@ -1,7 +1,7 @@
 import React from 'react';
-import { RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 import type { WorkspaceHomeSummaryDto } from 'michi-shared';
+import { RetryIcon } from '../../icons';
 import { useProgressCards, useSpaceActivity, useSpacesHome, useSpacesHomeWorkspaces } from '../../../../state/pages/useSpacesHome';
 import { retryMetaAgentGuard, useMetaAgent } from '../../../../state/metaAgent/useMetaAgent';
 import { metaAgentStatus, type MetaAgentStatusKind } from '../../../../state/metaAgent/metaAgentStatus';
@@ -148,7 +148,7 @@ function SpacesHomeView({ backendConnectionId = LOCAL_BACKEND_CONNECTION_ID, now
             <span className="spaces-home__date">{homeDateLabel(now ?? new Date(clock))}</span>
             <span className="spaces-home-spacer" />
             <Button size="sm" className="spaces-home__update" onClick={update_} disabled={offline || update.phase === 'running'} aria-busy={update.phase === 'running' || undefined}>
-              <RefreshCw size={12} strokeWidth={1.8} aria-hidden="true" />Update
+              <RetryIcon size="sm" aria-hidden="true" />Update
             </Button>
             <LayoutRulesMenuButton pageId={page?.id ?? null} backendConnectionId={backendConnectionId} readOnly={offline} />
           </div>

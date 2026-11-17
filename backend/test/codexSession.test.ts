@@ -157,7 +157,7 @@ test('send includes existing image attachments as native localImage inputs', asy
   }
 });
 
-test('send puts the Michi Memory block ahead of the Pages context for the model only', async () => {
+test('send puts the workspace instructions, then the Michi Memory block, ahead of the Pages context for the model only', async () => {
   const texts: string[] = [];
   const { session, client } = makeSession({
     request: async (method: string, params: any) => {
@@ -173,11 +173,12 @@ test('send puts the Michi Memory block ahead of the Pages context for the model 
   };
   try {
     await drain('first question', {
+      instructionsContext: 'Workspace instructions as they are now:\n\nUse pnpm.',
       memoryContext: '<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>',
       pageContext: 'Michi Pages manifest (JSON): {}',
     });
     await drain('second question');
-    assert.ok(texts[0]!.startsWith('<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question'));
+    assert.ok(texts[0]!.startsWith('Workspace instructions as they are now:\n\nUse pnpm.\n\n---\n\n<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>\n\n---\n\nMichi Pages manifest (JSON): {}\n\n---\n\nfirst question'));
     assert.ok(texts[1]!.startsWith('second question'), 'a turn without a block sends none');
     assert.deepEqual(session.getHistory().filter((m) => m.role === 'user').map((m) => m.content), ['first question', 'second question']);
   } finally {

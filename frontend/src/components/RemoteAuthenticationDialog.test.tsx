@@ -1,7 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { RemoteAuthenticationDialog } from './RemoteAuthenticationDialog';
+import { RemoteAuthenticationDialog, RemoteSignInNotices } from './RemoteAuthenticationDialog';
 import { closeRemoteAuthentication, completeRemoteAuthentication, requestRemoteAuthentication } from '../state/remoteAuthentication';
 
 const state = vi.hoisted(() => ({
@@ -34,7 +34,18 @@ beforeEach(() => {
     onTerminalExit: (callback: typeof state.exit) => { state.exit = callback; return vi.fn(); },
   };
 });
-afterEach(() => { closeRemoteAuthentication(); for (const key of ['native-success', 'native-fail', 'web-fallback', 'web-cancel', 'strict-auth']) completeRemoteAuthentication(key); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { closeRemoteAuthentication(); for (const key of ['native-success', 'native-fail', 'web-fallback', 'web-cancel', 'strict-auth', 'background']) completeRemoteAuthentication(key); vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+it('keeps a background request in the notice corner until the user signs in from it', async () => {
+  render(<><RemoteSignInNotices /><RemoteAuthenticationDialog /></>);
+  act(() => requestRemoteAuthentication({ key: 'background', target: { scope: 'remote', host: 'test-host' }, connectionId: 'remote' }));
+  const notice = screen.getByRole('region', { name: 'Sign-in for test-host' });
+  expect(notice.textContent).toContain('test-host: sign-in needs attention.');
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.click(within(notice).getByRole('button'));
+  expect(await screen.findByRole('dialog')).toBeTruthy();
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Sign-in for test-host' })).toBeNull());
+});
 
 it('opens a dedicated remote PTY, forwards user input, reconnects once after success and closes itself', async () => {
   const onComplete = vi.fn();

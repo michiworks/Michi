@@ -37,6 +37,8 @@ describe('ContextRing', () => {
     const meter = screen.getByRole('meter');
     fireEvent.mouseEnter(meter);
     const tooltip = screen.getByRole('tooltip');
+    // Fades in like the other per-hover surfaces (TR-12).
+    expect(tooltip.getAttribute('data-menu-animate')).toBe('true');
     expect(tooltip.textContent).toContain('79.5k tokens');
     expect(tooltip.textContent).toContain('in 60.0k');
     expect(tooltip.textContent).toContain('out 19.5k');
@@ -70,6 +72,20 @@ describe('ContextRing', () => {
       fireEvent.pointerOver(document.body, { pointerType: 'mouse' });
       vi.unstubAllGlobals();
     }
+  });
+
+  it('opens its card for keyboard focus, and closes it on Escape and on leaving', () => {
+    render(<ContextRing percentage={75} />);
+    const meter = screen.getByRole('meter');
+    expect(meter.tabIndex).toBe(0);
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    fireEvent.focus(meter);
+    expect(screen.getByRole('tooltip').textContent).toContain('75.0%');
+    fireEvent.keyDown(meter, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.focus(meter);
+    fireEvent.blur(meter);
+    expect(screen.queryByRole('tooltip')).toBeNull();
   });
 
   it('stays out of the toolbar until more than half the window is used', () => {

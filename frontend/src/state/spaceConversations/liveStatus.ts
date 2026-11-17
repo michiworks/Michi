@@ -30,7 +30,7 @@ export function progressStatusLine(node: ChatNodeState): string {
 }
 
 /** What kind of answer a conversation in this window waits on from you, if any. */
-export function nodeAwaiting(node: ChatNodeState): ProgressCardAwaiting | null {
+export function nodeAwaiting(node: Pick<ChatNodeState, 'pendingPermission' | 'pendingUserInput'>): ProgressCardAwaiting | null {
   if (node.pendingPermission) return 'approval';
   return node.pendingUserInput && !node.pendingUserInput.resolved ? 'question' : null;
 }

@@ -232,8 +232,8 @@ test('a row opens the Background work drawer, and Side by side opens the branche
   await expect(panes).toHaveCount(3);
   expect(await panes.evaluateAll((els) => els.map((el) => el.getAttribute('data-node-id')))).toEqual(['mm-caller', 'mm-c1', 'mm-c2']);
   const c2Banner = page.locator('.terminal-pane[data-node-id="mm-c2"]').getByTestId('pane-spawn-banner');
-  await expect(c2Banner).toHaveText('⎇multi-model branch · fresh context, prompt onlyOpen plan');
-  await expect(page.locator('.terminal-pane[data-node-id="mm-c1"]').getByTestId('pane-spawn-banner')).toHaveText('⎇multi-model branch · inherits Memory extraction timingOpen plan');
+  await expect(c2Banner).toHaveText('multi-model branch · fresh context, prompt onlyOpen plan');
+  await expect(page.locator('.terminal-pane[data-node-id="mm-c1"]').getByTestId('pane-spawn-banner')).toHaveText('multi-model branch · inherits Memory extraction timingOpen plan');
 
   // A branch leads back to its plan: the caller's drawer opens on that branch's row.
   await c2Banner.getByRole('button', { name: 'Open plan' }).click();

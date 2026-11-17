@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AgentRunCompletionMode, AgentRunEventType, AgentRunInvocationMode, AgentRunStatus,
@@ -43,22 +43,32 @@ describe('AgentRunPane', () => {
     expect(popover.textContent).toContain('shared workspace');
     expect(popover.textContent).toContain('context · 1 items · immutable');
     fireEvent.click(screen.getByRole('button', { name: 'Agent metadata' }));
-    expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Agent metadata' })).toBeNull();
   });
 
-  it('closes agent metadata on Esc, giving focus back to the name, and on a press outside it', () => {
+  it('moves focus into agent metadata, and back to the name on Esc and on a press outside it', async () => {
     render(<AgentRunPane run={resource} attempts={[attempt]} events={events} onClose={() => {}} />);
     const name = screen.getByRole('button', { name: 'Agent metadata' });
     fireEvent.click(name);
     expect(screen.getByTestId('run-metadata-popover')).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.textContent).toContain('context · 1 items'));
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
-    expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Agent metadata' })).toBeNull();
     expect(document.activeElement).toBe(name);
     expect(name.getAttribute('aria-expanded')).toBe('false');
+    // Fading out, it is inert and leaves the next Esc to the page.
+    expect(screen.getByTestId('run-metadata-popover').closest('[inert]')).not.toBeNull();
+    const page = vi.fn();
+    window.addEventListener('keydown', page);
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', page);
+    expect(page).toHaveBeenCalledOnce();
 
     fireEvent.click(name);
+    await waitFor(() => expect(screen.getByTestId('run-metadata-popover').contains(document.activeElement)).toBe(true));
     fireEvent.pointerDown(screen.getByText('FULL TRANSCRIPT DETAIL'));
-    expect(screen.queryByTestId('run-metadata-popover')).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Agent metadata' })).toBeNull();
+    expect(document.activeElement).toBe(name);
   });
 
   it('queues steering by default and exposes immediate stop as a distinct action', () => {
@@ -106,6 +116,22 @@ describe('AgentRunPane', () => {
     expect(screen.queryByTestId('pending-interaction-actions')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close Run Pane' }));
     expect(close).toHaveBeenCalledWith({ backendConnectionId: 'remote-b', id: 'run-pane' });
+  });
+
+  it('keeps Allow, aria-disabled, while its answer is sent, then gives focus to the answered request', () => {
+    const respond = vi.fn();
+    const props = { run: resource, onClose: () => {}, onRespondInteraction: respond };
+    const { rerender } = render(<AgentRunPane {...props} interactions={[pending]} />);
+    const allow = screen.getByRole('button', { name: 'Allow' });
+    allow.focus();
+    fireEvent.click(allow);
+    rerender(<AgentRunPane {...props} interactions={[pending]} busy />);
+    expect(allow.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(allow);
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(allow);
+    rerender(<AgentRunPane {...props} interactions={[{ ...pending, status: 'resolved', response: { decision: 'allow' }, resolvedAt: 5 }]} />);
+    expect(document.activeElement?.textContent).toContain('resolved');
   });
 
   it('shows the result of a run that finishes while it is open, and of one opened finished', () => {

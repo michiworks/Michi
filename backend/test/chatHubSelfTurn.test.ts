@@ -510,32 +510,33 @@ describe('ChatHub.startTurn', () => {
       chatId: 'checkpoint-failure-chat',
       nodeId: 'checkpoint-failure-node',
       text: 'hello',
-      session: sessionFrom([
-        { kind: 'tool_call', toolCallId: 'tool-1', title: 'Read', status: 'running' },
-        { kind: 'chunk', text: 'answer after checkpoint failure' },
-        { kind: 'turn_end', stopReason: 'end_turn' },
-      ]),
+      session: {
+        ...sessionFrom([]),
+        send: () => (async function* (): AsyncIterableIterator<NormalizedEvent> {
+          yield { kind: 'tool_call', toolCallId: 'tool-1', title: 'Read', status: 'completed', output: 'ok' };
+          // The tool result's checkpoint is written on the next tick, before the turn goes on.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yield { kind: 'chunk', text: 'answer after checkpoint failure' };
+          yield { kind: 'turn_end', stopReason: 'end_turn' };
+        })(),
+      },
     });
     await done;
 
-    assert.equal(checkpointCalls >= 1, true);
+    assert.equal(checkpointCalls, 1);
     assert.equal(finalized?.assistantMessage.content, 'answer after checkpoint failure');
     assert.equal(received.some((ev) => ev.event === 'done'), true);
     assert.equal(received.some((ev) => ev.event === 'error'), false);
   });
 
-  it('throttles active tool output updates but checkpoints terminal tool state immediately', async () => {
+  // The tool start no longer checkpoints at once (11-09 audit P1-5): it and
+  // the running output wait for the turn's interval (chatHubCheckpointPacing).
+  it('checkpoints a tool\'s terminal state on the next tick, not its start or running output', async () => {
     const checkpoints: DurableTurnSnapshot[] = [];
     const finalizations: DurableTurnSnapshot[] = [];
-    const hub = new ChatHub({
-      retentionMs: 100,
-      checkpointIntervalMs: 60_000,
-      workspaceIdForNode: () => 'ws-test',
-      persistence: {
-        begin: () => {},
-        checkpoint: (snapshot) => { checkpoints.push(snapshot); },
-        finalize: (snapshot) => { finalizations.push(snapshot); },
-      },
+    const hub = hubWithPersistence({
+      checkpoint: (snapshot) => { checkpoints.push(snapshot); },
+      finalize: (snapshot) => { finalizations.push(snapshot); },
     });
     const outputUpdates: NormalizedEvent[] = Array.from({ length: 100 }, (_, index) => ({
       kind: 'tool_call_update',
@@ -549,22 +550,25 @@ describe('ChatHub.startTurn', () => {
       chatId: 'chatty-tool-chat',
       nodeId: 'chatty-tool-node',
       text: 'run the command',
-      session: sessionFrom([
-        { kind: 'tool_call', toolCallId: 'tool-chatty', title: 'Bash', status: 'running' },
-        ...outputUpdates,
-        {
-          kind: 'tool_call_update', toolCallId: 'tool-chatty', title: '',
-          status: 'completed', output: 'final output',
-        },
-        { kind: 'turn_end', stopReason: 'end_turn' },
-      ]),
+      session: {
+        ...sessionFrom([]),
+        send: () => (async function* (): AsyncIterableIterator<NormalizedEvent> {
+          yield { kind: 'tool_call', toolCallId: 'tool-chatty', title: 'Bash', status: 'running' };
+          yield* outputUpdates;
+          yield {
+            kind: 'tool_call_update', toolCallId: 'tool-chatty', title: '',
+            status: 'completed', output: 'final output',
+          };
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          yield { kind: 'turn_end', stopReason: 'end_turn' };
+        })(),
+      },
     });
     await done;
 
-    assert.equal(checkpoints.length, 2, 'initial and terminal tool states should checkpoint');
-    assert.equal(checkpoints[0].assistantMessage.toolCalls[0]?.status, 'running');
-    assert.equal(checkpoints[1].assistantMessage.toolCalls[0]?.status, 'completed');
-    assert.equal(checkpoints[1].assistantMessage.toolCalls[0]?.output, 'final output');
+    assert.equal(checkpoints.length, 1, 'only the terminal tool state checkpoints within the interval');
+    assert.equal(checkpoints[0].assistantMessage.toolCalls[0]?.status, 'completed');
+    assert.equal(checkpoints[0].assistantMessage.toolCalls[0]?.output, 'final output');
     assert.equal(finalizations.length, 1);
     assert.equal(finalizations[0].assistantMessage.toolCalls[0]?.output, 'final output');
   });

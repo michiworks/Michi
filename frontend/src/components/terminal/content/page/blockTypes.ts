@@ -1,5 +1,5 @@
 import type React from 'react';
-import type { MichiPageBlock } from 'michi-shared';
+import type { BlockSubmission, MichiPageBlock } from 'michi-shared';
 import type { MichiMenuEntry } from './MichiMenu';
 
 /** What every block renderer may read. */
@@ -8,6 +8,21 @@ export interface MichiBlockCtx {
   depth: number;
   /** Hands explicit block interaction to the native Spaces Assistant. False means unavailable/busy. */
   requestAssistant?: (block: MichiPageBlock, prompt: string, title: string, send: boolean) => boolean;
+  /** The host sends every request at once (a chat reply's blocks), never as a draft to review. */
+  sendsAlways?: boolean;
+  /**
+   * What was submitted through a form, poll or choice for its current content
+   * (blockSubmissionSignature): set, the block shows it read-only. Without it
+   * nothing was submitted, or the host keeps no submissions.
+   */
+  submissionFor?: (block: MichiPageBlock) => BlockSubmission | undefined;
+  /**
+   * Stores a submission before the block sends it. True: stored, the send
+   * goes ahead. False: not stored, so nothing is sent; when the block already
+   * had a submission, submissionFor now returns it. Without it blocks send
+   * unrecorded and may be submitted again.
+   */
+  recordSubmission?: (block: MichiPageBlock, signature: string, value: unknown, text: string) => Promise<boolean>;
   /** Draws a block inside a container with its chrome; without it children are drawn bare. */
   frame?: (block: MichiPageBlock, ctx: MichiBlockCtx) => React.ReactNode;
   /** Ticks one item of a checklist the person may edit; without it checklists are read-only. */

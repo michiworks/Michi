@@ -25,7 +25,7 @@ import { installMemoryExtractionHooks } from '../src/services/memory/extractionS
 import { commitExtractionPayload } from '../src/services/memory/extractionV2';
 import { profileKeywords, segmentTerms } from '../src/services/memory/memoryTerms';
 import {
-  forgetConversationTurn,
+  hideConversationTurns,
   indexTurn,
   keepConversationTurnOutOfMemory,
   recallDocument,
@@ -620,7 +620,7 @@ describe('migration 0073_memory_recall_forget', () => {
   });
 });
 
-describe('forgetting: a forgotten memory goes, chat history stays; Don\'t recall hides an excerpt', () => {
+describe('forgetting: a forgotten memory goes, chat history stays', () => {
   test('forgetMemory: every version and its document go, with a tombstone each; the turns stay as chat history', (t) => {
     t.after(installMemoryExtractionHooks());
     node('n-laptop', 'ws-a', '笔记本型号');
@@ -655,49 +655,30 @@ describe('forgetting: a forgotten memory goes, chat history stays; Don\'t recall
     integrity();
   });
 
-  test('forgetConversationTurn hides one excerpt a scope may read', () => {
-    node('n-1', 'ws-a', 'x');
-    workspace('ws-private', { settings: { aiGlobalContext: false } });
-    node('n-private', 'ws-private', 'y');
-    const turnId = turn('n-1', '我的储物柜号码是 318', '好的。');
-    const privateTurn = turn('n-private', '储物柜 318 在三楼', '好的。');
-    assert.equal(forgetConversationTurn(lookup(doc('turn', privateTurn)!.id)), false, 'AI navigation off');
-    assert.equal(forgetConversationTurn(lookup(doc('turn', turnId)!.id)), true);
-    assert.equal(forgetConversationTurn(lookup(doc('turn', turnId)!.id)), true, 'already hidden: still forgotten');
-    assert.equal(forgetConversationTurn({ ...lookup(doc('turn', turnId)!.id), ownerUserId: 'someone-else' }), false);
-    assert.equal(forgetConversationTurn(lookup(9_999)), false);
-    assert.deepEqual(search('储物柜', { gate: false }), []);
-    assert.equal(doc('turn', privateTurn)!.hidden, 0);
-  });
-
-  test('Don\'t recall bars extraction from the excerpt\'s turn; a forgotten memory bars its own turn', (t) => {
+  test('a forgotten memory bars its own turn; a hidden turn is not indexed again and takes no keyphrases', (t) => {
     t.after(installMemoryExtractionHooks());
     node('n-code', 'ws-a', '副业');
-    const codenameTurn = turn('n-code', '我周末在搞个副业项目，代号叫栖霞', '好名字。');
-    const codename = memory('用户的副业项目代号是栖霞', { origin: 'extracted', source: { nodeId: 'n-code', turnId: codenameTurn } });
-    const excerpt = turn('n-code', '栖霞就是个记账小工具，慢慢做', '实用。');
+    const codenameTurn = turn('n-code', '我周末在搞个副业项目，代号叫青鸟', '好名字。');
+    const codename = memory('用户的副业项目代号是青鸟', { origin: 'extracted', source: { nodeId: 'n-code', turnId: codenameTurn } });
     forgetMemory({ ownerUserId: ME }, codename.id);
-    assert.equal(forgetConversationTurn(lookup(doc('turn', excerpt)!.id)), true);
-    const tombstones = (getDb().prepare('SELECT source_turn_id AS turn FROM memory_extraction_tombstones WHERE owner_user_id = ?')
-      .all(ME) as Array<{ turn: string }>).map((row) => row.turn);
-    assert.deepEqual(tombstones.sort(), [codenameTurn, excerpt].sort());
     const committed = commitExtractionPayload({
       memories: [
-        { op: 'add', kind: 'fact', about: 'user', body: '用户的副业项目代号是栖霞', keywords: ['栖霞'], quote: '代号叫栖霞', source_turn: codenameTurn },
-        { op: 'add', kind: 'fact', about: 'user', body: '用户的副业项目是记账小工具', keywords: ['记账'], quote: '记账小工具', source_turn: excerpt },
+        { op: 'add', kind: 'fact', about: 'user', body: '用户的副业项目代号是青鸟', keywords: ['青鸟'], quote: '代号叫青鸟', source_turn: codenameTurn },
       ],
       turn_keys: [],
       exclude_turns: [],
       forget: [],
     }, { ownerUserId: ME, workspaceId: 'ws-a', turns: [
-      { turnId: codenameTurn, nodeId: 'n-code', userText: '我周末在搞个副业项目，代号叫栖霞', userAt: NOW },
-      { turnId: excerpt, nodeId: 'n-code', userText: '栖霞就是个记账小工具，慢慢做', userAt: NOW },
+      { turnId: codenameTurn, nodeId: 'n-code', userText: '我周末在搞个副业项目，代号叫青鸟', userAt: NOW },
     ] });
-    assert.deepEqual(committed.dropped.map((drop) => drop.reason), ['tombstoned', 'tombstoned']);
-    // Indexing a hidden turn again, or adding its keyphrases, changes nothing.
-    assert.equal(indexTurn(finished('n-code', '栖霞就是个记账小工具，慢慢做', '实用。', { turnId: excerpt })), false);
+    assert.deepEqual(committed.dropped.map((drop) => drop.reason), ['tombstoned']);
+    // A turn of a conversation that stopped learning: indexing it again, or adding its keyphrases, changes nothing.
+    node('n-tool', 'ws-a', '记账');
+    const excerpt = turn('n-tool', '青鸟就是个记账小工具，慢慢做', '实用。');
+    hideConversationTurns(ME, 'n-tool');
+    assert.equal(indexTurn(finished('n-tool', '青鸟就是个记账小工具，慢慢做', '实用。', { turnId: excerpt })), false);
     assert.equal(doc('turn', excerpt)!.hidden, 1);
-    assert.equal(setTurnKeys(ME, excerpt, ['栖霞']), false);
+    assert.equal(setTurnKeys(ME, excerpt, ['青鸟']), false);
   });
 });
 
@@ -734,7 +715,7 @@ describe('a turn is indexed as it was said', () => {
     const declined = spoken('n-4', '我建了个临时分支叫 hotfix-wenhe-1203，这个不用记。合并前要先 rebase 吗？', '看团队习惯。');
     assert.equal(read(declined)!.userText, '我建了个临时分支叫 hotfix-wenhe-1203，这个不用记。合并前要先 rebase 吗？');
     const pointed = spoken('n-4', '我的工位在 7 楼西侧', '好的。');
-    assert.equal(forgetConversationTurn(lookup(doc('turn', pointed)!.id)), true);
+    hideConversationTurns(ME, 'n-4');
     assert.equal(read(pointed), null, 'recall hid it');
     // A turn the user asked to forget (memory_delete with its c: ref) stays chat history, and extraction never reads it, nor
     // the reply to it as the message the next turn answered.
@@ -833,7 +814,8 @@ describe('recallTurn: a ref lookup', () => {
     assert.equal(recallTurn(lookup(id(first)))!.previous, null);
     assert.equal(recallTurn(lookup(id(fourth)))!.next, null);
 
-    assert.equal(forgetConversationTurn(lookup(id(third))), true);
+    // Hidden as recall hides one turn.
+    getDb().prepare("UPDATE memory_recall_docs SET hidden = 1, title = NULL, snippet = '', content = NULL, keys = '' WHERE id = ?").run(id(third));
     assert.equal(recallTurn(lookup(id(second)))!.next?.docId, id(fourth));
     assert.equal(recallTurn(lookup(id(third))), null);
 
@@ -928,7 +910,8 @@ describe('startRecallBackfill', () => {
       "I made a throwaway branch called quokka-hotfix-77. No need to remember that name. How do I delete a local branch?",
       "Understood, I won't keep quokka-hotfix-77.");
     const long = storedTurn('n-1', '博物馆里有什么？', `${'介绍'.repeat(2_000)}Plesiosaur${'总结'.repeat(2_000)}`);
-    const gone = storedTurn('n-1', '储物柜号码是 318', '好的');
+    node('n-2', 'ws-a', 'y');
+    const gone = storedTurn('n-2', '储物柜号码是 318', '好的');
     // As the first backfill left them: everything indexed, nothing hidden, no content.
     getDb().prepare("INSERT INTO meta (key, value) VALUES ('memory_recall_backfill_v1', 'done')").run();
     assert.deepEqual(await startRecallBackfill({ pauseMs: 0 }), { memories: 0, turns: 3, done: true });
@@ -936,7 +919,7 @@ describe('startRecallBackfill', () => {
     assert.match(doc('turn', long)!.content!, /Plesiosaur/);
     assert.deepEqual(refs(search('plesiosaur', { gate: false })), [long]);
 
-    assert.equal(forgetConversationTurn(lookup(doc('turn', gone)!.id)), true);
+    hideConversationTurns(ME, 'n-2');
     getDb().prepare("DELETE FROM meta WHERE key = 'memory_recall_backfill_v5'").run();
     assert.deepEqual(await startRecallBackfill({ pauseMs: 0 }), { memories: 0, turns: 2, done: true });
     assert.equal(doc('turn', gone)!.hidden, 1);

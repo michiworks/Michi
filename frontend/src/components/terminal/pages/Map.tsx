@@ -19,6 +19,7 @@ import { isNodeUnread } from '../../../state/sidebarSelectors';
 import { isBranchEdge } from '../../../state/tree';
 import Branches from './Branches';
 import { MAP_VIEWS, MAP_VIEW_LABELS, type MapView } from './mapView';
+import { tabStripKeyTarget } from '../tabKeys';
 import { useElkLayout, elkEdgePathD } from './useElkLayout';
 import type { PageId } from '../../../state/commands';
 import type { Tree } from '../../../state/chatTypes';
@@ -27,8 +28,8 @@ import { exportPanelEvent } from '../../../state/appEvents';
 
 // MapCard boxes fed to the layout engines use measured DOM heights (see
 // cardHeights below). Expanding a card reflows the graph so neighbors slide
-// to make room; both animate to their new positions (wrapper top/left
-// transition).
+// to make room; both animate to their new positions (the wrapper's
+// transform transition, on the compositor).
 const NODE_SEP = 48;         // gap between sibling cards (cross-axis, vertical in LR)
 const RANK_SEP = 110;        // gap between ranks (main-axis, horizontal in LR)
 const FIT_PADDING = 72;
@@ -542,7 +543,9 @@ export default function TerminalMap({
             width: '100%',
             height: '100%',
             position: 'relative',
-            overflow: 'hidden',
+            // clip, unlike hidden, cannot be scrolled when Tab focuses a card
+            // outside the view, which would shift the world off the camera.
+            overflow: 'clip',
             // The camera handles touch/trackpad gestures itself.
             touchAction: 'none',
             backgroundImage: 'radial-gradient(color-mix(in srgb, var(--term-line) 55%, var(--term-bg)) 1px, transparent 1px)',
@@ -666,14 +669,26 @@ export default function TerminalMap({
                       toggleExpanded(id);
                     }
                   }}
+                  // The card's head button (MapCard) is its keyboard handle:
+                  // Enter is a click, which expands; Space selects.
+                  onKeyDown={(e) => {
+                    if (e.key !== ' ' || !(e.target as HTMLElement).classList.contains('map-card__head-btn')) return;
+                    e.preventDefault();
+                    if (!e.repeat) toggleSelection(id);
+                  }}
+                  // Firefox clicks a button on Space's keyup even when its keydown was prevented.
+                  onKeyUp={(e) => {
+                    if (e.key === ' ' && (e.target as HTMLElement).classList.contains('map-card__head-btn')) e.preventDefault();
+                  }}
                   onContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY, targetId: id });
                   }}
                   style={{
                     position: 'absolute',
-                    left: pos.x - w / 2,
-                    top: pos.y - h / 2,
+                    left: 0,
+                    top: 0,
+                    transform: `translate(${pos.x - w / 2}px, ${pos.y - h / 2}px)`,
                     width: w,
                     // Animation #2: when expand/collapse reflows the layout, each
                     // card slides to its new position instead of jumping. Keep
@@ -682,7 +697,7 @@ export default function TerminalMap({
                     // Hover/expand raises above neighbors so content reads
                     // cleanly during animated reflows.
                     zIndex: exp ? 'var(--z-sticky)' : hoveredId === id ? 'var(--z-raised)' : undefined,
-                    transition: 'top var(--t-enter) cubic-bezier(.4,0,.2,1), left var(--t-enter) cubic-bezier(.4,0,.2,1)',
+                    transition: 'transform var(--t-enter) cubic-bezier(.4,0,.2,1)',
                     outline: sel ? '2px solid var(--term-select)' : undefined,
                     outlineOffset: 2,
                   }}
@@ -785,13 +800,15 @@ function ZoomPill({ camera }: { camera: MapCameraController }) {
   const btn = 't-icon-btn';
   const btnStyle: React.CSSProperties = {
     width: 28, height: 28, display: 'grid', placeItems: 'center',
-    fontSize: 'var(--fs-xl)', fontFamily: 'var(--message-code-font)', color: 'var(--term-mid)',
+    fontSize: 'var(--fs-xl)', fontFamily: 'var(--message-code-font)',
   };
   return (
     <div
       style={{
         position: 'absolute', right: 18, bottom: 18,
         display: 'flex', alignItems: 'center',
+        // − and + take this ink at rest; set on them, it would beat .t-icon-btn's hover ink (ST-05).
+        color: 'var(--term-mid)',
         background: GLASS_BG,
         backdropFilter: 'blur(12px)',
         WebkitBackdropFilter: 'blur(12px)',
@@ -808,6 +825,7 @@ function ZoomPill({ camera }: { camera: MapCameraController }) {
       <button
         type="button"
         className={`t-text-btn${auto ? ' is-active' : ''}`}
+        aria-pressed={auto}
         onClick={onFit}
         title="fit map to the visible area"
         style={{
@@ -837,16 +855,6 @@ export function MapSelectionBar({
   onExport: () => void;
   onClear: () => void;
 }) {
-  const actionStyle = (enabled: boolean): React.CSSProperties => ({
-    border: '1px solid color-mix(in srgb, var(--term-surface) 42%, transparent)',
-    background: enabled ? 'var(--term-surface)' : 'transparent',
-    color: enabled ? 'var(--term-fg)' : 'var(--term-faint)',
-    padding: '3px 9px',
-    font: 'inherit',
-    fontWeight: 600,
-    cursor: enabled ? 'pointer' : 'not-allowed',
-    opacity: enabled ? 1 : 0.62,
-  });
   const { canWeave: canMerge, canDigest } = state;
   const digestTitle = state.digestReason ?? 'Create a digest from the selected nodes.';
   const mergeTitle = state.weaveReason ?? 'Merge selected nodes into a new thread.';
@@ -895,18 +903,18 @@ export function MapSelectionBar({
       >
         {names.join(', ')}
       </span>
-      <button type="button" disabled={!canMerge} title={mergeTitle} onClick={onMerge} style={actionStyle(canMerge)}>
+      <button type="button" disabled={!canMerge} title={mergeTitle} onClick={onMerge} className="map-selection__action">
         Merge
       </button>
       {onDigest && (
-        <button type="button" disabled={!canDigest} title={digestTitle} onClick={onDigest} style={actionStyle(canDigest)}>
+        <button type="button" disabled={!canDigest} title={digestTitle} onClick={onDigest} className="map-selection__action">
           Digest
         </button>
       )}
-      <button type="button" onClick={onExport} style={actionStyle(true)}>
+      <button type="button" onClick={onExport} className="map-selection__action">
         Export
       </button>
-      <button type="button" onClick={onClear} style={actionStyle(true)}>
+      <button type="button" onClick={onClear} className="map-selection__action">
         Clear
       </button>
     </div>
@@ -925,6 +933,15 @@ function MapFrame({
   view: MapView;
   setView: (view: MapView) => void;
 }) {
+  const tabRefs = useRef<Partial<Record<MapView, HTMLButtonElement | null>>>({});
+  // ← and → select the view beside the focused tab, Home and End the ends (ST-20).
+  const onTabKeyDown = (event: React.KeyboardEvent, from: MapView) => {
+    const next = tabStripKeyTarget(event, MAP_VIEWS.indexOf(from), MAP_VIEWS.length);
+    if (next === null) return;
+    event.preventDefault();
+    setView(MAP_VIEWS[next]);
+    tabRefs.current[MAP_VIEWS[next]]?.focus();
+  };
   return (
     <div
       style={{
@@ -959,21 +976,14 @@ function MapFrame({
           return (
             <button
               key={v}
+              ref={(el) => { tabRefs.current[v] = el; }}
               type="button"
               role="tab"
               aria-selected={active}
+              tabIndex={active ? 0 : -1}
               onClick={() => setView(v)}
-              style={{
-                border: 'none',
-                padding: '4px 14px',
-                fontFamily: 'var(--ui-font)',
-                fontSize: 'var(--fs-md)',
-                color: active ? 'var(--term-bg)' : 'var(--term-mid)',
-                background: active ? 'var(--term-fg)' : 'transparent',
-                fontWeight: active ? 600 : 450,
-                cursor: active ? 'default' : 'pointer',
-                transition: 'background var(--t-enter)',
-              }}
+              onKeyDown={(event) => onTabKeyDown(event, v)}
+              className="map-view-tab"
             >
               {MAP_VIEW_LABELS[v]}
             </button>

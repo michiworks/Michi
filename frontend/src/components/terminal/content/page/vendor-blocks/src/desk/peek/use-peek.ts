@@ -1,10 +1,10 @@
 // Michi shim for agent-desk src/desk/peek/use-peek.ts: only what the contents block (Toc.tsx) calls. Blocks are
-// found by Michi's own markers (BlockFrame's data-block-id, a Markdown piece's data-segment-of) and lit with the
-// page's data-flash, whose animation runs --t-slow (michiPage.css).
+// found by Michi's own markers (BlockFrame's data-block-id, a Markdown piece's data-segment-of) and lit as the Pages
+// outline lights them: a glide there (TR-27) and data-reveal-flash, which holds its tint while the block arrives (MO-24).
 import {parseSegmentId} from '../../../shared/markdown-segments';
 import {reveal} from '../blocks/catalog/text/outline';
-import {DUR} from '../../../../../../../../motion/tokens';
-const MICHI_BLOCK_FLASH_MS = Math.round(DUR.slow*1000);
+import {smoothScrollBehavior} from '../../../../../../../../hooks/useReducedMotion';
+import {flashRevealed} from '../../../../../../../../state/pages/revealPageTarget';
 
 /** What block `id` is drawn as on this page: its shell, else the pieces Michi cut its Markdown into. Desk cuts only top-level Markdown
  * (outline.ts names a heading inside a container by its whole block); Michi cuts it in containers too, so such a heading lands on its
@@ -26,12 +26,19 @@ function unfold(el:HTMLElement){
 /** The rest of what `flashBlock` lights with a block handed over by whenRevealed. */
 const together=new WeakMap<HTMLElement,HTMLElement[]>();
 
-/** Scrolls to a block and lights it up for a moment; returns what puts it out early. */
+/** What puts out the last pick's flash, so a new pick lights only its own block. */
+let lastOut:(()=>void)|null=null;
+/** Glides to a block (at once under reduced motion) and lights it up for a moment, putting out the one lit before; returns what puts
+ * it out early, which does nothing once a newer pick has come. The flash is the one revealPageTarget gives a located block, timer
+ * included, so a second pick on the same block, or a reveal from elsewhere landing on it, starts its flash again. */
 export function flashBlock(el:HTMLElement){
+ lastOut?.();
  const lit=together.get(el)??[el];together.delete(el);
- el.scrollIntoView?.({block:'center'});for(const e of lit)e.setAttribute('data-flash','');
- const timer=setTimeout(()=>{for(const e of lit)e.removeAttribute('data-flash');},MICHI_BLOCK_FLASH_MS);
- return()=>{clearTimeout(timer);for(const e of lit)e.removeAttribute('data-flash');};
+ el.scrollIntoView?.({behavior:smoothScrollBehavior(),block:'center'});
+ const ends=lit.map(flashRevealed);
+ const out=()=>{if(lastOut!==out)return;lastOut=null;for(const end of ends)end();};
+ lastOut=out;
+ return out;
 }
 /** Hands over block `id` once it is drawn, opening the toggles around it and asking a tab that holds it to show (outline.ts reveal), looking
  * again for a few frames; `missing` runs when it never shows. Returns what stops the looking. */

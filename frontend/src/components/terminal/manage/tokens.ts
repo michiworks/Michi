@@ -1,12 +1,21 @@
-// Feature-scoped semantic colors for the WorkspaceManage page.
-// Borrowed verbatim from the bone palette in the design handoff.
-// These DO NOT enter the global token system.
+// File-type badges of the WorkspaceManage resource list (ContextList). Each
+// type family takes a palette text token on that hue's opaque soft fill
+// (TK-35), so a badge follows the palette and its label reads at 4.5:1 or
+// more in every palette, whatever the row's hover or selection fill. A new
+// type joins one of these families.
 
-export const MANAGE_COLORS = {
-  // Link/URL badge color. Shared here so ArtifactsDrawer + ContextList stop
-  // inlining the same '#0b6cb6' literal in two places.
-  link: '#0b6cb6',
-} as const;
+/** A badge's label colour and its fill. */
+interface BadgeTone {
+  text: string;
+  fill: string;
+}
+
+const PLAIN: BadgeTone = { text: 'var(--term-mid)', fill: 'var(--term-alt2)' };
+const DANGER: BadgeTone = { text: 'var(--term-danger-text)', fill: 'var(--term-danger-f)' };
+const DIGEST: BadgeTone = { text: 'var(--term-digest)', fill: 'var(--term-digest-f)' };
+const ACCENT: BadgeTone = { text: 'var(--term-accent-text)', fill: 'var(--term-accent-f)' };
+const WAITING: BadgeTone = { text: 'var(--term-waiting-text)', fill: 'var(--term-waiting-f)' };
+const MAUVE: BadgeTone = { text: 'var(--term-mauve)', fill: 'var(--term-mauve-f)' };
 
 const FILETYPE_LABEL: Record<string, string> = {
   md: 'md', mdx: 'md', markdown: 'md',
@@ -21,24 +30,23 @@ const FILETYPE_LABEL: Record<string, string> = {
   html: 'html', htm: 'html', xml: 'html',
 };
 
-const FILETYPE_COLOR: Record<string, string> = {
-  md: '#5a544a', mdx: '#5a544a', markdown: '#5a544a',
-  pdf: '#a8261a',
-  csv: '#2f6b4e', tsv: '#2f6b4e', xls: '#2f6b4e', xlsx: '#2f6b4e',
-  ts: '#0b6cb6', tsx: '#0b6cb6',
-  js: '#a08300', jsx: '#a08300',
-  py: '#2f6b4e', rs: '#a8261a', go: '#0b6cb6', rb: '#a8261a', sh: '#5a544a',
-  png: '#6d4aa8', jpg: '#6d4aa8', jpeg: '#6d4aa8', gif: '#6d4aa8',
-  webp: '#6d4aa8', svg: '#6d4aa8', heic: '#6d4aa8', avif: '#6d4aa8',
-  html: '#a8451f', htm: '#a8451f', xml: '#a8451f',
-  json: '#a08300', yaml: '#a08300', yml: '#a08300', toml: '#a08300',
+/** Types not listed here (txt, doc, unknown) are plain. */
+const FILETYPE_TONE: Record<string, BadgeTone> = {
+  md: PLAIN, mdx: PLAIN, markdown: PLAIN, sh: PLAIN,
+  pdf: DANGER, rs: DANGER, rb: DANGER, html: DANGER, htm: DANGER, xml: DANGER,
+  csv: DIGEST, tsv: DIGEST, xls: DIGEST, xlsx: DIGEST, py: DIGEST,
+  ts: ACCENT, tsx: ACCENT, go: ACCENT,
+  js: WAITING, jsx: WAITING, json: WAITING, yaml: WAITING, yml: WAITING, toml: WAITING,
+  png: MAUVE, jpg: MAUVE, jpeg: MAUVE, gif: MAUVE, webp: MAUVE, svg: MAUVE, heic: MAUVE, avif: MAUVE,
 };
 
-export interface ManageFileType {
+export interface ManageFileType extends BadgeTone {
   label: string;
-  color: string;
   ext: string;
 }
+
+/** A link's badge, in the accent family with ts, tsx and go. */
+export const MANAGE_LINK_TYPE: ManageFileType = { label: 'url', ext: '', ...ACCENT };
 
 export function manageFileType(filePathOrName: string): ManageFileType {
   const m = filePathOrName.toLowerCase().match(/\.([^./\\]+)$/);
@@ -46,6 +54,6 @@ export function manageFileType(filePathOrName: string): ManageFileType {
   return {
     ext,
     label: FILETYPE_LABEL[ext] ?? (ext.slice(0, 3) || '·'),
-    color: FILETYPE_COLOR[ext] ?? '#5a544a',
+    ...(FILETYPE_TONE[ext] ?? PLAIN),
   };
 }

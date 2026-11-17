@@ -10,16 +10,18 @@ type Draft = { text: string; baseRevision: number };
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : 'Could not save layout preferences.';
 
 /** One page-local document. Background reads never replace a draft or move focus. */
-export function LayoutPreferencesEditor({ pageId, backendConnectionId, readOnly = false }: {
+export function LayoutPreferencesEditor({ pageId, backendConnectionId, readOnly = false, inputRef }: {
   pageId: string; backendConnectionId: string; readOnly?: boolean;
+  /** The document's field, once its first read has answered. */
+  inputRef?: React.Ref<HTMLTextAreaElement>;
 }) {
   // Key the inner editor by page and connection so late reads/writes from a page
   // that was closed can never change a different page's draft.
-  return <PreferencesDocument key={`${backendConnectionId}:${pageId}`} pageId={pageId} backendConnectionId={backendConnectionId} readOnly={readOnly} />;
+  return <PreferencesDocument key={`${backendConnectionId}:${pageId}`} pageId={pageId} backendConnectionId={backendConnectionId} readOnly={readOnly} inputRef={inputRef} />;
 }
 
-function PreferencesDocument({ pageId, backendConnectionId, readOnly }: {
-  pageId: string; backendConnectionId: string; readOnly: boolean;
+function PreferencesDocument({ pageId, backendConnectionId, readOnly, inputRef }: {
+  pageId: string; backendConnectionId: string; readOnly: boolean; inputRef?: React.Ref<HTMLTextAreaElement>;
 }) {
   const [document, setDocument] = React.useState<PageLayoutPreferences | null>(null);
   const [draft, setDraft] = React.useState<Draft | null>(null);
@@ -92,7 +94,7 @@ function PreferencesDocument({ pageId, backendConnectionId, readOnly }: {
     {!document && !readError && <p role="status">Loading preferences…</p>}
     {readError && <p role="alert">{readError} <Button size="sm" variant="ghost" onClick={() => void refresh()}>Retry preferences</Button></p>}
     {document && <>
-      <textarea className="layout-preferences-editor__input" aria-label="Layout preferences" aria-describedby={hintId}
+      <textarea ref={inputRef} className="layout-preferences-editor__input" aria-label="Layout preferences" aria-describedby={hintId}
         rows={6} maxLength={PAGE_LAYOUT_PREFERENCES_LIMIT} readOnly={readOnly}
         placeholder={'For example:\nPut risks first\nKeep the summary short\nShow decisions that need my attention at the top'}
         value={draft?.text ?? document.text}

@@ -1,10 +1,11 @@
 import type { RemoteConnectionDiagnostic } from 'michi-shared';
 import { RemoteDiagnostics } from './RemoteDiagnostics';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { getElectron } from '../lib/electronBridge';
 import { appendFolders, FOLDER_OVERLAP_MESSAGE, folderConflict, MAX_WORKSPACE_FOLDERS, pathBasename } from '../lib/workspaceFolders';
 import type { FolderEntry } from '../state/chatTypes';
 import { ModalShell } from './ui/ModalShell';
+import { CloseIcon, FolderIcon, strokeFor } from './terminal/icons';
 import { Button } from './ui/controls';
 import { RemoteRuntimeSummary } from './RemoteRuntimeSummary';
 import { RemoteDesktopConnect } from './RemoteDesktopConnect';
@@ -18,6 +19,7 @@ import {
   type BackendConnectionSummary,
 } from '../config/backendConnections';
 import { isImeComposing } from '../lib/ime';
+import './NewWorkspaceDialog.css';
 
 interface NewWorkspaceDialogProps {
   open: boolean;
@@ -31,6 +33,8 @@ interface NewWorkspaceDialogProps {
 type DirectoryPicker = (opts?: { mode?: 'read' | 'readwrite' }) => Promise<{ name: string }>;
 
 // Shared styles
+const PROMPT_FRAME = 't-field-frame t-field-frame--row';
+
 const PROMPT_ROW: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -59,7 +63,6 @@ const PROMPT_INPUT: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
   border: 'none',
-  outline: 'none',
   background: 'transparent',
   fontFamily: 'var(--ui-font)',
   fontSize: 'var(--fs-xl)',
@@ -81,6 +84,22 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
   const [remoteRuntimes, setRemoteRuntimes] = useState<string[] | null>(null);
   const [remoteWarnings, setRemoteWarnings] = useState<string[]>([]);
   const fallbackInputRef = useRef<HTMLInputElement>(null);
+  const remoteCwdRef = useRef<HTMLInputElement>(null);
+  const folderListRef = useRef<HTMLDivElement>(null);
+  const addFoldersRef = useRef<HTMLButtonElement>(null);
+  const errorId = useId();
+  // Connect, Use this folder and a folder's × unmount while focused. The next
+  // render hands focus on: to the remote folder field, or to the neighbouring
+  // folder's × (the add button once none is left).
+  const [refocus, setRefocus] = useState<{ to: 'remote-folder' } | { to: 'folder'; index: number } | null>(null);
+  useEffect(() => {
+    if (!refocus) return;
+    setRefocus(null);
+    if (document.activeElement !== document.body) return;
+    if (refocus.to === 'remote-folder') { remoteCwdRef.current?.focus(); return; }
+    const removes = folderListRef.current?.querySelectorAll<HTMLElement>('button[aria-label="Remove folder"]');
+    (removes?.[Math.min(refocus.index, removes.length - 1)] ?? addFoldersRef.current)?.focus();
+  }, [refocus]);
   // Counts closings. The closed dialog keeps what it showed alive while it
   // fades out, so a remote connection finishing then must not land in the
   // next opening.
@@ -183,6 +202,9 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
   };
 
   const removeFolder = (id: string) => {
+    if (folderListRef.current?.contains(document.activeElement)) {
+      setRefocus({ to: 'folder', index: folders.findIndex((f) => f.id === id) });
+    }
     setFolders((prev) => prev.filter((f) => f.id !== id));
   };
 
@@ -247,7 +269,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
   return (
     <ModalShell open={open} onClose={onClose} title="New workspace" titleGlyph="▸" width={480}>
       {/* Name row */}
-      <div style={PROMPT_ROW}>
+      <div className={PROMPT_FRAME} style={PROMPT_ROW}>
         <span style={PROMPT_GLYPH} aria-hidden>›_</span>
         <span style={PROMPT_LABEL}>name</span>
         <input
@@ -267,7 +289,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
         />
       </div>
 
-      <div style={PROMPT_ROW}>
+      <div className={PROMPT_FRAME} style={PROMPT_ROW}>
         <span style={PROMPT_GLYPH} aria-hidden>›_</span>
         <span style={PROMPT_LABEL}>machine</span>
         <select
@@ -308,6 +330,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
         setConnections(getKnownBackendConnections());
         setConnectionId(connection.id); setAddingRemote(false); setBrowsingRemote(true); setRemoteCwd('');
         setRemoteWarnings(warnings); setRemoteRuntimes(runtimes); setRemoteDiagnostic(diagnostic);
+        setRefocus({ to: 'remote-folder' });
         window.dispatchEvent(new CustomEvent('michi:backend-connections-changed'));
       }} />}
       {!addingRemote && remoteRuntimes && <div style={{ padding: '0 14px' }}><RemoteRuntimeSummary runtimes={remoteRuntimes} /></div>}
@@ -322,21 +345,24 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
       {/* Folders section */}
       {!addingRemote && (isRemote ? (
         <div style={{ borderBottom: '1px solid var(--term-line)', background: 'var(--term-surface)' }}>
-          <div style={PROMPT_ROW}>
+          <div className={PROMPT_FRAME} style={PROMPT_ROW}>
             <span style={PROMPT_GLYPH} aria-hidden>›_</span>
             <span style={PROMPT_LABEL}>folder</span>
             <input
+              ref={remoteCwdRef}
               type="text"
               value={remoteCwd}
               onChange={(e) => { setRemoteCwd(e.target.value); setError(null); }}
               placeholder="/home/you/project"
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? errorId : undefined}
               style={{ ...PROMPT_INPUT, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-lg)' }}
             />
             {connections.find(c => c.id === connectionId)?.transport === 'ssh' && <Button variant="ghost"
               onClick={() => setBrowsingRemote(value => !value)}>Browse</Button>}
           </div>
           {browsingRemote && <RemoteFolderPicker key={connectionId} connectionId={connectionId}
-            onSelect={path => { if (!stillOpen()) return; setRemoteCwd(path); setBrowsingRemote(false); setError(null); }} />}
+            onSelect={path => { if (!stillOpen()) return; setRemoteCwd(path); setBrowsingRemote(false); setError(null); setRefocus({ to: 'remote-folder' }); }} />}
         </div>
       ) : <div style={{ borderBottom: '1px solid var(--term-line)', background: 'var(--term-surface)' }}>
         <div style={{ padding: '10px 14px 6px', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -347,8 +373,10 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
         {!hasFolders ? (
           /* Empty state — big clickable area */
           <button
+            ref={addFoldersRef}
             type="button"
             onClick={() => { void addFolder(); }}
+            className="new-workspace-add-folders"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -357,22 +385,10 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
               width: 'calc(100% - 28px)',
               margin: '0 14px 12px',
               padding: '18px 14px',
-              border: '1.5px dashed var(--term-line)',
               borderRadius: 'var(--ui-radius)',
-              background: 'transparent',
-              color: 'var(--term-mid)',
               fontFamily: 'var(--ui-font)',
               fontSize: 'var(--fs-lg)',
               cursor: 'pointer',
-              transition: 'border-color var(--t-soft), color var(--t-soft)',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.borderColor = 'var(--term-accent)';
-              e.currentTarget.style.color = 'var(--term-fg)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.borderColor = 'var(--term-line)';
-              e.currentTarget.style.color = 'var(--term-mid)';
             }}
           >
             <FolderPlusIcon />
@@ -380,7 +396,7 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
           </button>
         ) : (
           /* Folder list */
-          <div style={{ padding: '0 14px 8px' }}>
+          <div ref={folderListRef} style={{ padding: '0 14px 8px' }}>
             {folders.map((f, idx) => (
               <FolderRow
                 key={f.id}
@@ -391,25 +407,9 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
               />
             ))}
             {folders.length < MAX_WORKSPACE_FOLDERS && (
-              <button
-                type="button"
-                onClick={() => { void addFolder(); }}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  marginTop: 6,
-                  padding: '5px 8px',
-                  border: 'none',
-                  background: 'transparent',
-                  color: 'var(--term-mid)',
-                  fontFamily: 'var(--ui-font)',
-                  fontSize: 'var(--fs-md)',
-                  cursor: 'pointer',
-                }}
-              >
+              <Button variant="ghost" onClick={() => { void addFolder(); }} style={{ marginTop: 6 }}>
                 <span style={{ fontSize: 'var(--fs-lg)' }}>+</span> Add folder
-              </button>
+              </Button>
             )}
           </div>
         )}
@@ -417,6 +417,8 @@ export default function NewWorkspaceDialog({ open, onClose, onCreate, onSkip }: 
 
       {error && (
         <div
+          id={errorId}
+          role="alert"
           style={{
             padding: '8px 14px 0',
             fontSize: 'var(--fs-md)',
@@ -473,25 +475,20 @@ interface FolderRowProps {
 }
 
 function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProps) {
-  const [hovered, setHovered] = useState(false);
   // Its buttons are hover reveals: shown on the row's hover or focus too, so
   // the keyboard reaches them.
   return (
     <div
-      className="t-reveal-host"
+      className="t-reveal-host new-workspace-folder"
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 8,
         padding: '6px 8px',
         borderRadius: 'var(--ui-radius)',
-        background: hovered ? 'var(--term-alt)' : 'transparent',
-        transition: 'background var(--t-soft)',
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
     >
-      <FolderIcon />
+      <FolderIcon style={{ flexShrink: 0, color: 'var(--term-muted)' }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -527,7 +524,7 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
             fontSize: 'var(--fs-xs)',
             fontFamily: 'var(--ui-font)',
             fontWeight: 600,
-            color: 'var(--term-accent)',
+            color: 'var(--term-accent-text)',
             background: 'color-mix(in srgb, var(--term-accent) 12%, transparent)',
             padding: '2px 6px',
             borderRadius: 'var(--ui-radius-sm)',
@@ -572,14 +569,13 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
           border: 'none',
           color: 'var(--term-fg)',
           cursor: 'pointer',
-          fontSize: 'var(--fs-xl)',
-          lineHeight: 1,
+          display: 'inline-flex',
           padding: '2px 4px',
           flexShrink: 0,
           transition: 'opacity var(--t-soft)',
         }}
       >
-        ×
+        <CloseIcon aria-hidden="true" />
       </button>
     </div>
   );
@@ -587,6 +583,7 @@ function FolderRow({ folder, isPrimary, onRemove, onMakePrimary }: FolderRowProp
 
 /* ---------- Icons ---------- */
 
+/** A folder with a plus: icons.tsx has no folder-add drawing. */
 function FolderPlusIcon() {
   return (
     <svg
@@ -595,28 +592,11 @@ function FolderPlusIcon() {
       viewBox="0 0 16 16"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.3"
+      strokeWidth={strokeFor(16)}
       strokeLinejoin="round"
     >
       <path d="M2 4h4l1.5 1.5H14v8H2z" />
       <path d="M8 7.5v4M6 9.5h4" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function FolderIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="var(--term-muted)"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-    >
-      <path d="M2 4h4l1.5 1.5H14v8H2z" />
     </svg>
   );
 }

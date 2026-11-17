@@ -4,6 +4,7 @@ import type { MichiPageBlock } from 'michi-shared';
 import { MichiBlock } from './MichiBlock';
 import type { MichiBlockCtx } from './blockTypes';
 import { planScheduleModel } from './michiPageModel';
+import { isShortToken, keepsOneLine } from './blocks/tables';
 import { isPrivateImageHost, loadableImageUrl } from '../../../../lib/pictureAddress';
 
 // Markdown rendering is MarkdownContent's own concern; the block only picks its features.
@@ -32,6 +33,16 @@ describe('compare', () => {
     expect(picked.disabled).toBe(true);
     expect(picked.closest('li')?.getAttribute('data-picked')).toBe('true');
     expect(screen.getByRole('button', { name: 'Pick this' })).toHaveProperty('disabled', false);
+  });
+
+  it('offers the pick as a button and marks the one taken with a badge, not a word of its own', () => {
+    draw(block);
+    // Pick this is Michi's own button, not a link: the card's one thing to do looks like something to press.
+    expect(screen.getAllByRole('button', { name: 'Pick this' })[0].className).toMatch(/\bui-btn\b/);
+    expect(screen.getByText('Leaning').className).toBe('michi-doc-option__tag');
+    const { container } = draw({ ...block, picked: 1 });
+    const badge = [...container.querySelectorAll('.michi-doc-option__tag')].find((el) => el.textContent === 'Picked');
+    expect(badge?.getAttribute('data-tone')).toBe('info');
   });
 });
 
@@ -187,6 +198,130 @@ describe('you may have forgotten', () => {
     const [shipped, unfinished] = [...container.querySelectorAll('.michi-doc-forgot__item')];
     expect(shipped.textContent).toMatch(/^Orbit layoutshipped (2026-)?09-28Map → Layout → Orbit$/);
     expect(unfinished.textContent).toBe('Streamdown rendererhalf doneCode highlighting not moved over');
+    // What shipped shows the day, not the word: the dot already says it, and a screen reader hears both.
+    expect(shipped.querySelector('.michi-doc-forgot__meta .sr-only')?.textContent).toBe('shipped ');
+    expect(shipped.querySelector('.michi-doc-forgot__meta time')?.getAttribute('dateTime')).toBe('2026-09-28');
+    // What stopped halfway has no day, so its words stay on the row for everyone.
+    expect(unfinished.querySelector('.michi-doc-forgot__meta')?.className).toBe('michi-doc-forgot__meta');
+    expect(unfinished.querySelector('.michi-doc-forgot__meta .sr-only')).toBeNull();
+    expect(unfinished.querySelector('.michi-doc-forgot__meta time')).toBeNull();
+  });
+});
+
+describe('callout', () => {
+  it('leads a toned callout with its tone’s mark, out of the screen reader’s way', () => {
+    const { container } = draw({ type: 'callout', tone: 'warn', title: 'Blockers', text: 'S3 waits.' });
+    const callout = container.querySelector('.michi-doc-callout')!;
+    expect(callout.querySelector('.michi-doc-callout__title')?.textContent).toBe('Blockers');
+    const mark = callout.querySelector('.michi-doc-callout__icon');
+    expect(mark?.getAttribute('aria-hidden')).toBe('true');
+    expect(mark?.querySelector('svg')).toBeTruthy();
+    expect(callout.querySelector('.michi-doc-callout__body')?.textContent).toBe('Warning: BlockersS3 waits.');
+  });
+
+  it('draws a plain callout with neither a mark nor a title', () => {
+    const { container } = draw({ type: 'callout', text: 'Just a note.' });
+    const callout = container.querySelector('.michi-doc-callout')!;
+    expect(callout.querySelector('.michi-doc-callout__icon')).toBeNull();
+    expect(callout.querySelector('.michi-doc-callout__title')).toBeNull();
+  });
+});
+
+describe('status', () => {
+  it('puts the verdict before the summary it stands for', () => {
+    const { container } = draw({ type: 'status', label: 'At risk', tone: 'warn', summary: 'Merging lags the code.' });
+    const badge = container.querySelector('.michi-doc-status__badge')!;
+    const summary = container.querySelector('.michi-doc-status__summary')!;
+    expect(badge.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('next steps', () => {
+  it('says who acts in a quiet word on the row, not in a tag', () => {
+    const { container } = draw({ type: 'next-steps', items: [
+      { who: 'user', text: 'Choose the launch date', unblocks: 'Invitations' },
+      { who: 'agent', text: 'Prepare the release notes' },
+    ] });
+    const [mine, agents] = [...container.querySelectorAll('.michi-doc-steps__item')];
+    expect(container.querySelector('.michi-tag')).toBeNull();
+    expect(mine.querySelector('.michi-doc-steps__who')?.textContent).toBe('You');
+    expect(agents.querySelector('.michi-doc-steps__who')?.textContent).toBe('Agent');
+    // Everyone reads what a step unblocks; no glyph stands in for the word.
+    expect(mine.querySelector('.michi-doc-steps__unblocks')?.textContent).toBe('Unblocks Invitations');
+    expect(mine.querySelector('.michi-doc-steps__unblocks .sr-only')).toBeNull();
+    expect(agents.querySelector('.michi-doc-steps__unblocks')).toBeNull();
+  });
+});
+
+describe('table cells', () => {
+  it('counts one short word (an ID, a branch, a date) as a token; sentences and long words are not', () => {
+    for (const word of ['T123456789', 'CR-123456789', 'dev', '2026-10-24', '工单', ' T1234 ']) expect(isShortToken(word), word).toBe(true);
+    for (const text of ['', '  ', 'a b', '完善示例项目的错误处理和恢复流程', 'ExampleDashboardRefreshWorker', '还没处理的大块占用还没处理的大块占用']) expect(isShortToken(text), text).toBe(false);
+  });
+
+  it('measures a word by the room it takes: 24 columns of it, counting a full-width character as two', () => {
+    expect(isShortToken('x'.repeat(24))).toBe(true);
+    expect(isShortToken('x'.repeat(25))).toBe(false);
+    expect(isShortToken('占'.repeat(12))).toBe(true);
+    expect(isShortToken('占'.repeat(13))).toBe(false);
+    // A URL is long enough to break; an emoji and a character outside the BMP are measured, not mistaken for two.
+    expect(isShortToken('https://docs.example.com/projects/aurora/')).toBe(false);
+    expect(isShortToken('🚀')).toBe(true);
+    expect(isShortToken('𠮷野家')).toBe(true);
+  });
+
+  it('keeps a short phrase (a state, a name) on one line, but not a sentence or four words', () => {
+    for (const text of ['In review', 'Not started', 'Waiting on you', 'Ann Lee', 'Nov 3, 2026', 'T1234', '进行中']) expect(keepsOneLine(text), text).toBe(true);
+    for (const text of ['', '  ', 'Rollback script fails at step 3', 'a b c d', '完善示例项目的错误处理和恢复流程', 'Waiting on the vendor']) expect(keepsOneLine(text), text).toBe(false);
+  });
+
+  it('gives a short state its room beside a long summary', () => {
+    const { container } = draw({ type: 'table', title: 'Open tickets', columns: ['Summary', 'State'], rows: [['The installer stops at the license step when the system language is not English', 'In review']] });
+    const [summary, state] = [...container.querySelectorAll('td')];
+    expect(summary.hasAttribute('data-one-line')).toBe(false);
+    expect(state.hasAttribute('data-one-line')).toBe(true);
+  });
+
+  it('lines a column of figures up at its right edge, its header with it', () => {
+    const { container } = draw({ type: 'table', title: 'Builds', columns: ['Build', 'Size', 'Share', 'Note'], rows: [
+      ['2.4.0-rc3', '148 MB', '12%', 'Nov 2'],
+      ['2.4.0-rc2', '1,139 MB', '', 'Signed'],
+    ] });
+    const ends = (sel: string) => [...container.querySelectorAll(sel)].map((el) => el.getAttribute('data-align'));
+    expect(ends('th')).toEqual([null, 'end', 'end', null]);
+    expect(ends('tbody tr:first-child td')).toEqual([null, 'end', 'end', null]);
+  });
+
+  it('leaves a column of versions and one of dates on the left, figures as they look', () => {
+    const { container } = draw({ type: 'table', title: 'Builds', columns: ['Version', 'Cut', 'Size'], rows: [
+      ['2.4.0', '5 Jan', '148 MB'],
+      ['2.10.1', '12 Feb', '1,139 MB'],
+    ] });
+    // A version holds two dots and a date a month: neither is a quantity to compare down the column.
+    expect([...container.querySelectorAll('th')].map((th) => th.getAttribute('data-align'))).toEqual([null, null, 'end']);
+  });
+
+  it("lines up a database's number and progress columns, not its text", () => {
+    const { container } = draw({ type: 'database', title: 'Runs', columns: [
+      { id: 'n', name: 'Name', type: 'text' }, { id: 'e', name: 'Effort', type: 'number' }, { id: 'p', name: 'Done', type: 'progress' },
+    ], rows: [{ values: { n: '42', e: 3, p: 0.5 } }] });
+    expect([...container.querySelectorAll('th')].map((th) => th.getAttribute('data-align'))).toEqual([null, 'end', 'end']);
+  });
+
+  it('keeps a ticket number whole in its cell and lets the sentence beside it wrap', () => {
+    const { container } = draw({ type: 'table', title: '工单进展', columns: ['工单', '问题'], rows: [['T123456789', 'Aurora staging 被示例告警挡住']] });
+    const [id, issue] = [...container.querySelectorAll('td')];
+    expect(id.hasAttribute('data-one-line')).toBe(true);
+    expect(issue.hasAttribute('data-one-line')).toBe(false);
+  });
+
+  it('leaves a cell the table draws itself (a link, a tick) to break as its own content needs', () => {
+    const { container } = draw({ type: 'database', title: 'Runs', columns: [
+      { id: 'u', name: 'Wiki', type: 'url' },
+      { id: 'ok', name: 'Signed off', type: 'checkbox' },
+    ], rows: [{ values: { u: 'https://docs.example.com/projects/aurora/', ok: true } }] });
+    expect(container.querySelector('td a')?.getAttribute('href')).toBe('https://docs.example.com/projects/aurora/');
+    for (const td of container.querySelectorAll('td')) expect(td.hasAttribute('data-one-line'), td.outerHTML).toBe(false);
   });
 });
 

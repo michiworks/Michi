@@ -5,6 +5,7 @@ import { activateAssistantConversation, fetchAssistantConversations } from '../.
 import { adoptCompanionAssistant as adoptAssistantInfo, useCompanionAssistant as useAssistantSnapshot } from '../../../state/companion/companionStore';
 import { useChatActions, useStructuralSelector } from '../../../state/chatStore';
 import { fetchWorkspaceStructure } from '../../../services/api/persistence';
+import { Button } from '../../ui/controls';
 
 /** Recent conversations live under Assistant; expanding loads five more from the durable history. */
 export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenAssistant(): void; visible?: boolean }) {
@@ -76,6 +77,7 @@ export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenA
   if (!visible) return null;
 
   return <nav className="spaces-assistant-history" aria-label="Assistant conversations" aria-busy={loading || switching !== null}>
+    {(loading || snap.status === 'idle' || snap.status === 'loading') && !history.items.length && <div className="area-side__note" role="status">Loading conversations…</div>}
     {history.items.map(item => <button type="button" key={item.nodeId} className="area-side__row spaces-assistant-history__row"
       title={item.title} aria-current={visible && item.nodeId === nodeId ? 'page' : undefined}
       disabled={switching !== null || (status === 'streaming' && item.nodeId !== nodeId)} onClick={() => { void open(item.nodeId); }}>
@@ -83,6 +85,6 @@ export function AssistantHistory({ onOpenAssistant, visible = false }: { onOpenA
       <time dateTime={new Date(item.updatedAt).toISOString()} title={formatMichiClock(item.updatedAt)}>{formatDay(localDay(new Date(item.updatedAt)))}</time>
     </button>)}
     {history.nextCursor && <button type="button" className="spaces-assistant-history__more" disabled={loading} onClick={() => { void more(); }}>{loading ? 'Loading…' : 'Show more'}</button>}
-    {error && <div className="area-side__note" role="alert">{error} <button type="button" onClick={() => { setRetry(value => value + 1); }}>Retry</button></div>}
+    {error && <div className="area-side__note" role="alert">{error} <Button variant="ghost" size="sm" onClick={() => { setRetry(value => value + 1); }}>Retry</Button></div>}
   </nav>;
 }

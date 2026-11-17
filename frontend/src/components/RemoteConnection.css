@@ -87,7 +87,7 @@ button.remote-machine__count {
 }
 button.remote-machine__count svg { color: var(--term-faint); transition: transform var(--t-soft) var(--t-ease); }
 button.remote-machine__count[aria-expanded='true'] svg { transform: rotate(90deg); }
-button.remote-machine__count:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+button.remote-machine__count:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 @media (hover: hover) and (pointer: fine) { button.remote-machine__count:hover { color: var(--term-fg); } }
 
 .remote-machine__status {
@@ -104,7 +104,7 @@ button.remote-machine__count:focus-visible { outline: var(--focus-ring); outline
 .remote-machine__dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-faint);
   flex-shrink: 0;
 }
@@ -127,8 +127,11 @@ button.remote-machine__count:focus-visible { outline: var(--focus-ring); outline
   color: var(--term-muted);
   cursor: pointer;
 }
-button.remote-machine__more:hover,
-button.remote-machine__more[aria-expanded='true'] { background: var(--term-alt); color: var(--term-fg); }
+@media (hover: hover) {
+  button.remote-machine__more:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+}
+button.remote-machine__more[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+button.remote-machine__more:not(:disabled):active { background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg)); color: var(--term-fg); }
 button.remote-machine__more:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 
 /* A machine Michi cannot reach: the conclusion and cause, Retry and Edit, then the log. */
@@ -148,7 +151,7 @@ button.remote-machine__more:focus-visible { outline: var(--focus-ring); outline-
 .remote-problem__actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .remote-problem__log { grid-column: 1 / -1; min-width: 0; color: var(--term-muted); font-size: var(--fs-sm); }
 .remote-problem__log > summary { width: fit-content; cursor: pointer; }
-.remote-problem__log > summary:focus-visible { outline: var(--focus-ring); outline-offset: 3px; }
+.remote-problem__log > summary:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .remote-problem__log > pre {
   max-height: 220px;
   margin: 6px 0 0;
@@ -229,7 +232,7 @@ button.remote-machine__more:focus-visible { outline: var(--focus-ring); outline-
 
 .remote-connect__help { margin-top: 12px; font-size: var(--fs-sm); color: var(--term-muted); }
 .remote-connect__help summary { cursor: pointer; width: fit-content; }
-.remote-connect__help summary:focus-visible { outline: var(--focus-ring); outline-offset: 3px; }
+.remote-connect__help summary:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .remote-connect__help p { margin: 8px 0 0; }
 .remote-connect code { font-family: var(--font-mono); font-size: inherit; }
 
@@ -296,7 +299,7 @@ button.remote-machine__more:focus-visible { outline: var(--focus-ring); outline-
 .remote-recovery-machine__diagnostics { margin: 14px 0 0 26px; }
 .remote-recovery-machine__diagnostics summary { width: fit-content; cursor: pointer; color: var(--term-mid); }
 .remote-recovery-machine__diagnostics summary:hover { color: var(--term-fg); }
-.remote-recovery-machine__diagnostics summary:focus-visible { outline: var(--focus-ring); outline-offset: 4px; border-radius: var(--ui-radius-sm); }
+.remote-recovery-machine__diagnostics summary:focus-visible { outline: var(--focus-ring); outline-offset: 1px; border-radius: var(--ui-radius-sm); }
 .remote-recovery-machine__error { margin: 12px 0 0; color: var(--term-mid); line-height: 1.6; overflow-wrap: anywhere; }
 .remote-recovery-machine .remote-diagnostic__actions { gap: 6px; }
 .remote-recovery-machine .remote-diagnostic__actions .ui-btn { font-size: var(--fs-sm); padding: 5px 8px; }

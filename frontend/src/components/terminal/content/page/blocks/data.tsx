@@ -1,10 +1,10 @@
-import React, { useEffect, useId, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import type { BlockProps } from '../blockTypes';
 import { isPlanSchedule, list, num, objects, pct, planActualModel, planScheduleModel, str, timelineWhen } from '../michiPageModel';
-import { ChevronRight, MessageSquare } from 'lucide-react';
-import { CheckIcon } from '../../../icons';
+import { ChatIcon, CheckIcon, ChevronRightIcon, CloseIcon } from '../../../icons';
 import { Button } from '../../../../ui/controls';
 import { useBlockSend } from '../vendor-blocks/src/desk/blocks/catalog/interactive/useBlockSend';
+import { SubmitFailedNote, SubmittedNote } from '../vendor-blocks/src/desk/blocks/catalog/interactive/SubmittedNote';
 import type { PageBlockWithSources } from '../vendor-blocks/shared/desk-blocks';
 import { BlockTitle } from './text';
 import { PageViewEntry } from '../PageViewContext';
@@ -19,7 +19,7 @@ export function MetricsBlock({ block }: BlockProps) {
         const hint = str(m.hint).trim() || str(m.note).trim();
         return (
           <div key={i} className="michi-doc-metric" data-tone={m.tone === 'warn' || m.tone === 'accent' ? m.tone : undefined}>
-            <dt className="michi-doc-caption">{str(m.label)}</dt>
+            <dt className="michi-doc-label">{str(m.label)}</dt>
             <dd className="michi-doc-metric__value">{m.action ? <PageViewEntry action={m.action}><span className="sr-only">{str(m.label)}: </span>{str(m.value)}</PageViewEntry> : str(m.value)}</dd>
             {hint && <dd className="michi-doc-metric__hint">{hint}</dd>}
           </div>
@@ -60,7 +60,7 @@ export function StatBlock({ block }: BlockProps) {
   const spark = list(block.spark).map(num).filter((n): n is number => n != null);
   return (
     <div className="michi-doc-metric" data-michi-block="stat" style={{ maxWidth: 280 }}>
-      <span className="michi-doc-caption">{str(block.label)}</span>
+      <span className="michi-doc-label">{str(block.label)}</span>
       <span className="michi-doc-metric__value" style={{ fontSize: 'var(--fs-5xl)' }}>{str(block.value)}</span>
       {delta && <span className="michi-doc-stat__delta" data-dir={dir}><span aria-hidden="true">{ARROWS[dir]}</span> {delta}</span>}
       {spark.length >= 2 && <Spark values={spark} />}
@@ -224,8 +224,8 @@ export function CompareBlock({ block, ctx }: BlockProps) {
             <li key={i} className="michi-doc-option" data-lean={lean || undefined} data-picked={chosen || undefined}>
               <span className="michi-doc-option__head">
                 <span className="michi-doc-option__name">{name}</span>
-                {chosen && <span className="michi-doc-option__tag">Picked</span>}
-                {lean && <span className="michi-doc-caption michi-doc-caption--accent">Leaning</span>}
+                {chosen && <span className="michi-doc-option__tag" data-tone="info">Picked</span>}
+                {lean && <span className="michi-doc-option__tag">Leaning</span>}
               </span>
               {value && <span className="michi-doc-option__value">{value}{unit && <small> {unit}</small>}</span>}
               {str(o.note).trim() && <span className="michi-doc-option__note">{str(o.note)}</span>}
@@ -235,8 +235,7 @@ export function CompareBlock({ block, ctx }: BlockProps) {
                   {cons.map((line, j) => <li key={`c${j}`} data-kind="con"><span className="sr-only">Con: </span>{line}</li>)}
                 </ul>
               )}
-              <button
-                type="button"
+              <Button
                 className="michi-doc-option__pick"
                 disabled={!pick || chosen}
                 aria-pressed={pick ? chosen : undefined}
@@ -244,7 +243,7 @@ export function CompareBlock({ block, ctx }: BlockProps) {
                 onClick={() => pick?.(block, { ...block, picked: i })}
               >
                 {chosen ? 'Picked' : 'Pick this'}
-              </button>
+              </Button>
             </li>
           );
         })}
@@ -302,7 +301,7 @@ export function ConflictBlock({ block, ctx }: BlockProps) {
             <span className="michi-doc-conflict__meta">
               {where}
               {when && (when.dateTime ? <time dateTime={when.dateTime}>{when.text}</time> : <span>{when.text}</span>)}
-              {kept && <span className="michi-doc-option__tag">{resolution === 'both' ? 'Both stand' : 'Kept'}</span>}
+              {kept && <span className="michi-doc-option__tag" data-tone="info">{resolution === 'both' ? 'Both stand' : 'Kept'}</span>}
             </span>
           </label>
         );
@@ -322,19 +321,32 @@ export function ConflictBlock({ block, ctx }: BlockProps) {
   );
 }
 
-/** Choosing sends only the question and answer the person can see. */
+/**
+ * Choosing sends only the question and answer the person can see. Where the
+ * host keeps submissions the pick is stored first, and a submitted choice
+ * shows it read-only.
+ */
 export function ChoiceBlock({ block, ctx }: BlockProps) {
   const question = str(block.question).trim();
   const options = list(block.options).map(str).filter((option) => option.trim());
-  const { available, locked, fire } = useBlockSend(block as PageBlockWithSources, ctx);
+  const { available, locked, fire, submit, submission, saving, saveFailed } = useBlockSend(block as PageBlockWithSources, ctx);
   const [picked, setPicked] = useState<number | null>(null);
-  const selected = (ctx.updateBlock ? null : picked) ?? (typeof block.selected === 'number' ? block.selected : -1);
-  return <fieldset className="michi-doc-choice" data-michi-block="choice" disabled={!available || locked}>
+  const stored = typeof submission?.value === 'number' ? submission.value : null;
+  const selected = stored ?? (ctx.updateBlock ? null : picked) ?? (typeof block.selected === 'number' ? block.selected : -1);
+  const choose = (index: number, option: string) => {
+    const prompt = `For “${question}” I pick: ${option}`;
+    const sent = (ok: boolean) => { if (!ok) return; if (ctx.updateBlock) ctx.updateBlock(block, { ...block, selected: index }); else setPicked(index); };
+    if (ctx.recordSubmission) void submit(index, prompt, question).then(sent);
+    else sent(fire(prompt, question));
+  };
+  return <fieldset className="michi-doc-choice" data-michi-block="choice" disabled={!available || locked || saving || !!submission}>
     <legend className="michi-doc-choice__q">{question}</legend>
     {options.map((option, index) => <button type="button" key={index} className="michi-doc-choice__option" aria-pressed={selected === index}
-      onClick={() => { if (fire(`For “${question}” I pick: ${option}`, question)) { if (ctx.updateBlock) ctx.updateBlock(block, { ...block, selected: index }); else setPicked(index); } }}>
+      onClick={() => choose(index, option)}>
       <span className="michi-doc-radio" aria-hidden="true" /><span>{option}</span>
     </button>)}
+    {submission && <SubmittedNote submission={submission} now={ctx.now} />}
+    {saveFailed && <SubmitFailedNote />}
   </fieldset>;
 }
 
@@ -346,10 +358,10 @@ export function ProsConsBlock({ block }: BlockProps) {
   const SideHead = title ? 'h4' : 'h3';
   const side = (kind: 'pro' | 'con', head: string, items: string[]) => items.length > 0 && (
     <div>
-      <SideHead className="michi-doc-caption">{head}</SideHead>
+      <SideHead className="michi-doc-label">{head}</SideHead>
       <ul>
         {items.map((t, i) => (
-          <li key={i}><span className="michi-doc-pc__mark" data-kind={kind} aria-hidden="true">{kind === 'pro' ? '✓' : '✗'}</span>{t}</li>
+          <li key={i}><span className="michi-doc-pc__mark" data-kind={kind} aria-hidden="true">{kind === 'pro' ? <CheckIcon /> : <CloseIcon />}</span>{t}</li>
         ))}
       </ul>
     </div>
@@ -366,24 +378,68 @@ export function ProsConsBlock({ block }: BlockProps) {
 }
 
 /**
+ * How long an item the person just ticked keeps its place, ticked and struck
+ * through, before it joins the done ones. A dwell, not motion (TK-32): the row
+ * then leaves in one frame, as every list edit does (TR-28).
+ */
+export const TICKED_HOLD_MS = 1200;
+
+/**
  * Items with their marks: the open ones, then the done ones folded under one
  * "Show N done" row that opens them, struck through. Each group keeps its saved
- * order. On a page the person may edit, a mark ticks the item there and then.
+ * order. On a page the person may edit, a mark or the item's words tick the
+ * item there and then;
+ * the item stays where it was for a moment, so the tick shows, a slip can be
+ * undone on the spot and the next item does not jump under the pointer. Ticking
+ * another restarts the wait for all of them.
  * Where the page offers Ask, each item offers "Ask <name>" at its end (on hover
  * or focus; always on touch).
  */
 export function ChecklistBlock({ block, ctx }: BlockProps) {
   const all = objects(block.items);
   const shown = all.map((it, index) => ({ it, index })).filter(({ it }) => str(it.text).trim());
+  // Just ticked here: saved position → the item's text, so an entry cannot
+  // hold a different item once the list has been rewritten under it.
+  const [held, setHeld] = useState<ReadonlyMap<number, string>>(() => new Map());
+  const holdTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(holdTimer.current), []);
+  // A row that folds away takes its mark with it, and the keyboard would land on the page body a second after the
+  // key that ticked it. When that happens the toggle that now holds the row takes the focus instead.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const doneToggleRef = useRef<HTMLButtonElement | null>(null);
+  const hadFocus = useRef(false);
+  useEffect(() => {
+    if (!hadFocus.current) return;
+    hadFocus.current = false;
+    const active = document.activeElement;
+    if (!active || active === document.body) doneToggleRef.current?.focus();
+  }, [held]);
+  const isHeld = ({ it, index }: (typeof shown)[number]) => it.done === true && held.get(index) === str(it.text);
   // `index` stays the saved position, which ticking and Ask address.
-  const open = shown.filter(({ it }) => it.done !== true);
-  const finished = shown.filter(({ it }) => it.done === true);
+  const open = shown.filter((entry) => entry.it.done !== true || isHeld(entry));
+  const finished = shown.filter((entry) => entry.it.done === true);
+  const folded = finished.filter((entry) => !isHeld(entry));
   const [showDone, setShowDone] = useState(false);
   const doneListId = useId();
   const hasId = typeof block.id === 'string' && !!block.id;
   const toggle = ctx.toggleItem && hasId ? ctx.toggleItem : undefined;
   const ask = ctx.askItem && hasId ? ctx.askItem : undefined;
   const name = useCompanionName();
+  const onToggle = (it: (typeof shown)[number]['it'], index: number) => {
+    if (!toggle) return;
+    if (it.done === true) {
+      // Unticked again, in the hold or from the done ones: nothing left to hold.
+      if (held.has(index)) setHeld((prev) => { const next = new Map(prev); next.delete(index); return next; });
+    } else {
+      setHeld((prev) => new Map(prev).set(index, str(it.text)));
+      window.clearTimeout(holdTimer.current);
+      holdTimer.current = window.setTimeout(() => {
+        hadFocus.current = listRef.current?.contains(document.activeElement) === true;
+        setHeld(new Map());
+      }, TICKED_HOLD_MS);
+    }
+    toggle(block, index);
+  };
   const row = ({ it, index }: (typeof shown)[number]) => {
     const checked = it.done === true;
     return (
@@ -395,16 +451,24 @@ export function ChecklistBlock({ block, ctx }: BlockProps) {
             role="checkbox"
             aria-checked={checked}
             aria-label={str(it.text)}
-            onClick={() => toggle(block, index)}
+            onClick={() => onToggle(it, index)}
           >
-            {checked && <CheckIcon size={10} />}
+            {checked && <CheckIcon size="sm" />}
           </button>
         ) : (
           <span className="michi-doc-check" role="checkbox" aria-checked={checked} aria-readonly="true" aria-label={str(it.text)}>
-            {checked && <CheckIcon size={10} />}
+            {checked && <CheckIcon size="sm" />}
           </span>
         )}
-        <span className="michi-doc-checklist__text">{str(it.text)}</span>
+        {/* The words tick the item too, as a checkbox's label does; the mark stays the one focus stop. A drag
+            that selects some of the words is a selection, not a tick. */}
+        <span
+          className="michi-doc-checklist__text"
+          data-live={toggle ? 'true' : undefined}
+          onClick={toggle ? () => { if (!window.getSelection()?.toString()) onToggle(it, index); } : undefined}
+        >
+          {str(it.text)}
+        </span>
         {ask && (
           <button
             type="button"
@@ -413,32 +477,33 @@ export function ChecklistBlock({ block, ctx }: BlockProps) {
             title={`Ask ${name} about this item`}
             onClick={() => ask(block, index)}
           >
-            <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
+            <ChatIcon aria-hidden="true" />
           </button>
         )}
       </li>
     );
   };
   return (
-    <div data-michi-block="checklist">
+    <div data-michi-block="checklist" ref={listRef}>
       <div className="michi-doc-block-head">
         <h3 className="michi-doc-block-title">{str(block.title).trim() || 'Checklist'}</h3>
-        <span className="michi-doc-mono michi-doc-muted" style={{ fontSize: 'var(--fs-sm)' }}>{finished.length}/{shown.length}</span>
+        <span className="michi-doc-mono michi-doc-muted" style={{ fontSize: 'var(--fs-md)' }}>{finished.length}/{shown.length}</span>
       </div>
       {open.length > 0 && <ul className="michi-doc-checklist">{open.map(row)}</ul>}
-      {finished.length > 0 && (
+      {folded.length > 0 && (
         <>
           <button
             type="button"
+            ref={doneToggleRef}
             className="michi-doc-link-btn michi-doc-checklist__done-toggle"
             aria-expanded={showDone}
             aria-controls={doneListId}
             onClick={() => setShowDone(!showDone)}
           >
-            <ChevronRight size={13} strokeWidth={1.8} aria-hidden="true" className="michi-doc-checklist__chevron" />
-            {showDone ? 'Hide done' : `Show ${finished.length} done`}
+            <ChevronRightIcon aria-hidden="true" className="michi-doc-checklist__chevron" />
+            {showDone ? 'Hide done' : `Show ${folded.length} done`}
           </button>
-          {showDone && <ul id={doneListId} className="michi-doc-checklist">{finished.map(row)}</ul>}
+          {showDone && <ul id={doneListId} className="michi-doc-checklist">{folded.map(row)}</ul>}
         </>
       )}
     </div>
@@ -458,14 +523,14 @@ export function NextStepsBlock({ block, ctx }: BlockProps) {
           const unblocks = str(it.unblocks).trim();
           return (
             <li key={i} className="michi-doc-steps__item">
-              <span className="michi-tag michi-doc-steps__who" data-who={user ? 'user' : 'agent'}>{user ? 'You' : 'Agent'}</span>
+              <span className="michi-doc-steps__who" data-who={user ? 'user' : 'agent'}>{user ? 'You' : 'Agent'}</span>
               <span className="michi-doc-steps__what">
                 {str(it.text)}
                 {unblocks && <span className="michi-doc-steps__unblocks">Unblocks {unblocks}</span>}
               </span>
               {start && (
                 <Button size="sm" className="michi-doc-steps__start" onClick={() => start(str(it.text))}>
-                  <MessageSquare size={12} strokeWidth={1.7} aria-hidden="true" />Start a conversation
+                  <ChatIcon size="sm" aria-hidden="true" />Start a conversation
                 </Button>
               )}
             </li>

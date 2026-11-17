@@ -1,10 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { saveAgentOptions, saveProviderKey, verifyProviderKey } from '../services/api';
 import type { VerifyProviderKeyResult } from '../services/api';
 import { providerOptionSuffix, providerRequiresUserKey, shouldPromptForProviderKey, verifyModelFor } from '../lib/providerCapabilities';
 import { ModalShell } from './ui/ModalShell';
+import { CompanionGlyph } from './terminal/companion/CompanionGlyph';
+import { CheckIcon, ICON_PX } from './terminal/icons';
 import { Button } from './ui/controls';
-import { isLocalProject } from '../config/backendConnections';
+import { isLocalConnectionId } from '../config/backendIdentity';
 import { useChatProjects } from '../state/chatStore';
 import { usePrefs } from '../state/prefs';
 
@@ -36,7 +38,7 @@ import { usePrefs } from '../state/prefs';
  */
 export default function ApiKeyGate() {
   const { prefs } = usePrefs();
-  const { agentStatus: status, agentStatusUnreachable, refreshAgentStatus, activeProject } = useChatProjects();
+  const { agentStatus: status, agentStatusUnreachable, agentStatusConnectionId, refreshAgentStatus } = useChatProjects();
   const [key, setKey] = useState('');
   const [selectedProvider, setSelectedProvider] = useState<string>('');
   const [saving, setSaving] = useState(false);
@@ -45,6 +47,8 @@ export default function ApiKeyGate() {
   const [verifyResult, setVerifyResult] = useState<VerifyProviderKeyResult | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const reopenWithNextStatusRef = useRef(false);
+  const errorId = useId();
+  const verifyId = useId();
 
   useEffect(() => {
     // Allow other parts of the app (chatStreamRunner on auth errors, the
@@ -83,14 +87,22 @@ export default function ApiKeyGate() {
     setSelectedProvider((current) => current || providers[0]!.id);
   }, [status?.provider]);
 
+  // Retry keeps the notice up, in flight, until a status arrives or the
+  // reload gives up again (every reload first clears the unreachable flag).
+  const [retrying, setRetrying] = useState(false);
+  useEffect(() => { if (agentStatusUnreachable) setRetrying(false); }, [agentStatusUnreachable]);
+  useEffect(() => { setRetrying(false); }, [status]);
+
   // Backend persistently unreachable — a hard-blocking notice with a retry.
   // Not gated on onboarding: it's useful cold-start feedback either way.
   // Local only: its advice is for the desktop app, a remote outage has its
   // own recovery UI, and blocking would also cover the local workspaces.
-  const localBackend = !activeProject || isLocalProject(activeProject);
-  if (agentStatusUnreachable && localBackend) {
+  // Judged by the backend the failed reads went to, not the active workspace:
+  // the two can disagree, and a remote outage then showed this local notice.
+  const localBackend = isLocalConnectionId(agentStatusConnectionId);
+  if ((agentStatusUnreachable || retrying) && localBackend) {
     return (
-      <ModalShell open onClose={() => {}} title="Michi" titleGlyph="◆" width={420} dismissible={false}>
+      <ModalShell open onClose={() => {}} title="Michi" titleGlyph={<CompanionGlyph size={ICON_PX.sm} />} width={420} dismissible={false}>
         <div style={{ padding: '18px 18px 20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>
             <div style={{ fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-2xl)', fontWeight: 700, color: 'var(--term-fg)' }}>
@@ -102,7 +114,7 @@ export default function ApiKeyGate() {
             </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <Button variant="primary" onClick={refreshAgentStatus}>
+            <Button variant="primary" busy={retrying} busyLabel="Retrying…" onClick={() => { setRetrying(true); refreshAgentStatus(); }}>
               Retry
             </Button>
           </div>
@@ -138,6 +150,8 @@ export default function ApiKeyGate() {
   const canSubmit = selectedHasKey || !!key.trim();
   const canVerify = selectedHasKey || !!key.trim();
   const defaultModel = selectedProviderInfo?.defaultModel || status.model || '';
+  // A rejected save and a failed verify both say what is wrong with the key.
+  const keyProblems = [error && errorId, verifyResult?.ok === false && verifyId].filter(Boolean).join(' ') || undefined;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,7 +201,7 @@ export default function ApiKeyGate() {
       open
       onClose={() => setDismissed(true)}
       title={`Set up ${status.label}`}
-      titleGlyph="◆"
+      titleGlyph={<CompanionGlyph size={ICON_PX.sm} />}
       width={480}
     >
       <form onSubmit={handleSubmit}>
@@ -230,15 +244,11 @@ export default function ApiKeyGate() {
 
           {selectedProviderInfo?.keyUrl && (
             <a
+              className="ui-link"
               href={selectedProviderInfo.keyUrl}
               target="_blank"
               rel="noopener noreferrer"
-              style={{
-                fontSize: 'var(--fs-lg)',
-                color: 'var(--term-accent)',
-                textDecoration: 'none',
-                width: 'fit-content',
-              }}
+              style={{ fontSize: 'var(--fs-lg)', width: 'fit-content' }}
             >
               Open {selectedProviderInfo.label} key console ↗
             </a>
@@ -258,14 +268,18 @@ export default function ApiKeyGate() {
               placeholder={
                 selectedHasKey ? 'Saved key present (paste to replace)' : selectedProviderInfo?.keyLabel ?? 'API key'
               }
+              aria-invalid={keyProblems ? true : undefined}
+              aria-describedby={keyProblems}
               autoFocus
             />
           </div>
 
-          {error && <div style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-danger-text)' }}>{error}</div>}
+          {error && <div id={errorId} role="alert" style={{ fontSize: 'var(--fs-lg)', color: 'var(--term-danger-text)' }}>{error}</div>}
 
           {verifyResult && (
             <div
+              id={verifyId}
+              role={verifyResult.ok ? 'status' : 'alert'}
               style={{
                 fontFamily: 'var(--font-mono)',
                 fontSize: 'var(--fs-md)',
@@ -273,7 +287,7 @@ export default function ApiKeyGate() {
               }}
             >
               {verifyResult.ok
-                ? `✓ Verified · ${selectedProviderInfo?.label ?? selectedProviderInfo?.id ?? ''}${verifyResult.model ? ` · ${verifyResult.model}` : ''}${verifyResult.latencyMs ? ` · ${verifyResult.latencyMs}ms` : ''}`
+                ? <><CheckIcon size="sm" style={{ verticalAlign: -2, marginRight: 6 }} />{`Verified · ${selectedProviderInfo?.label ?? selectedProviderInfo?.id ?? ''}${verifyResult.model ? ` · ${verifyResult.model}` : ''}${verifyResult.latencyMs ? ` · ${verifyResult.latencyMs}ms` : ''}`}</>
                 : verifyResult.error ?? 'Verification failed.'}
             </div>
           )}

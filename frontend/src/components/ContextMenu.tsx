@@ -14,7 +14,8 @@ export interface MenuItem {
   label: string;
   /** Optional secondary text, rendered muted after the label. */
   sublabel?: string;
-  glyph?: string;
+  /** A house icon (or a short text mark) shown in the menu's glyph slot. */
+  glyph?: React.ReactNode;
   keys?: string;
   danger?: boolean;
   disabled?: boolean;
@@ -86,11 +87,13 @@ export interface ContextMenuProps {
  * paragraph). Sits beside the menu at the hovered row, flipping to the left when
  * the right side has no room. Pointer-transparent so it never steals the hover.
  */
-function MenuDetailCard({ menuRef, rowTop, title, text }: {
+function MenuDetailCard({ menuRef, rowTop, title, text, layer }: {
   menuRef: React.RefObject<HTMLDivElement | null>;
   rowTop: number;
   title: string;
   text: string;
+  /** The menu's z-index rung; the card sits one above it. */
+  layer: string;
 }) {
   const cardRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<{ left: number; top: number } | null>(null);
@@ -117,7 +120,7 @@ function MenuDetailCard({ menuRef, rowTop, title, text }: {
       top={place?.top ?? 0}
       width="var(--m-width)"
       maxWidth="calc(100vw - 16px)"
-      zIndex={1101}
+      zIndex={`calc(${layer} + 1)`}
       style={{ pointerEvents: 'none', visibility: place ? 'visible' : 'hidden' }}
     >
       <div className="michi-menu-detail-title">{title}</div>
@@ -192,6 +195,11 @@ function wantedHeight(surface: HTMLElement, box: DOMRect, filterable: boolean): 
   return chrome + (filterable ? listCap : Math.min(listCap, list.scrollHeight));
 }
 
+/** The rows ↑/↓/Home/End move focus between: the enabled ones, in order. */
+function enabledRows(menu: HTMLElement | null): HTMLElement[] {
+  return Array.from(menu?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])') ?? []);
+}
+
 /**
  * The desktop right-click menu. Positions itself at the cursor, flips
  * when it would overflow the viewport, closes on any outside click or
@@ -255,6 +263,19 @@ function DesktopContextMenu({
     cancel();
     onCloseRef.current();
   }, [cancel]);
+  // Esc, Tab and a choice hand focus back before the menu closes, as
+  // ActionMenu does: to the trigger, else to what held focus as it opened
+  // (most callers pass no trigger).
+  const openerRef = useRef<Element | null | undefined>(undefined);
+  const returnFocus = useCallback(() => {
+    const opener = openerRef.current;
+    const target = triggerRef.current ?? (opener instanceof HTMLElement ? opener : null);
+    if (target?.isConnected && target !== document.body) target.focus({ preventScroll: true });
+  }, []);
+  const closeReturningFocus = useCallback(() => {
+    returnFocus();
+    dismiss();
+  }, [returnFocus, dismiss]);
 
   // Fire an item's action after a short macOS-style confirm blink, then close.
   // Guards against double-fire (ignores clicks while a blink is already in
@@ -265,11 +286,13 @@ function DesktopContextMenu({
       confirm(item.id, () => {
         const current = sectionsRef.current.flatMap((section) => section.items).find((candidate) => candidate.id === item.id);
         if (!current || current.disabled) return;
+        // First, so what the action opens or focuses starts from there.
+        returnFocus();
         current.run();
         onCloseRef.current();
       });
     },
-    [confirm],
+    [confirm, returnFocus],
   );
 
   useLayoutEffect(() => {
@@ -327,7 +350,38 @@ function DesktopContextMenu({
       if (e.target instanceof Node && triggerRef.current?.contains(e.target)) return;
       dismiss();
     };
+    // The rows take DOM focus (roving focus): ↑/↓/Home/End move it, Enter or
+    // Space chooses the focused row, and Tab closes the menu. With the filter
+    // shown, only Tab: the filter keeps the rest and its own highlight.
+    const navigate = (e: KeyboardEvent): boolean => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        closeReturningFocus();
+        return true;
+      }
+      if (showSearch) return false;
+      const rows = enabledRows(ref.current);
+      const at = rows.indexOf(document.activeElement as HTMLElement);
+      if (e.key === 'Enter' || e.key === ' ') {
+        if (at < 0 || e.metaKey || e.ctrlKey || e.altKey) return false;
+        e.preventDefault();
+        rows[at].click();
+        return true;
+      }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return false;
+      e.preventDefault();
+      const down = e.key === 'ArrowDown';
+      const next = e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1
+        : at < 0 ? (down ? 0 : rows.length - 1)
+        : (at + (down ? 1 : -1) + rows.length) % rows.length;
+      rows[next]?.focus({ preventScroll: true });
+      rows[next]?.scrollIntoView?.({ block: 'nearest' });
+      return true;
+    };
     const onKey = (e: KeyboardEvent) => {
+      // A key whose default is already taken (the one that opened the menu)
+      // or that ends an IME composition is not the menu's.
+      if (!e.defaultPrevented && !isImeComposing(e) && navigate(e)) return;
       // Single-letter accelerators (e.g. R/E/D/A). Skip while the filter input
       // owns the keystroke, and ignore when modifier keys are held so we don't
       // intercept browser shortcuts like ⌘R.
@@ -359,8 +413,8 @@ function DesktopContextMenu({
       document.removeEventListener('mousedown', onDocDown);
       window.removeEventListener('keydown', onKey);
     };
-  }, [present, showSearch, fireWithBlink, dismiss]);
-  useMenuEscape(present, dismiss);
+  }, [present, showSearch, fireWithBlink, dismiss, closeReturningFocus]);
+  useMenuEscape(present, closeReturningFocus);
 
   const run = (item: MenuItem) => fireWithBlink(item);
 
@@ -389,6 +443,16 @@ function DesktopContextMenu({
   useLayoutEffect(() => {
     ref.current?.querySelector('[data-active="true"]')?.scrollIntoView?.({ block: 'nearest' });
   }, [activeIdx]);
+
+  // On opening, note what held focus, then focus the first enabled row
+  // unless the filter takes focus. StrictMode replays the effect, so the
+  // opener is the one its first pass saw, not that row.
+  useLayoutEffect(() => {
+    if (openerRef.current === undefined) openerRef.current = document.activeElement;
+    if (!showSearch) enabledRows(ref.current)[0]?.focus({ preventScroll: true });
+    // Only when the menu opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (showSearch && !touch) searchRef.current?.focus();
@@ -422,6 +486,9 @@ function DesktopContextMenu({
   const flatItems = filtered
     .filter((s) => !s.pinned)
     .flatMap((s) => s.items.filter((it) => !it.disabled));
+  // A filter that empties every section says so, instead of leaving only the dividers.
+  const listed = filtered.filter((s) => !s.pinned);
+  const noMatch = q !== '' && listed.length > 0 && listed.every((s) => s.items.length === 0);
 
   // Handle arrow/enter in the search input for keyboard navigation.
   const onSearchKeyDown = useCallback(
@@ -457,6 +524,9 @@ function DesktopContextMenu({
   const detailItem = detail
     ? filtered.flatMap((s) => s.items).find((it) => it.id === detail.id)
     : undefined;
+  // Right-click menus sit above every other popover (eg the Contexts popover
+  // hosts one internally); the button-opened pickers sit on the popover rung.
+  const layer = menuKind === 'context' ? 'var(--z-context-menu)' : 'var(--z-popover)';
 
   return (
     <>
@@ -471,9 +541,7 @@ function DesktopContextMenu({
       width={width ?? 'var(--m-width)'}
       maxWidth="calc(100vw - 16px)"
       maxHeight={pos.cap ?? 'calc(100dvh - 16px)'}
-      // Right-click menus historically sit above every other popover (eg
-      // the Contexts popover hosts one internally). Preserve that.
-      zIndex={1100}
+      zIndex={layer}
       onContextMenu={(e) => e.preventDefault()}
       style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', userSelect: 'none' }}
     >
@@ -491,11 +559,13 @@ function DesktopContextMenu({
       )}
       <ul
         className="michi-menu-list"
+        role="none"
         style={{ maxHeight: maxHeight ?? 'var(--m-maxHeight)' }}
         onMouseLeave={hideDetail}
         onScroll={hideDetail}
       >
-        {(() => {
+        {noMatch && <li className="palette-empty" role="status">No matches for “{filter.trim()}”</li>}
+        {!noMatch && (() => {
           let flatIdx = 0;
           return filtered
             .filter((s) => !s.pinned)
@@ -527,6 +597,7 @@ function DesktopContextMenu({
                       <MenuRow
                         key={item.id}
                         role="menuitem"
+                        tabIndex={-1}
                         onClick={() => run(item)}
                         danger={item.danger}
                         disabled={item.disabled}
@@ -570,7 +641,7 @@ function DesktopContextMenu({
         })()}
       </ul>
       {filtered.some((s) => s.pinned) && (
-        <ul className="michi-menu-list michi-menu-pinned">
+        <ul className="michi-menu-list michi-menu-pinned" role="none">
           {filtered
             .filter((s) => s.pinned)
             .map((section, si) => {
@@ -589,6 +660,7 @@ function DesktopContextMenu({
                     <MenuRow
                       key={item.id}
                       role="menuitem"
+                      tabIndex={-1}
                       onClick={() => run(item)}
                       danger={item.danger}
                       disabled={item.disabled}
@@ -631,6 +703,7 @@ function DesktopContextMenu({
         rowTop={detail.rowTop}
         title={detailItem.label}
         text={detailItem.sublabel}
+        layer={layer}
       />
     )}
     </>

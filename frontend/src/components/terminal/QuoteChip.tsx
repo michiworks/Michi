@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import type { AnyQuoteSource } from '../../lib/quoteFormat';
 import { attachedQuoteHasSelection, quoteSourceOf } from '../../state/assistant/assistantContext';
 import { useInAssistantScope } from './assistant/assistantScope';
+import { ContextGlyph, CtxExpandButton, oneLine, ReplyGlyph, sourceMeta, useClipped } from './ContextItem';
 
 interface Props {
   text: string;
@@ -10,44 +11,49 @@ interface Props {
 }
 
 /**
- * Static in-message variant of the composer's quote pre-block: same
- * .t-pre-block recipe (tone-accent, caption + single-line body), but with an
- * expand toggle where the composer puts its dismiss × — the message is
- * already sent, so the quote can't be removed, only unfolded. A quote of
- * attached context only (the ⌘J assistant's page and chips, no selection) is
- * captioned as that, not as a reply to a selection.
+ * The passage a sent user message replied to, as the composer's quote row
+ * showed it: the reply arrow, then the passage on one line. It can no
+ * longer be dismissed, only unfolded, and offers that only when the line
+ * cuts text. A quote of attached context only (the ⌘J assistant's page and
+ * chips, no selection) is marked as that, not as a reply to a selection.
  */
 export function QuoteChip({ text, source }: Props) {
   const [expanded, setExpanded] = useState(false);
-
-  // Collapsed preview collapses internal whitespace so a multi-line quote
-  // shows as one continuous line, then the single-line ellipsis truncates.
-  const collapsedPreview = text.replace(/\s+/g, ' ').trim();
+  const textId = useId();
+  const excerptRef = useRef<HTMLSpanElement>(null);
+  const clipped = useClipped(expanded, text, excerptRef);
   // The source isn't stored: after a reload the assistant's own messages read it from the quote's opening.
   const inAssistant = useInAssistantScope();
-  const attached = (source ?? (inAssistant ? quoteSourceOf(text) : undefined))?.type === 'attached';
-  const contextOnly = attached && !attachedQuoteHasSelection(text);
+  const resolved = source ?? (inAssistant ? quoteSourceOf(text) : undefined);
+  const contextOnly = resolved?.type === 'attached' && !attachedQuoteHasSelection(text);
+  const meta = sourceMeta(resolved, false);
 
   return (
-    <div className="t-pre-block tone-accent is-msg">
-      <div className="t-pre-block-col">
-        <div className="t-pre-block-cap">
-          {contextOnly ? <>attached <b>context</b></> : <>replying to <b>selection</b></>}
-        </div>
-        <div
-          data-testid="quote-preview"
-          className={expanded ? 't-pre-block-body is-expanded' : 't-pre-block-body'}
-        >
-          {expanded ? text : collapsedPreview}
-        </div>
+    <div
+      className={[
+        't-ctx is-quote is-msg',
+        contextOnly ? 'is-context' : '',
+        expanded ? 'is-expanded' : '',
+      ].filter(Boolean).join(' ')}
+    >
+      <span className="t-ctx-mark">
+        {contextOnly ? <ContextGlyph /> : <ReplyGlyph />}
+        <span className="t-ctx-label sr-only">{contextOnly ? 'Attached context' : 'Replying to selection'}</span>
+      </span>
+      <div className="t-ctx-line" id={textId}>
+        <span ref={excerptRef} data-testid="quote-preview" className="t-ctx-excerpt">
+          {expanded ? text.trim() : oneLine(text)}
+        </span>
+        {meta && <span className="t-ctx-meta">{meta}</span>}
       </div>
-      <button
-        type="button"
-        className="t-pre-block-exp"
-        onClick={() => setExpanded((v) => !v)}
-      >
-        {expanded ? 'collapse ▴' : 'expand ▾'}
-      </button>
+      {(clipped || expanded) && (
+        <CtxExpandButton
+          label={contextOnly ? 'Show full context' : 'Show full quote'}
+          expanded={expanded}
+          controls={textId}
+          onToggle={() => setExpanded((v) => !v)}
+        />
+      )}
     </div>
   );
 }

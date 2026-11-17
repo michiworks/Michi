@@ -243,9 +243,17 @@ export interface AttentionBanner {
 
 /** Electron's Notification class (a double in tests). */
 export interface AttentionBannerClass {
-  new (options: { title: string; body: string }): AttentionBanner;
+  new (options: { title: string; body: string; silent?: boolean }): AttentionBanner;
   isSupported(): boolean;
 }
+
+/** The backend's answer to a desktop claim: whether this notifier holds it, and whether its banner keeps quiet (Sounds off). */
+export interface AttentionDesktopClaim {
+  claimed: boolean;
+  silent: boolean;
+}
+
+const NOT_CLAIMED: AttentionDesktopClaim = { claimed: false, silent: false };
 
 /** What became of a record. */
 export type AttentionDeliveryOutcome =
@@ -268,8 +276,8 @@ export interface AttentionNotifierHost {
   Notification: AttentionBannerClass;
   /** A Michi window exists: its renderer presents the records (serverAttention.ts). */
   hasOpenWindow(): boolean;
-  /** Claims the record for the desktop notifier; true when this notifier holds the claim. */
-  claim(id: string): Promise<boolean>;
+  /** Claims the record for the desktop notifier; `claimed` when this notifier holds the claim. */
+  claim(id: string): Promise<AttentionDesktopClaim>;
   /** Bring Michi forward at the record's target: a banner click. */
   open(target: AttentionTarget): void;
   now(): number;
@@ -339,25 +347,25 @@ export class AttentionNotifier {
     if (this.host.hasOpenWindow()) return 'window';
     if (!this.host.Notification.isSupported()) return 'unavailable';
     this.claiming.set(record.id, false);
-    let claimed = false;
+    let claim = NOT_CLAIMED;
     try {
-      claimed = await this.host.claim(record.id);
+      claim = await this.host.claim(record.id);
     } catch {
-      claimed = false;
+      claim = NOT_CLAIMED;
     }
     const resolvedMeanwhile = this.claiming.get(record.id) === true;
     this.claiming.delete(record.id);
     if (resolvedMeanwhile) return 'resolved';
-    if (!claimed) return 'claimed';
+    if (!claim.claimed) return 'claimed';
     // A window may have opened while the claim was on its way: it lists the record, and this banner still says it once.
     this.remember(record.id);
-    this.showBanner(record);
+    this.showBanner(record, claim.silent);
     this.host.onBackgroundDelivery?.();
     return 'banner';
   }
 
-  private showBanner(record: AttentionRecord): void {
-    const banner = new this.host.Notification({ title: record.title, body: record.body });
+  private showBanner(record: AttentionRecord, silent: boolean): void {
+    const banner = new this.host.Notification({ title: record.title, body: record.body, ...(silent ? { silent: true } : {}) });
     this.banners.set(record.id, banner);
     banner.on('click', () => {
       this.banners.delete(record.id);
@@ -495,9 +503,9 @@ export class AttentionDesktopFeed {
   }
 
   /** POST the desktop claim; true when the desktop notifier holds it. A failure is no claim. */
-  claim(id: string): Promise<boolean> {
+  claim(id: string): Promise<AttentionDesktopClaim> {
     const port = this.options.port();
-    if (!port) return Promise.resolve(false);
+    if (!port) return Promise.resolve(NOT_CLAIMED);
     return new Promise((resolve) => {
       const payload = '{}';
       const req = http.request({
@@ -512,18 +520,18 @@ export class AttentionDesktopFeed {
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => { if (text.length < 10_000) text += chunk; });
         res.on('end', () => {
-          if (res.statusCode !== 200) { resolve(false); return; }
+          if (res.statusCode !== 200) { resolve(NOT_CLAIMED); return; }
           try {
-            const answer = JSON.parse(text) as { claimed?: unknown };
-            resolve(answer.claimed === true);
+            const answer = JSON.parse(text) as { claimed?: unknown; silent?: unknown };
+            resolve({ claimed: answer.claimed === true, silent: answer.silent === true });
           } catch {
-            resolve(false);
+            resolve(NOT_CLAIMED);
           }
         });
-        res.on('error', () => resolve(false));
+        res.on('error', () => resolve(NOT_CLAIMED));
       });
       req.on('timeout', () => req.destroy());
-      req.on('error', () => resolve(false));
+      req.on('error', () => resolve(NOT_CLAIMED));
       req.end(payload);
     });
   }

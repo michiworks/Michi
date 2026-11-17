@@ -6,6 +6,7 @@ import { isRunOwner, chatNodeOf, hostOwner, runIdOfOwner } from '../agents/owner
 import { reportConversationNoChange } from './scheduledJobs/conversationBatch';
 import { michiDocsTool } from './michiDocs';
 import { michiSkillsTool } from './skills/michiSkillsTool';
+import { spawnBranchesOffered } from './spawnLimits';
 import { PAGE_TOOL_NAMES, type ActivePageTurnAttributionGetter, type PageToolName } from '../agents/pageToolNames';
 import { runPageTool } from '../agents/pageTools';
 import { askBeforeTaintedTool, taintGatedMichiTool, taintedMichiToolGate } from '../agents/taintedToolGate';
@@ -34,6 +35,7 @@ import {
 import { mcpSlotProviderInternals } from "michi-runtime/internal/mcp-host/slotProviderInternals";
 import { ASK_USER_DESCRIPTION, ASK_USER_NOT_ANSWERED, ASK_USER_TOOL, parseAskUserQuestions } from "michi-runtime/internal/mcp-host/askUser";
 import { z } from "zod";
+import { FORM_FIELD_JSON_SCHEMA } from "michi-shared";
 import {
     TEMPORARY_CHAT_MESSAGE, listThreads, paneArgumentNodeIds, readNode, readNodeOverview, searchMessages, temporaryChatRefuses,
 } from "./globalContext";
@@ -92,6 +94,7 @@ import type {
     McpSlotRebindPatch,
 } from "michi-runtime/internal/contract/mcp";
 import type { MichiHostEvent } from "../agents/hostEvents";
+import { prepareShowBlocks } from "../agents/showBlocks";
 import type { RuntimeSessionOwner, MaintenanceExecutionContext } from "../agents/types";
 import { createMaintenanceTools } from './pages/maintenanceTools';
 import { META_AGENT_MAINTENANCE_TOOL_NAMES } from '../agents/maintenancePolicy';
@@ -687,12 +690,16 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
     // globalContext tools (list_threads / search_messages / read_node) are
     // registered separately below because they don't go through the slot
     // callback indirection.
-    const SIDE_EFFECT_TOOL_NAMES = new Set(["open_url", "spawn_branches", "save_artifact", "update_artifact", "show_image"]);
+    const SIDE_EFFECT_TOOL_NAMES = new Set(["open_url", "spawn_branches", "save_artifact", "update_artifact", "show_image", "show_blocks"]);
     for (const tool of listEnabledBuiltinTools()) {
         if (!SIDE_EFFECT_TOOL_NAMES.has(tool.name) || !exposes(tool.name)) continue;
         // A tool whose slot callback the host left out is not offered.
         if (tool.name === "show_image" && !slot.onShowImage) continue;
+        // An Agent Run has no reply to draw blocks in, nor a user to answer them.
+        if (tool.name === "show_blocks" && isRunOwner(slot.owner)) continue;
         if (tool.name === "spawn_branches" && !slot.onSpawnBranches) continue;
+        // A chat too deep in agent-spawned branches is not offered it (the bridge refuses it too).
+        if (tool.name === "spawn_branches" && !spawnBranchesOffered(resolveSlotBinding(slot).nodeId)) continue;
         if (tool.name === "save_artifact" && !slot.onSaveArtifact) continue;
         if (tool.name === "update_artifact" && !slot.onUpdateArtifact) continue;
         registerTool(
@@ -746,6 +753,12 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
                         if (!result) throw new Error("show_image is unavailable");
                         if ("error" in result) throw new Error(`show_image failed: ${result.error}`);
                         return { content: [{ type: "text", text: `Displayed ${result.relPath} to the user.` }] };
+                    }
+                    case "show_blocks": {
+                        const shown = prepareShowBlocks(args ?? {});
+                        if (!shown.ok) return { content: [{ type: "text", text: shown.error }], isError: true };
+                        report({ type: "blocks", payload: shown.payload });
+                        return { content: [{ type: "text", text: shown.text }] };
                     }
                 }
                 return { content: [{ type: "text", text: `unhandled tool: ${tool.name}` }] };
@@ -856,7 +869,7 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
         async (args) => {
             const binding = resolveSlotBinding(slot);
             if (temporaryChatRefuses(binding.nodeId)) return temporaryChat;
-            const result = searchMessages(
+            const result = await searchMessages(
                 binding.workspaceId,
                 slot.ownerUserId,
                 String(args?.query ?? ""),
@@ -1153,8 +1166,10 @@ function michiToolCatalog(slot: McpSlot): MichiTool[] {
                     options: z.array(z.object({
                         label: z.string().describe("Display text for this option (1-5 words)."),
                         description: z.string().optional().describe("Explanation of what this option means."),
-                    })).min(2).max(4).describe("Available choices (2-4 options)."),
+                    })).min(2).max(4).optional().describe("Available choices (2-4 options). Leave out when the question has a field."),
                     multiSelect: z.boolean().default(false).describe("Allow multiple selections."),
+                    // The field's own rules (a slider's range, a default that fits) are parseAskUserQuestions'.
+                    field: z.fromJSONSchema({ ...FORM_FIELD_JSON_SCHEMA, description: "Instead of options: one control whose typed value is the answer." }).optional(),
                 })).min(1).max(4).describe("Questions to ask (1-4)."),
             },
         },

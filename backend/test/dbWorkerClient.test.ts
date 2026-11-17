@@ -3,6 +3,9 @@ import { afterEach, beforeEach, test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { applyTurnEvent, createDurableTurn, type ChatStreamEvent, type DurableMessageMetadata } from 'michi-shared';
+import { closeDb, getDbPath, initDb } from '../src/services/db';
+import { listMessages, saveNode, saveTree, saveWorkspace } from '../src/services/dbRepository';
 import { dbWorker, initDbWorker, isDbWorkerReady, shutdownDbWorker } from '../src/services/dbWorkerClient';
 
 let directory: string;
@@ -55,4 +58,45 @@ test('shutdown rejects an outstanding RPC and does not replay it on restart', as
   await assert.rejects(dbWorker.ping(), /not ready/);
   await initDbWorker(path.join(directory, 'data.db'));
   assert.equal(await dbWorker.ping(), 'pong');
+});
+
+test('turn snapshots reach the worker by structured clone, and as a JSON copy when they cannot be cloned', async (t) => {
+  const previousDataDir = process.env.MICHI_DATA_DIR;
+  process.env.MICHI_DATA_DIR = directory;
+  t.after(() => {
+    closeDb();
+    if (previousDataDir === undefined) delete process.env.MICHI_DATA_DIR;
+    else process.env.MICHI_DATA_DIR = previousDataDir;
+  });
+  closeDb();
+  initDb();
+  saveWorkspace({ id: 'ws-1', name: 'Workspace', created_at: 1, updated_at: 1, active_tree_id: 'tree-1' });
+  saveTree({ id: 'tree-1', workspace_id: 'ws-1', root_node_id: 'node-1', last_active_at: 1, created_at: 1 });
+  saveNode({
+    id: 'node-1', workspace_id: 'ws-1', tree_id: 'tree-1', parent_node_id: null,
+    kind: 'chat', status: 'idle', minimized: 0, spawned_by_agent: 0, created_at: 1,
+  });
+  await initDbWorker(getDbPath());
+
+  const turn = (turnId: string, userMetadata: DurableMessageMetadata) => createDurableTurn({
+    turnId, assistantId: `a-${turnId}`, nodeId: 'node-1', workspaceId: 'ws-1',
+    displayUserText: `question ${turnId}`, userMetadata, selfInitiated: false, startedAt: 10,
+  });
+  // Structured clone keeps a key holding undefined, where the JSON copy dropped it.
+  const cloned = turn('turn-1', { quotedText: undefined });
+  await dbWorker.beginTurn(cloned);
+  const chunk = { event: 'chunk', data: { text: 'partial', seq: 1 } } as ChatStreamEvent;
+  const written = await dbWorker.checkpointTurn(applyTurnEvent(cloned, chunk));
+  assert.ok(written.payloadBytes !== null && written.payloadBytes > 0, 'the worker reports the bytes it rewrote');
+
+  // A function cannot be cloned; the JSON copy leaves it out.
+  await dbWorker.beginTurn(turn('turn-2', { quotedText: 'quoted', onClick: () => {} } as unknown as DurableMessageMetadata));
+
+  const users = listMessages('node-1').filter((message) => message.role === 'user');
+  assert.deepEqual(users.map((message) => [message.content, message.metadata]), [
+    ['question turn-1', null],
+    ['question turn-2', JSON.stringify({ quotedText: 'quoted' })],
+  ]);
+  await assert.rejects(dbWorker.persistResumeBinding({ nodeId: () => {} } as never), { name: 'DataCloneError' });
+  assert.equal(await dbWorker.ping(), 'pong', 'a refused post leaves the worker usable');
 });

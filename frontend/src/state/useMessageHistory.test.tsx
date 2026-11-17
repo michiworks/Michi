@@ -40,6 +40,21 @@ describe('paged history transitions', () => {
     expect(f.nodesRef.current.n.lastAppliedSeq).toBe(9);
   });
 
+  it('reads older reader pages until the message it looks for is there, and stops at its page cap', async () => {
+    const f = fixture();
+    api.fetchTreeMessagePage
+      .mockResolvedValueOnce({ messages: [row(49)], pages: [{ nodeId: 'n', total: 51, before: { seq: 49, id: 'm49' } }] })
+      .mockResolvedValueOnce({ messages: [row(48)], pages: [{ nodeId: 'n', total: 51, before: { seq: 48, id: 'm48' } }] });
+    const { result } = renderHook(() => useMessageHistory(f.nodesRef, f.projectsRef, f.dispatch));
+    const has = (id: string) => (node: ChatNodeState) => node.messages.some((m) => m.id === id);
+    await expect(result.current.loadOlderUntil('n', has('m48'), { maxPages: 5 })).resolves.toEqual({ found: true, pages: 2, more: true });
+    expect(api.fetchTreeMessagePage.mock.calls.map((call) => call[4])).toEqual([
+      expect.objectContaining({ before: { id: 'm50', seq: 50 }, leanToolCalls: true }),
+      expect.objectContaining({ before: { seq: 49, id: 'm49' }, leanToolCalls: true }),
+    ]);
+    await expect(result.current.loadOlderUntil('n', has('m0'), { maxPages: 0 })).resolves.toEqual({ found: false, pages: 0, more: true });
+  });
+
   it('fills older context page by page below the loaded tail and preserves that tail', async () => {
     const f = fixture();
     api.fetchTreeMessagePage

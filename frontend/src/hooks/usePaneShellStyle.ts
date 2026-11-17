@@ -1,43 +1,77 @@
-import { useMemo, useRef } from 'react';
+import { createElement, useMemo, useRef, type ReactElement } from 'react';
 import { usePaneIsExiting, usePresentedPaneFocus } from '../components/terminal/PanePresentation';
 import { useChatStore } from '../state/chatStore';
 import { usePrefs } from '../state/prefs';
 
 /**
- * How dark an unfocused pane's veil is, 0–1: focusDim (0–100) scaled by 0.6,
- * the factor the brightness() filter it replaces used. The Topbar caption cell
- * above each pane still dims with brightness(1 - this), which a black veil at
- * this opacity matches exactly, so the strip and the body stay one color.
+ * How far an unfocused pane's surface sinks toward --term-recede-fill, 0–1:
+ * focusDim (0–100) doubled and held at 1. The fill is the palette's deep
+ * surface, one step from the pane rather than the black of the veil this
+ * replaces, so the same strength needs the longer throw: the default 20 lands
+ * where the black veil did, and past 50 the pane is already as deep as the
+ * palette goes. The Topbar caption cell above each pane sinks by the same
+ * amount, so the strip and the body stay one colour.
  */
-export function paneDimOpacity(focusDim: number): number {
-  return (focusDim / 100) * 0.6;
+export function paneRecedeOpacity(focusDim: number): number {
+  return Math.min(1, (focusDim / 100) * 2);
 }
 
 /**
- * Computes the shared container style for all pane types (TPane, DigestPane,
- * FilePane, and any future pane). Encapsulates:
+ * The pane's surface at `recede`: what a band that hides the pane's own
+ * content behind its surface paints, so the band sinks with the body instead
+ * of standing out as an unreceded strip. One colour, not the recede element,
+ * because these bands sit over the content the recede sits under.
+ */
+export function paneSurface(recede: number): string {
+  const pane = 'var(--term-pane-bg, var(--term-surface))';
+  return recede > 0
+    ? `color-mix(in srgb, var(--term-recede-fill) ${recede * 100}%, ${pane})`
+    : pane;
+}
+
+export interface PaneShell {
+  /** The pane root's style. */
+  style: React.CSSProperties;
+  /** The focus recede, rendered as the pane root's last child; null for a pane that never recedes. */
+  recede: ReactElement | null;
+  /** The pane's surface as the recede leaves it, for a band that paints over the pane's own content. */
+  surface: string;
+}
+
+/**
+ * The shared container of all pane types (TPane, DigestPane, FilePane, and
+ * any future pane). Encapsulates:
  *
  *  - flex column layout
  *  - theme-driven border/radius/shadow
  *  - paneRules-gated right divider
- *  - focus dim: `--pane-dim`, read by the `.terminal-pane::after` veil in
- *    index.css (every consumer's root carries `.terminal-pane`)
+ *  - focus recede: a `.terminal-pane__recede` element (index.css) under the
+ *    pane's content, whose own opacity fades the palette's deep surface in
+ *    over the pane's. Only the surface sinks — the text, code and controls
+ *    the pane holds keep their own colours, where the black veil this
+ *    replaces dimmed them along with it. An inherited custom property on the
+ *    root would restyle the pane's whole subtree, its streaming transcript
+ *    included, on every focus change; the one element confines that to itself.
  *
- * Consumers spread the result and optionally override specific properties:
+ * Consumers spread the style, optionally overriding specific properties, and
+ * render the recede last:
  *
- *   const shellStyle = usePaneShellStyle(nodeId);
- *   <div className="terminal-pane" style={{ ...shellStyle, borderLeft: '3px solid ...' }}>
+ *   const { style, recede } = usePaneShellStyle(nodeId);
+ *   <div className="terminal-pane" style={{ ...style, borderLeft: '3px solid ...' }}>
+ *     …
+ *     {recede}
+ *   </div>
  *
- * `dim: false` is for a pane that never takes the unfocused dim (an embedded
- * conversation, the browser pane whose native page cannot share it).
+ * `dim: false` is for a pane that never takes the unfocused recede (an
+ * embedded conversation, the browser pane whose native page cannot share it).
  */
-export function usePaneShellStyle(nodeId: string, { dim = true }: { dim?: boolean } = {}): React.CSSProperties {
+export function usePaneShellStyle(nodeId: string, { dim = true }: { dim?: boolean } = {}): PaneShell {
   const { focusedPane } = useChatStore();
   const { prefs } = usePrefs();
   const { focusedPane: visualFocus } = usePresentedPaneFocus(focusedPane);
   const isFocused = visualFocus === nodeId || visualFocus == null;
   const exiting = usePaneIsExiting(nodeId);
-  const dimOpacity = dim && !isFocused ? paneDimOpacity(prefs.focusDim) : 0;
+  const recedeOpacity = dim && !isFocused ? paneRecedeOpacity(prefs.focusDim) : 0;
 
   const style = useMemo<React.CSSProperties>(
     () => ({
@@ -56,20 +90,22 @@ export function usePaneShellStyle(nodeId: string, { dim = true }: { dim?: boolea
       overflow: 'hidden',
       fontFamily: 'var(--ui-font)',
       animation: 'none',
-      // Unfocused panes dim with a black veil (index.css .terminal-pane::after)
-      // rather than filter: brightness() over the whole subtree, which ran
-      // the filter over the pane again whenever its content changed (every
-      // streamed frame). The veil fades with the same --t-soft/--t-ease.
-      '--pane-dim': dimOpacity,
-      // Its own stacking context, as the filter made it while dimmed: the
-      // veil's z-index then lifts it over the pane's raised children (find
-      // bar, drop overlays) and nothing outside the pane.
+      // Its own stacking context, as the brightness() filter the recede
+      // replaces made it. The recede sits on a negative rung, so the pane
+      // must be the stacking context it paints inside: over the pane's own
+      // surface, under everything the pane holds, and never behind the pane.
       isolation: dim ? 'isolate' : undefined,
       position: 'relative',
     }),
-    [dim, dimOpacity, prefs.paneRules],
+    [dim, prefs.paneRules],
   );
-  const retained = useRef(style);
-  if (!exiting) retained.current = style;
+  const recede = useMemo(
+    () => (dim ? createElement('div', { className: 'terminal-pane__recede', 'aria-hidden': true, style: { opacity: recedeOpacity } }) : null),
+    [dim, recedeOpacity],
+  );
+  const surface = useMemo(() => paneSurface(recedeOpacity), [recedeOpacity]);
+  const shell = useMemo<PaneShell>(() => ({ style, recede, surface }), [style, recede, surface]);
+  const retained = useRef(shell);
+  if (!exiting) retained.current = shell;
   return retained.current;
 }

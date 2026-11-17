@@ -141,7 +141,7 @@ const TRUSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 export const MICHI_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ...PAGE_TOOL_NAMES, ...SCHEDULED_JOB_TOOL_NAMES, ...MEMORY_TOOL_NAMES, ...ARTIFACT_TOOL_NAMES, ...AGENT_RUN_TOOL_NAMES,
-  'open_url', 'michi_docs', 'michi_skills', 'spawn_branches', 'save_artifact', 'update_artifact', 'show_image',
+  'open_url', 'michi_docs', 'michi_skills', 'spawn_branches', 'save_artifact', 'update_artifact', 'show_image', 'show_blocks',
   'list_threads', 'search_messages', 'read_node', 'read_node_overview', 'read_conversation_updates',
   'report_conversation_no_change', 'inspect_pane', 'read_pane_output', 'list_panes', 'wait_pane', 'send_to_thread',
   'list_ready_models', 'propose_multi_model_plan',
@@ -151,7 +151,7 @@ export const MICHI_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   // of check-in or collector material is recorded by the tools themselves (recordCompanionTaint).
   'list_workspaces', 'layout_rules', 'start_conversation', 'companion_items', 'companion_item', 'companion_read',
   'companion_check_now', 'companion_update_item', 'companion_save_notes', 'companion_goal_progress',
-  'companion_edit_goal', 'companion_propose', 'companion_publish_brief', 'companion_set_name',
+  'companion_edit_goal', 'companion_propose', 'companion_set_name',
   'companion_set_notifications', 'companion_headline', 'nothing_to_do',
 ]);
 

@@ -35,6 +35,16 @@ describe('buildWorkspaceRowContextMenu — item ids and delete confirmation', ()
     expect(ids(mkProject({ pinnedAt: 1, archivedAt: 2 }))).toEqual(['manage', 'rename', 'unpin', 'unarchive', 'delete']);
   });
 
+  it('offers Move up and Move down where the list a drag orders lets it go', () => {
+    const moveDown = vi.fn();
+    const items = buildWorkspaceRowContextMenu({ project: mkProject(), actions: { ...mkActions(), moveDown } })
+      .flatMap((s) => s.items);
+    expect(items.map((i) => i.id)).toEqual(['manage', 'rename', 'pin', 'archive', 'move-up', 'move-down', 'delete']);
+    expect(items.filter((i) => i.id.startsWith('move-')).map((i) => i.disabled)).toEqual([true, false]);
+    items.find((i) => i.id === 'move-down')!.run();
+    expect(moveDown).toHaveBeenCalledOnce();
+  });
+
   it('asks in the app’s confirm dialog before deleting', async () => {
     const actions = mkActions();
     const del = buildWorkspaceRowContextMenu({ project: mkProject({ name: 'Research' }), actions })

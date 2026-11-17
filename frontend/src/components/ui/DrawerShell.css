@@ -19,8 +19,12 @@
   max-width: 75vw;
 }
 
+/* Leaving goes out by the same edge, faster than the entrance: --t-collapse
+   (DUR.collapse) on EASE.drawer, as the phone drawer and BottomSheet close.
+   The instant and reduced-motion rules below still win. */
 .drawer-shell-panel[data-state='closed'] {
   transform: translateX(100%);
+  transition: transform var(--t-collapse) cubic-bezier(0.32, 0.72, 0, 1);
   pointer-events: none;
 }
 

@@ -118,6 +118,45 @@ export const PALETTES: Record<TerminalPalette, TerminalTokens> = {
   gruvbox: GRUVBOX,
 };
 
+/** How far two of a chart's colours must stand apart to read as two (see apart). */
+const SERIES_APART = 40;
+
+/**
+ * A chart's series after the first, which takes the accent: five hues per
+ * palette that sit with it and stay apart from each other, each at least 3:1
+ * on the page and its surface. No series takes a status hue (amber, green,
+ * red), and each stands at least as far from one as two series stand from
+ * each other, so a bar never reads as a warning; the last is the palette's
+ * grey. Emitted as --term-chart-1…5, through chartSeriesFor.
+ */
+const CHART_SERIES: Record<TerminalPalette, readonly [string, string, string, string, string]> = {
+  bone: ['#1b6396', '#0f766e', '#6d4aa8', '#a16207', '#8c877c'],
+  slate: ['#0f766e', '#6d4aa8', '#c2410c', '#be185d', '#7d8491'],
+  monokai: ['#fd971f', '#ae81ff', '#5fd7a7', '#f4a6c0', '#a2a298'],
+  gruvbox: ['#fe8019', '#d3869b', '#8ec07c', '#bdae93', '#928374'],
+};
+
+/**
+ * Those hues for the accent in force. Series 1 is the accent itself, and an accent can be picked (violet is bone's
+ * and slate's own third hue, mint sits on Monokai's green), which would draw two series in one colour. A hue the
+ * accent sits on steps toward the foreground until it stands apart: its family is kept, and a step that way only
+ * raises its contrast on the page. tokens.test.ts checks every palette against every accent on offer.
+ */
+function chartSeriesFor(palette: TerminalPalette, accent: string): string[] {
+  const p = PALETTES[palette];
+  const [chosen, fg] = [channels(accent), channels(p.fg)];
+  return CHART_SERIES[palette].map((series) => {
+    const hue = channels(series);
+    if (apart(hue, chosen) >= SERIES_APART) return series;
+    for (let n = 95; n > 0; n -= 5) {
+      if (apart(blend(hue, fg, n / 100), chosen) >= SERIES_APART) {
+        return `color-mix(in srgb, ${series} ${n}%, ${p.fg})`;
+      }
+    }
+    return `color-mix(in srgb, ${series} 50%, ${p.fg})`;
+  });
+}
+
 /**
  * Palettes with dark backgrounds. Used by callers that need to flip a UI
  * element between light-mode and dark-mode variants (e.g. Tailwind's
@@ -188,6 +227,77 @@ export function waitingTextFor(palette: TerminalPalette): string {
   return DARK_PALETTES.has(palette) ? p.select : `color-mix(in srgb, ${p.select} 65%, ${p.fg})`;
 }
 
+/** sRGB channels (0–255) of a #rrggbb colour: the palettes and every accent on offer. */
+function channels(hex: string): number[] {
+  return [1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16));
+}
+
+/** `color-mix(in srgb, a w, b)` as the browser blends it: the encoded channels, unrounded. */
+function blend(a: number[], b: number[], weightOfA: number): number[] {
+  return a.map((channel, i) => channel * weightOfA + b[i] * (1 - weightOfA));
+}
+
+/** How far apart two hues read, as plain sRGB distance: violet and bone's own third hue are 0 apart, Monokai's green
+ * and mint 18, bone's blue and ink 23, slate's orange and rust 22. Under SERIES_APART two series read as one colour. */
+function apart(a: number[], b: number[]): number {
+  return Math.hypot(...a.map((channel, i) => channel - b[i]));
+}
+
+/** WCAG 2 contrast ratio of two sRGB colours. */
+function contrast(a: number[], b: number[]): number {
+  const luminance = (rgb: number[]) => {
+    const [red, green, blue] = rgb.map((channel) => {
+      const c = channel / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const [x, y] = [luminance(a), luminance(b)];
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
+
+/**
+ * The accent itself where it reaches `floor` on every ground, else the least
+ * step toward the foreground that does, in 5% steps, so a picked hue keeps
+ * its look: `color-mix(in srgb, <accent> 95%, <fg>)`, then 90% and on.
+ */
+function liftedAccent(p: TerminalTokens, accent: string, grounds: number[][], floor: number): string {
+  const [hue, fg] = [channels(accent), channels(p.fg)];
+  for (let n = 100; n > 0; n -= 5) {
+    const color = blend(hue, fg, n / 100);
+    if (grounds.every((ground) => contrast(color, ground) >= floor)) {
+      return n === 100 ? accent : `color-mix(in srgb, ${accent} ${n}%, ${p.fg})`;
+    }
+  }
+  return p.fg;
+}
+
+/**
+ * Accent TEXT colour: links, the active label, @ and michi:// chips. Fills,
+ * borders, bars and glyphs keep --term-accent. Several accents miss 4.5:1 as
+ * words (Bone's rust on its chip fill, most picked hues on the dark palettes),
+ * so the accent lifts toward the foreground until it reaches 4.5:1 on every
+ * ground accent words sit on: bg, surface, alt, the pale accent fill, and the
+ * @ chip's accent tint at rest (12%) and hovered (18%) over bg and surface.
+ */
+function accentTextFor(palette: TerminalPalette, accent: string): string {
+  const p = PALETTES[palette];
+  const hue = channels(accent);
+  const [bg, surface] = [channels(p.bg), channels(p.surface)];
+  const chips = [0.12, 0.18].flatMap((tint) => [blend(hue, bg, tint), blend(hue, surface, tint)]);
+  return liftedAccent(p, accent, [bg, surface, channels(p.alt), channels(p.accentF), ...chips], 4.5);
+}
+
+/**
+ * The keyboard focus ring: opaque and in the accent, at 3:1 against bg,
+ * surface and alt. Every default accent draws it plain; a picked hue that
+ * misses 3:1 lifts toward the foreground, the way accentTextFor reaches 4.5:1.
+ */
+function focusRingFor(palette: TerminalPalette, accent: string): string {
+  const p = PALETTES[palette];
+  return `2px solid ${liftedAccent(p, accent, [p.bg, p.surface, p.alt].map(channels), 3)}`;
+}
+
 /**
  * Build a CSS custom-property map for a palette + user overrides.
  * Apply these as `style={cssVarsFor(...)}` on the shell root; all terminal
@@ -215,6 +325,12 @@ export function cssVarsFor(
     '--term-sidebar-tint': `color-mix(in srgb, ${p.surface} 88%, #ffffff)`,
     '--term-alt': p.alt,
     '--term-alt2': p.alt2,
+    // What an unfocused pane's surface sinks toward (usePaneShellStyle's
+    // recede): the well below the page on the dark palettes, and the darkest
+    // alternate surface on the light ones, whose bgDeep is white and would
+    // lift the pane instead. Only the surface sinks; the text it holds does
+    // not change.
+    '--term-recede-fill': isLight ? p.alt2 : p.bgDeep,
     '--term-hover-bg': p.alt,
     '--term-composer-bg': isLight ? 'rgb(254, 254, 254)' : p.bg,
     '--term-composer-bg-focus': isLight ? 'rgba(255, 255, 255, 1)' : p.bgDeep,
@@ -258,6 +374,10 @@ export function cssVarsFor(
     '--term-faint': p.faint,
     // Accent is an override (user-picked) layered over palette default.
     '--term-accent': accent,
+    // Accent words (fills, borders and glyphs keep --term-accent); see accentTextFor.
+    '--term-accent-text': accentTextFor(palette, accent),
+    // The one keyboard focus ring (index.css holds its fallback); see focusRingFor.
+    '--focus-ring': focusRingFor(palette, accent),
     '--term-accent-f': p.accentF,
     '--term-run': p.run,
     '--term-run-f': p.runF,
@@ -272,9 +392,18 @@ export function cssVarsFor(
     '--term-digest-f': p.digestF,
     '--term-mauve': p.mauve,
     '--term-mauve-f': p.mauveF,
+    ...Object.fromEntries(chartSeriesFor(palette, accent).map((color, i) => [`--term-chart-${i + 1}`, color])),
     '--term-danger': p.danger,
     // Error text (icons and fills keep --term-danger); see dangerTextFor.
     '--term-danger-text': dangerTextFor(palette),
+    // The filled danger button (<Button variant="primary" danger>): solid
+    // danger under --on-accent on the light palettes; on the dark ones, where
+    // that ink reads about 4:1, the soft danger fill with danger words.
+    '--term-danger-btn-bg': isLight ? 'var(--term-danger)' : 'var(--term-danger-f)',
+    '--term-danger-btn-fg': isLight ? 'var(--on-accent)' : 'var(--term-danger-text)',
+    '--term-danger-btn-hover': isLight
+      ? 'color-mix(in srgb, var(--term-danger) 88%, var(--term-fg))'
+      : 'color-mix(in srgb, var(--term-danger) 14%, var(--term-surface))',
     // Override Tailwind prose body/heading colors so markdown content inside
     // the terminal shell uses the palette foreground instead of the default
     // gray (which is nearly invisible on light palettes like bone/slate).
@@ -282,9 +411,9 @@ export function cssVarsFor(
     '--tw-prose-headings': p.fg,
     '--tw-prose-bold': p.fg,
     '--tw-prose-code': p.fg,
-    '--tw-prose-links': p.accent,
-    // Motion tokens (--t-quick/soft/enter/decay/ease) are palette-independent
-    // and live only in index.css :root.
+    // Links are accent words: the picked accent's text form, not the palette default.
+    '--tw-prose-links': 'var(--term-accent-text)',
+    // Motion tokens (--t-*) are palette-independent and live only in index.css :root.
     // Floating surfaces stay dark: cool blue-gray on Slate, warm graphite on Bone,
     // and a raised shade of the page on the dark palettes.
     // Shared by selection bars/composers, batch actions and transient notices.
@@ -295,6 +424,9 @@ export function cssVarsFor(
     '--sel-bar-muted': floating?.muted ?? p.mid,
     '--sel-bar-line': floating?.line ?? `color-mix(in srgb, ${p.surface} 80%, ${p.fg})`,
     '--sel-bar-hover': floating?.hover ?? `color-mix(in srgb, ${p.fg} 8%, transparent)`,
+    // A focus mark on the bar: the accent at 3:1 on it. The light palettes'
+    // accents are dark hues that vanish on their dark bar, so they take its ink.
+    '--sel-bar-focus': floating?.fg ?? liftedAccent(p, accent, [blend(channels(p.surface), channels(p.fg), 0.92)], 3),
     '--sel-bar-shadow': isLight
       ? '0 2px 6px rgba(16, 24, 32, 0.09), 0 12px 26px rgba(16, 24, 32, 0.14)'
       : 'var(--term-float-shadow)',

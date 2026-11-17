@@ -3,6 +3,7 @@ import { artifactHasImagePreview } from 'michi-shared';
 import type { MessageAttachment } from '../../state/chatTypes';
 import { attachmentImageUrl } from '../../services/api/artifacts';
 import { Lightbox } from './Lightbox';
+import { FileIcon, ImageIcon } from './icons';
 
 function isImageAttachment(a: MessageAttachment): boolean {
   return artifactHasImagePreview(a.name);
@@ -39,7 +40,7 @@ export function AttachmentPills({ items, workspaceId }: Props) {
                   className="t-att-chip"
                   title={a.absPath}
                 >
-                  <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }} aria-hidden>🖼</span>
+                  <ImageIcon size="sm" style={{ opacity: 0.7, flexShrink: 0 }} />
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {a.name}
                   </span>
@@ -90,7 +91,7 @@ export function AttachmentPills({ items, workspaceId }: Props) {
           className="t-att-chip"
           title={a.absPath}
         >
-          <span style={{ fontSize: 'var(--fs-xs)', opacity: 0.7 }} aria-hidden>📄</span>
+          <FileIcon size="sm" style={{ opacity: 0.7, flexShrink: 0 }} />
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {a.name}
           </span>

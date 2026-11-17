@@ -79,7 +79,9 @@
 .michi-db-th__btn:focus-visible,
 .michi-db-cell:focus-visible,
 .michi-db-open:focus-visible,
-.michi-db-new-row:focus-visible {
+.michi-db-new-row:focus-visible,
+.michi-db-mi:focus-visible,
+.michi-db-picker__option:focus-visible {
   outline: var(--focus-ring);
   outline-offset: -2px;
 }
@@ -134,7 +136,7 @@
 }
 .michi-db-tool__count {
   margin-left: 2px;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
 }
@@ -157,6 +159,14 @@
   font: inherit;
   font-size: var(--fs-sm);
   cursor: pointer;
+}
+@media (hover: hover) {
+  .michi-db-btn:not(.michi-db-btn--primary):not(:disabled):hover {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+.michi-db-btn:not(.michi-db-btn--primary):not(:disabled):active {
+  background: var(--term-hover-bg, var(--term-alt));
 }
 .michi-db-btn--primary {
   border-color: var(--term-accent);
@@ -183,7 +193,7 @@
   padding: 2px 0;
   border: 0;
   background: transparent;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   font-size: var(--fs-sm);
   cursor: pointer;
@@ -220,6 +230,7 @@
   white-space: nowrap;
 }
 .michi-db-chip__x {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -235,6 +246,12 @@
 .michi-db-chip__x:hover {
   background: var(--term-alt);
   color: var(--term-fg);
+}
+/* The 18px × takes clicks across 24px, the chip's height (ST-21). */
+.michi-db-chip__x::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
 }
 .michi-db-chips .michi-db-link-btn {
   align-self: center;
@@ -287,9 +304,8 @@
   text-align: left;
   cursor: pointer;
 }
-.michi-db-mi:hover,
+.michi-db-mi:not(:disabled):hover,
 .michi-db-mi:focus-visible {
-  outline: none;
   background: var(--term-hover-bg, var(--term-alt));
 }
 .michi-db-mi[aria-checked='true'] {
@@ -410,7 +426,8 @@
 }
 .michi-db-input:focus,
 .michi-db-select:focus {
-  outline: none;
+  /* Forced colours drop the border colour and draw this as a ring. */
+  outline: 2px solid transparent;
   border-color: var(--term-accent);
 }
 .michi-db-input[aria-invalid='true'] {
@@ -553,7 +570,7 @@ textarea.michi-db-input {
 }
 .michi-db-app[data-michi='true'] {
   border-color: var(--term-accent);
-  color: var(--term-accent);
+  color: var(--term-accent-text);
 }
 .michi-db-progress {
   display: inline-flex;
@@ -578,7 +595,7 @@ textarea.michi-db-input {
   background: var(--term-digest);
 }
 .michi-db-link {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   text-decoration: none;
 }
 .michi-db-link:hover {
@@ -608,7 +625,30 @@ textarea.michi-db-input {
   cursor: pointer;
 }
 .michi-db-check:disabled {
-  cursor: default;
+  cursor: not-allowed;
+}
+/* A box's label: its whole cell in a table, so the 13px box is not the only target (ST-21, ST-28). */
+.michi-db-check-hit {
+  display: inline-flex;
+  align-items: center;
+}
+.michi-db-check-hit:has(.michi-db-check:enabled) {
+  cursor: pointer;
+}
+.michi-db-td--check {
+  position: relative;
+}
+.michi-db-td--check > .michi-db-check-hit,
+.michi-db-th--check > .michi-db-check-hit {
+  position: absolute;
+  inset: 0;
+  padding: 0 8px;
+}
+.michi-db-cell > .michi-db-check-hit {
+  flex: 1;
+  align-self: stretch;
+  margin: 0 -10px;
+  padding: 0 10px;
 }
 
 /* ── Editors ─────────────────────────────────────────────────── */
@@ -672,7 +712,6 @@ textarea.michi-db-input {
 }
 .michi-db-picker__option:hover,
 .michi-db-picker__option:focus-visible {
-  outline: none;
   background: var(--term-hover-bg, var(--term-alt));
 }
 .michi-db-picker__option[data-locked='true'] {
@@ -928,16 +967,19 @@ textarea.michi-db-input {
   font: inherit;
   font-size: var(--fs-md);
   cursor: pointer;
-  opacity: 0;
   transition: opacity var(--t-quick) ease;
 }
-.michi-db-col:hover .michi-db-col__add,
-.michi-db-col__add:focus-visible {
-  opacity: 1;
-}
-@media (hover: none) {
+/* A column's New shows while the pointer or the keyboard is in the column; hidden, it takes no
+   clicks. A touch screen always shows it. */
+@media (hover: hover) {
   .michi-db-col__add {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .michi-db-col:is(:hover, :has(:focus-visible)) .michi-db-col__add,
+  .michi-db-col__add:focus-visible {
     opacity: 1;
+    pointer-events: auto;
   }
 }
 .michi-db-col__add:hover {
@@ -1052,7 +1094,7 @@ textarea.michi-db-input {
   left: 3px;
 }
 .michi-db-tl__days > span[data-today='true'] {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-weight: 600;
 }
 .michi-db-tl__lane {
@@ -1288,7 +1330,7 @@ textarea.michi-db-input {
 .michi-db-off__link {
   border: 0;
   background: transparent;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   cursor: pointer;
 }
@@ -1330,15 +1372,11 @@ textarea.michi-db-input {
   width: 100%;
 }
 
-.michi-db-batch {
-  transition: bottom var(--t-soft) ease;
-}
 .michi-batch__btn[data-danger='true'] {
   color: var(--term-danger-text);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .michi-db-batch,
   .michi-db-switch__track,
   .michi-db-switch__track::after {
     transition: none;
@@ -1360,7 +1398,7 @@ textarea.michi-db-input {
   max-width: 100%;
   padding: 1px 7px 1px 5px;
   border: 1px solid var(--term-line);
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-surface);
   color: var(--term-mid);
   font: inherit;
@@ -1396,7 +1434,7 @@ button.michi-db-thread:hover {
   box-shadow: inset 3px 0 0 var(--term-waiting), 0 0 0 1px var(--term-accent);
 }
 .michi-card__attention {
-  color: var(--term-waiting);
+  color: var(--term-waiting-text);
   font-weight: 500;
 }
 .michi-card__none {
@@ -1476,9 +1514,9 @@ button.michi-db-peek__thread:hover {
 }
 .michi-task-mark {
   padding: 0 6px;
-  border-radius: 999px;
+  border-radius: var(--ui-radius-pill);
   background: color-mix(in srgb, var(--term-accent) 14%, transparent);
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-size: var(--fs-xs);
   font-weight: 500;
   line-height: 1.6;

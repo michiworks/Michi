@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { Sparkles } from 'lucide-react';
 import { joinAnd, plural, type CompanionActor, type MichiDatabase, type MichiDbCellValue, type MichiDbColumn, type PageChangeDto, type TaskMark, type TaskOrigin, type TaskUpkeep } from 'michi-shared';
 import { useCompanionName } from '../../../../state/companion/companionName';
+import { CompanionGlyph } from '../../companion/CompanionGlyph';
 import { pagesUpkeepTitle } from '../../scheduled/metaAgent/metaAgentCopy';
 import { formatMichiAgo } from '../michiFormat';
 import { michiOneLine } from '../michiPlainText';
@@ -144,7 +144,7 @@ export function TaskUpkeepLine({ upkeep, now, undoing = false, onUndo, onOpenSou
   const source = upkeep.source;
   return (
     <p className="michi-task-upkeep">
-      <Sparkles size={12} strokeWidth={1.7} aria-hidden="true" />
+      <CompanionGlyph size={12} />
       {/* Announced alone: the age beside it changes every minute and must not be read out again. */}
       <span className="sr-only" role="status">{summary}</span>
       <span aria-hidden="true">{summary}</span>

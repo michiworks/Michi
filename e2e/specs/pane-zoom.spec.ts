@@ -95,6 +95,16 @@ test.describe('pane zoom', () => {
     await press(page, 'Tab', { ctrlKey: true, metaKey: false });
     await expect(strip(page)).toHaveAttribute('data-pane-zoomed', 'third');
 
+    // Hovering the pill lists the hidden panes; picking one moves the zoom.
+    await exit.hover();
+    const hidden = page.getByTestId('pane-zoom-hidden-list');
+    await expect(hidden.getByRole('menuitem')).toHaveText(['root conversation', 'second conversation']);
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: info.outputPath('hidden-list.png') });
+    await hidden.getByRole('menuitem', { name: 'root conversation' }).click();
+    await expect(strip(page)).toHaveAttribute('data-pane-zoomed', 'root');
+    await expect(hidden).toHaveCount(0);
+
     await exit.click();
     await expect(strip(page)).not.toHaveAttribute('data-pane-zoomed');
     await expect.poll(async () => (await shown(page)).panes.map(pane => pane.width)

@@ -5,6 +5,7 @@ import { chatNodeOf, isRunOwner, runIdOfOwner } from '../ownerMapping';
 import { reportConversationNoChange } from '../../services/scheduledJobs/conversationBatch';
 import { michiDocsTool } from '../../services/michiDocs';
 import { michiSkillsTool } from '../../services/skills/michiSkillsTool';
+import { spawnBranchesOffered } from '../../services/spawnLimits';
 import type { AgentToolBridge } from "../toolBridge";
 import {
     AGENT_RUN_TOOL_NAMES,
@@ -37,6 +38,7 @@ import { executeWrite } from "../tools/write";
 import { executeEdit } from "../tools/edit";
 import { executeBash } from "../tools/bash";
 import { resolveShowImage } from "michi-runtime/internal/core/showImage";
+import { prepareShowBlocks } from "../showBlocks";
 import { askUserThreadMessageApprover, sendToThreadTool } from "../threadMessageTool";
 import { askUserScheduledJobApprover, scheduledJobTool, type ScheduledJobToolName } from "../scheduledJobTools";
 import { memoryTool } from "../memoryTools";
@@ -115,9 +117,9 @@ export interface BuildPiToolsOpts {
      */
     ownerUserId?: string | null;
     /**
-     * Push a side-effect NormalizedEvent (e.g. an inline `image`) into the
-     * active turn's event queue. show_image uses this to render an image in the
-     * UI without feeding it into the LLM's context. No-op if no turn is active.
+     * Push a side-effect NormalizedEvent (an inline `image` or `blocks`) into the
+     * active turn's event queue. show_image and show_blocks use this to draw in
+     * the reply without feeding it into the LLM's context. No-op if no turn is active.
      */
     emitImage?: (ev: NormalizedEvent) => void;
     /**
@@ -367,7 +369,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                         nodeId: chatNodeOf(opts.owner) ?? null }, args.url) };
             // A business effect the bridge lacks offers no tool.
             case "spawn_branches":
-                if (!bridge.spawnBranches) return null;
+                if (!bridge.spawnBranches || !spawnBranchesOffered(callerNodeId)) return null;
                 return {
                     name: t.name,
                     label: "Spawn branches",
@@ -480,6 +482,25 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                     },
                 };
 
+            case "show_blocks":
+                // An Agent Run has no reply to draw blocks in, nor a user to answer them.
+                if (isRunOwner(opts.owner) || !emitImage) return null;
+                return {
+                    name: t.name,
+                    label: "Show blocks",
+                    description: t.description,
+                    parameters,
+                    execute: async (_id: string, args: any) => {
+                        const { __tool_use_purpose: _purpose, ...input } = (args ?? {}) as Record<string, unknown>;
+                        const shown = prepareShowBlocks(input);
+                        if (!shown.ok) {
+                            return { content: [{ type: "text", text: shown.error }], details: { error: shown.error }, isError: true };
+                        }
+                        emitImage({ kind: "host_event", type: "blocks", payload: shown.payload });
+                        return { content: [{ type: "text", text: shown.text }], details: { count: shown.payload.blocks.length } };
+                    },
+                };
+
             case "list_threads": {
                 const gc = getRuntimeDeps().globalContext;
                 if (!gc) return null;
@@ -512,7 +533,7 @@ export function buildPiTools(opts: BuildPiToolsOpts): any[] {
                     parameters,
                     execute: async (_id: string, args: any) => {
                         if (temporaryChatRefuses(callerNodeId)) return temporaryChat();
-                        const result = gc.searchMessages(
+                        const result = await gc.searchMessages(
                             workspaceId,
                             ownerUserId ?? null,
                             String(args?.query ?? ""),

@@ -450,7 +450,7 @@ describe('the rows batch bar', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select Book the hotel' }));
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select Pack' }));
     const bar = screen.getByRole('toolbar', { name: '2 rows selected' });
-    expect(within(bar).getAllByRole('button').map((b) => b.textContent)).toEqual(['Set Priority…', 'Delete', 'Hand to agent…', '×']);
+    expect(within(bar).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Set Priority…', 'Delete', 'Hand to agent…', 'Clear selection']);
 
     fireEvent.click(within(bar).getByRole('button', { name: 'Set Priority…' }));
     const form = screen.getByRole('dialog', { name: 'Set a value on 2 rows' });

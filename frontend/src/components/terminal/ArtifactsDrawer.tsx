@@ -1,7 +1,6 @@
 import { artifactTypeForPath as typeForPath } from 'michi-shared';
 import { downloadArtifactFile } from '../../services/api/artifacts';
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import { Ellipsis } from 'lucide-react';
 import { chatLabel, useChatNodeReader, useChatStore } from '../../state/chatStore';
 import type { ArtifactEntry } from '../../state/chatTypes';
 import { sanitizeContextName } from '../../lib/sanitizeContextName';
@@ -11,6 +10,7 @@ import { artifactHostPath, parentDirectory } from '../../lib/workspaceFilePath';
 import { importWorkspaceFile, importWorkspaceFileUpload, linkWorkspaceFile } from '../../services/api';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { Lightbox } from './Lightbox';
+import { FilePlusIcon, MoreIcon, PlusIcon } from './icons';
 import ContextMenu, { MenuPresence, menuOpenKey, type MenuItem, type MenuSection } from '../ContextMenu';
 import { DrawerShell, type DrawerShellProps } from '../ui/DrawerShell';
 import { Button } from '../ui/controls';
@@ -70,7 +70,9 @@ type Menu = {
   trigger?: HTMLElement;
 };
 
-export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChange, openArtifactId, onOpenArtifactHandled }: Pick<DrawerShellProps, 'open' | 'onClose' | 'motion' | 'onPresenceChange'> & {
+export default function ArtifactsDrawer({ open, onClose, closeAtOnce = onClose, motion, onPresenceChange, openArtifactId, onOpenArtifactHandled }: Pick<DrawerShellProps, 'open' | 'onClose' | 'motion' | 'onPresenceChange'> & {
+  /** Closes the drawer in one frame, once something opened from it shows (TR-39). */
+  closeAtOnce?: () => void;
   /** An artifact another surface asked the drawer to open (showArtifactInDrawer). */
   openArtifactId?: string | null;
   onOpenArtifactHandled?: () => void;
@@ -175,9 +177,9 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
       onLightbox: (src) => setLightbox({ src, name: c.name }),
       onPreview: () => setPreviewId(c.id),
       onError: (message) => { setPreviewId(null); setPasteErr(message); setAdding(true); },
-      onOpened: onClose,
+      onOpened: closeAtOnce,
     }),
-    [activeProject, isMissing, openArtifactPane, onClose],
+    [activeProject, isMissing, openArtifactPane, closeAtOnce],
   );
 
   useEffect(() => {
@@ -199,16 +201,16 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
           detail: { nodeId: focusedNodeId, name: c.name },
         }),
       );
-      onClose();
+      closeAtOnce();
     },
-    [focusedNodeId, onClose],
+    [focusedNodeId, closeAtOnce],
   );
 
   const goToConversation = useCallback((nodeId: string) => {
     if (!workspaceId) return;
     revealNode(nodeId, { workspaceId });
-    onClose();
-  }, [workspaceId, revealNode, onClose]);
+    closeAtOnce();
+  }, [workspaceId, revealNode, closeAtOnce]);
 
   const menuSections = useCallback((c: ArtifactEntry): MenuSection[] => {
     const t = artifactType(c);
@@ -360,6 +362,8 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
           type="button"
           className="ws-action-btn"
           aria-label="More actions"
+          aria-haspopup="menu"
+          aria-expanded={!!menu?.header}
           title="More actions"
           onClick={(event) => {
             const trigger = event.currentTarget;
@@ -368,7 +372,7 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
           }}
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
-          <Ellipsis size={16} aria-hidden="true" />
+          <MoreIcon size="lg" />
         </button>
       ) : (
         <>
@@ -381,7 +385,7 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
             aria-label="Add file"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            <FileAddIcon />
+            <FilePlusIcon />
           </button>
           <button
             type="button"
@@ -389,9 +393,9 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
             onClick={() => setAdding((v) => !v)}
             title="Add link or paste text"
             aria-label="Add link or text"
-            style={{ fontSize: 'var(--fs-3xl)', background: adding ? 'var(--term-alt)' : undefined, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            style={{ background: adding ? 'var(--term-alt)' : undefined, WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            +
+            <PlusIcon />
           </button>
         </>
       )}
@@ -441,7 +445,7 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
                   rows={2}
                   style={{ resize: 'vertical' }}
                 />
-                {pasteErr && <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>{pasteErr}</div>}
+                {pasteErr && <div role="alert" style={{ fontSize: 'var(--fs-sm)', color: 'var(--term-danger-text)' }}>{pasteErr}</div>}
                 <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                   <Button
                     variant="secondary"
@@ -480,6 +484,7 @@ export default function ArtifactsDrawer({ open, onClose, motion, onPresenceChang
                         missing={isMissing(c)}
                         time={artifactRowTime(artifactTouchedAt(c), now, g.byDay)}
                         renaming={renameId === c.id}
+                        menuOpen={menu?.id === c.id}
                         onRename={(name) => handleRename(c.id, name)}
                         onRenameEnd={() => setRenameId(null)}
                         onOpen={() => void openArtifact(c)}
@@ -533,6 +538,7 @@ function ArtifactRow({
   missing,
   time,
   renaming,
+  menuOpen,
   onRename,
   onRenameEnd,
   onOpen,
@@ -544,6 +550,7 @@ function ArtifactRow({
   missing: boolean;
   time: string;
   renaming: boolean;
+  menuOpen: boolean;
   /** False: artifacts can't take that name, and the field stays open. */
   onRename: (name: string) => boolean | void;
   onRenameEnd: () => void;
@@ -591,24 +598,16 @@ function ArtifactRow({
         type="button"
         className="artifacts-row__more"
         aria-label={`More actions for ${c.name}`}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
           const row = event.currentTarget.closest('li');
           if (row) onMenu(row, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, event.currentTarget);
         }}
       >
-        <Ellipsis size={16} aria-hidden="true" />
+        <MoreIcon size="lg" />
       </button>
     </li>
-  );
-}
-
-function FileAddIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round">
-      <path d="M3 2.5h6l4 4v7H3v-11z" />
-      <path d="M9 2.5v4h4" />
-      <path d="M8 8.5v3M6.5 10h3" />
-    </svg>
   );
 }

@@ -65,8 +65,7 @@
  *    version of it and what consolidation merged into it, each with a
  *    tombstone so automatic extraction never saves it again from where it
  *    came from (memoryService.forgetMemory). Past conversations are chat
- *    history, which it leaves as they are (the reply footer's Don't recall
- *    keeps an excerpt out of recall): a past conversation's ref keeps that
+ *    history, which it leaves as they are: a past conversation's ref keeps that
  *    turn out of automatic memory, so what the user said there and asks to
  *    forget is never saved, even when extraction has not read it yet (an
  *    extraction reading it meanwhile drops its answer: extractionRun's
@@ -81,8 +80,18 @@
  *    earlier versions of memories (what a correction replaced, a note
  *    consolidation put away) only when the agent asks for history. With
  *    nothing found in this workspace it returns what the user's other
- *    workspaces hold, each labelled. What it returns is noted for the line
- *    under the reply (services/memory/replySources.ts).
+ *    workspaces hold, each labelled. The memories it returns are noted for
+ *    the line under the reply (services/memory/replySources.ts).
+ *  - A note can have an end (validUntil: automatic extraction gives one when
+ *    the user said when it ends; the user sets one in Settings → Memory).
+ *    Past it, packs leave the note out and memory_search shows it only with
+ *    history; results show a note's last day (services/memory/validity.ts).
+ *    The tools take no end: offering one made agents repeat what the user
+ *    asked them not to keep when it was temporary (validity A/B, 2026-11-11).
+ *    A correction of the same text, and an automatic note made the user's
+ *    own, keep the end; a corrected text has none. Saving a note the scope
+ *    already holds, and a correction the user asked for, confirm it
+ *    (last_confirmed_at).
  *  - A note consolidation put away into a later one is a memory of its own:
  *    memory_delete forgets it alone (memory_update refuses it: it is
  *    history). An earlier version of a corrected memory goes with its memory.
@@ -125,8 +134,8 @@ import {
   type MemoryCaller,
 } from "../services/memory/memoryService";
 import {
-  activeMemoriesFromTurn, activeMemoryWithBody, consolidationRows, currentCorrection, readConversationMemoryMode, storedMemories,
-  storedMemoryByRowId, turnStartedAt, type StoredMemory,
+  activeMemoriesFromTurn, activeMemoryWithBody, consolidationRows, currentCorrection, markMemoriesConfirmed, readConversationMemoryMode,
+  storedMemories, storedMemoryByRowId, turnStartedAt, type StoredMemory,
 } from "../services/memory/memoryRepository";
 import { requestAgentOwnerOrNull } from "../services/agentOwner";
 import { conversationRef, memoryDay, memoryRef, parseRef, type ParsedRef } from "../services/memory/memoryRefs";
@@ -143,9 +152,10 @@ import {
   type RecallHit,
   type RecallNeighbour,
 } from "../services/memory/recallIndex";
-import { noteSearched, type SearchedItem } from "../services/memory/replySources";
+import { noteSearched } from "../services/memory/replySources";
 import { containsCredential, withoutCredentials } from "../services/memory/secrets";
 import { typedTextBacks, typedTextNames, typedTextOfTurn, vouchedForRecall } from "../services/memory/typedText";
+import { lastValidDay } from "../services/memory/validity";
 import { activeCompanionTaint, activeTurnTrust, isCompanionMaterial } from "../services/turnTrust";
 import type { MemoryToolName } from "./memoryToolNames";
 import { CodedToolError, codedErrorResult, jsonResult, type McpTextResult } from "./tools/types";
@@ -468,6 +478,11 @@ function optionalDate(value: unknown, name: string): number | null {
   return time;
 }
 
+/** A view's validUntil: the note's last true day, when it has an end. */
+function validUntilView(validUntil: number | null | undefined): Record<string, unknown> {
+  return typeof validUntil === "number" ? { validUntil: lastValidDay(validUntil) } : {};
+}
+
 // ── Views ────────────────────────────────────────────────────────────────────
 
 function appliesToOf(scope: MemoryScope): AppliesTo {
@@ -492,6 +507,7 @@ function memoryView(record: MemoryRecord, ref: string | null): Record<string, un
     savedByUser: record.origin === "explicit",
     ...importedFrom(record.importSource),
     date: memoryDay(record.observedAt ?? record.createdAt),
+    ...validUntilView(record.validUntil),
   };
 }
 
@@ -520,6 +536,7 @@ function hitView(s: MemorySession, hit: RecallHit, workspaceLabel: (id: string) 
       kind: hit.memory.kind,
       ...(hit.memory.topic ? { topic: hit.memory.topic } : {}),
       date: memoryDay(hit.at),
+      ...validUntilView(hit.memory.validUntil),
       appliesTo: hit.workspaceId === null ? "everywhere" : hit.workspaceId === s.workspaceId ? "this_workspace" : "another_workspace",
       ...elsewhere,
       ...(hit.title ? { from: hit.title } : {}),
@@ -636,8 +653,7 @@ function searchTool(s: MemorySession, args: Record<string, unknown>): McpTextRes
   // Nothing here: what the user's other workspaces hold, labelled with their workspace (as scope all shows them).
   const widened = hits.length === 0 && scope !== "all" && !!query;
   if (widened) hits = search("all");
-  givenToRunningTurn(s, hits.flatMap((hit): SearchedItem[] => (hit.kind === "memory" && hit.memory ? [{ kind: "memory", id: hit.memory.id }]
-    : hit.kind === "turn" ? [{ kind: "conversation", docId: hit.docId, text: conversationText(hit) }] : [])));
+  givenToRunningTurn(s, hits.flatMap((hit) => (hit.kind === "memory" && hit.memory ? [hit.memory.id] : [])));
   const names = workspaceNames();
   const note = [...(widened ? [SEARCH_ELSEWHERE] : []), SEARCH_NOTE, ...(history ? [HISTORY_NOTE] : [])].join(" ");
   return jsonResult({
@@ -653,10 +669,10 @@ function searchTool(s: MemorySession, args: Record<string, unknown>): McpTextRes
 
 const SEARCH_ELSEWHERE = "Nothing matched in this workspace; these results are from the user's other workspaces.";
 
-/** The running turn was given these memories and past-conversation excerpts: its reply may be based on any of them (replySources.ts). */
-function givenToRunningTurn(s: MemorySession, items: readonly SearchedItem[]): void {
-  if (items.length === 0) return;
-  noteSearched({ ownerUserId: s.caller.ownerUserId, nodeId: s.nodeId, turnId: runningTurn(s.nodeId).turnId, items });
+/** The running turn was given these memories: its reply may be based on any of them (replySources.ts). */
+function givenToRunningTurn(s: MemorySession, memoryIds: readonly string[]): void {
+  if (memoryIds.length === 0) return;
+  noteSearched({ ownerUserId: s.caller.ownerUserId, nodeId: s.nodeId, turnId: runningTurn(s.nodeId).turnId, memoryIds });
 }
 
 /** memory_search with a ref the agent was shown: that item, in full (an earlier version too: the agent names it). */
@@ -665,7 +681,7 @@ function refTool(s: MemorySession, ref: ParsedRef, text: string): McpTextResult 
     const stored = storedMemoryByRowId(s.caller.ownerUserId, ref.rowId);
     if (!stored || !readableHere(s, stored.record)) throw new CodedToolError("NOT_FOUND", `nothing found for ${text}`);
     const { record } = stored;
-    givenToRunningTurn(s, [{ kind: "memory", id: record.id }]);
+    givenToRunningTurn(s, [record.id]);
     const unverified = !vouchedForRecall({
       body: record.body, sourceRisk: record.sourceRisk, nodeId: record.source?.nodeId ?? null, turnId: record.source?.turnId ?? null,
     });
@@ -687,7 +703,6 @@ function refTool(s: MemorySession, ref: ParsedRef, text: string): McpTextResult 
   const view = recallTurn(conversationScope(s, ref.docId));
   if (!view) throw new CodedToolError("NOT_FOUND", `nothing found for ${text}`);
   const turnText = withoutCredentials(view.text);
-  givenToRunningTurn(s, [{ kind: "conversation", docId: view.hit.docId, text: turnText.slice(0, 4_000) }]);
   const around = (turn: RecallNeighbour | null) => (turn
     ? { ref: conversationRef(turn.docId), date: memoryDay(turn.at), text: withoutCredentials(turn.text) } : null);
   const previous = around(view.previous);
@@ -781,9 +796,14 @@ function saveTool(s: MemorySession, args: Record<string, unknown>): McpTextResul
   const provenance = writeProvenance(s.nodeId, body);
   const origin: MemoryOrigin = userAsked ? "explicit" : "extracted";
   const ownerUserId = s.caller.ownerUserId;
-  // The same note is not kept twice; what Michi saved on its own and the user now asks for becomes theirs.
+  // The same note is not kept twice, and saying it again confirms it; what Michi saved on its own and the user now asks
+  // for becomes theirs.
   const same = activeMemoryWithBody(ownerUserId, s.workspaceId, body);
-  if (same && (same.record.origin === "explicit" || !userAsked)) return savedResult(s, "already_saved", same.record);
+  if (same && (same.record.origin === "explicit" || !userAsked)) {
+    // Companion material is not the user saying it again.
+    if (!provenance.companionMaterial) markMemoriesConfirmed(ownerUserId, [same.record.id], Date.now());
+    return savedResult(s, "already_saved", same.record);
+  }
   if (provenance.companionMaterial) return companionMaterialResult();
   const turnId = provenance.turn.turnId;
   const fromTurn = turnId ? activeMemoriesFromTurn(ownerUserId, turnId).filter((memory) => memory.origin === origin).length : 0;
@@ -800,12 +820,13 @@ function saveTool(s: MemorySession, args: Record<string, unknown>): McpTextResul
     const removedAt = removedFor(s, provenance.turn.turnId, body, scope);
     if (removedAt !== null) return deletedBefore(removedAt, userAsked);
   }
-  // An automatic memory the user now asks for becomes theirs, keeping its search words unless new ones are given.
+  // An automatic memory the user now asks for becomes theirs, keeping its end, and its search words unless new ones are given.
   const kept = same && !keywords && same.record.keywords?.length ? { keywords: same.record.keywords } : {};
   const write = {
     body, source: provenance.source, status: "active" as const, origin, sourceRisk: provenance.sourceRisk,
     ...(keywords ? { keywords } : kept),
     ...(topic ? { topic } : {}),
+    validUntil: same?.record.validUntil ?? null,
   };
   const record = same
     ? supersedeMemory(s.caller, same.record.id, { kind, ...write })
@@ -836,18 +857,21 @@ function updateTool(s: MemorySession, args: Record<string, unknown>): McpTextRes
   const origin: MemoryOrigin = old.origin === "explicit" || userAsked === true ? "explicit" : "extracted";
   const madeTheirs = origin !== old.origin;
   if (body === old.body && keywords === null && (topic === null || topic === old.topic) && !madeTheirs) {
+    if (userAsked === true) markMemoriesConfirmed(s.caller.ownerUserId, [old.id], Date.now());
     return jsonResult({ status: "unchanged", ref: refOf(target.stored), memory: memoryView(old, refOf(target.stored)) });
   }
   const provenance = writeProvenance(s.nodeId, body);
   if (provenance.companionMaterial) return companionMaterialResult();
-  // The same text keeps its search words unless new ones are given; a corrected text takes only the new ones.
+  // The same text keeps its end, and its search words unless new ones are given; a corrected text takes only the new ones.
   const kept = body === old.body && old.keywords?.length ? { keywords: old.keywords } : {};
   const record = supersedeMemory(s.caller, old.id, {
     body, source: provenance.source, status: "active", origin, sourceRisk: provenance.sourceRisk,
     ...(keywords ? { keywords } : kept),
     // The old topic stays unless a new one is given (supersedeMemory).
     ...(topic ? { topic } : {}),
+    validUntil: body === old.body ? old.validUntil ?? null : null,
   });
+  if (userAsked === true) markMemoriesConfirmed(s.caller.ownerUserId, [record.id], Date.now());
   const ref = refOfRecord(s, record);
   return jsonResult({
     status: "updated",

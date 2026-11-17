@@ -73,6 +73,16 @@ describe('useNodeSearch', () => {
     expect(result.current.nodes).toEqual([]);
   });
 
+  it('searches the same words again for a new attempt (a Retry)', async () => {
+    api.searchNodesGrouped.mockRejectedValueOnce(new Error('backend unreachable')).mockResolvedValue({ results: [HIT], totalNodes: 1 });
+    const { result, rerender } = renderHook(({ attempt }) => useNodeSearch('schema', [], attempt), { initialProps: { attempt: 0 } });
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    rerender({ attempt: 1 });
+    expect(result.current.status).toBe('loading');
+    await waitFor(() => expect(result.current.nodes).toHaveLength(1));
+    expect(api.searchNodesGrouped).toHaveBeenCalledTimes(2);
+  });
+
   it('shows the hits of a well-formed answer', async () => {
     api.searchNodesGrouped.mockResolvedValue({ results: [HIT], totalNodes: 1 });
     const { result } = renderHook(() => useNodeSearch('schema'));

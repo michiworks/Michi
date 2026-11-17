@@ -61,13 +61,25 @@ describe('ComposerModelTrigger switch hint', () => {
 describe('PaneComposerToolbarLeft', () => {
   test('offers attach and mention, and leaves both out where they do nothing (the assistant)', () => {
     const view = renderToolbar();
-    expect(screen.getByTitle('Attach file')).toBeTruthy();
-    expect(screen.getByTitle('Mention context or node')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Attach file' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mention context or node' })).toBeTruthy();
     view.unmount();
     renderToolbar({ contextTools: false });
-    expect(screen.queryByTitle('Attach file')).toBeNull();
-    expect(screen.queryByTitle(/Open a workspace to attach/)).toBeNull();
-    expect(screen.queryByTitle('Mention context or node')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Attach file' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Mention context or node' })).toBeNull();
+  });
+
+  test('keeps attach focusable without a workspace, ignoring clicks and saying why on keyboard focus', async () => {
+    const onPickFile = vi.fn();
+    renderToolbar({ canAttach: false, onPickFile });
+    const attach = screen.getByRole('button', { name: 'Attach file' });
+    expect(attach.getAttribute('aria-disabled')).toBe('true');
+    expect(attach.hasAttribute('disabled')).toBe(false);
+    fireEvent.click(attach);
+    expect(onPickFile).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    fireEvent.focus(attach);
+    expect((await screen.findByRole('tooltip')).textContent).toBe('Open a workspace to attach files');
   });
 
   test('keeps model settings reachable in the narrowest toolbar', () => {

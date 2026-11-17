@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import { paneDimOpacity, usePaneShellStyle } from './usePaneShellStyle';
+import { paneRecedeOpacity, paneSurface, usePaneShellStyle } from './usePaneShellStyle';
 
 // --- Mocks ---
 
@@ -14,7 +14,28 @@ vi.mock('../state/chatStore', () => ({
   useChatStore: () => ({ focusedPane: mockFocusedPane }),
 }));
 
-const dimOf = (style: React.CSSProperties) => (style as Record<string, unknown>)['--pane-dim'];
+/** How far the shell's recede element has sunk, or null when it renders none. */
+const dimOf = (shell: ReturnType<typeof usePaneShellStyle>) =>
+  shell.recede ? (shell.recede.props as { style: React.CSSProperties }).style.opacity : null;
+
+describe('paneRecedeOpacity', () => {
+  it('doubles the strength and holds at a surface fully sunk', () => {
+    expect(paneRecedeOpacity(0)).toBe(0);
+    expect(paneRecedeOpacity(20)).toBeCloseTo(0.4);
+    expect(paneRecedeOpacity(30)).toBeCloseTo(0.6);
+    expect(paneRecedeOpacity(50)).toBe(1);
+    expect(paneRecedeOpacity(100)).toBe(1);
+  });
+});
+
+describe('paneSurface', () => {
+  it('mixes the recede fill into the pane, and leaves a focused pane its own colour', () => {
+    expect(paneSurface(0)).toBe('var(--term-pane-bg, var(--term-surface))');
+    expect(paneSurface(0.4)).toBe(
+      'color-mix(in srgb, var(--term-recede-fill) 40%, var(--term-pane-bg, var(--term-surface)))',
+    );
+  });
+});
 
 describe('usePaneShellStyle', () => {
   beforeEach(() => {
@@ -23,38 +44,50 @@ describe('usePaneShellStyle', () => {
     mockPrefs.focusDim = 40;
   });
 
-  it('dims an unfocused pane with the veil, not a filter or opacity on the pane', () => {
+  it('sinks an unfocused pane with its recede element, not a filter, opacity or property on the pane', () => {
     mockFocusedPane = 'other-node';
     const { result } = renderHook(() => usePaneShellStyle('node-1'));
-    // The filter re-ran over the whole subtree; the veil (.terminal-pane::after) reads this.
-    expect(result.current.filter).toBeUndefined();
-    expect(result.current.opacity).toBeUndefined();
-    // 40% focus dim at the old brightness factor: brightness(0.76) is a 0.24 black veil.
-    expect(dimOf(result.current)).toBeCloseTo(0.24);
-    expect(result.current.isolation).toBe('isolate');
-    expect(result.current.position).toBe('relative');
+    // The filter re-ran over the whole subtree, and so would an inherited
+    // property on the root: the recede element carries the sink itself.
+    const { style } = result.current;
+    expect(style.filter).toBeUndefined();
+    expect(style.opacity).toBeUndefined();
+    expect(Object.keys(style).filter((key) => key.startsWith('--'))).toEqual([]);
+    expect(result.current.recede?.props).toMatchObject({ className: 'terminal-pane__recede', 'aria-hidden': true });
+    expect(dimOf(result.current)).toBeCloseTo(0.8);
+    // Bands that paint over the pane's content take the sunk colour themselves.
+    expect(result.current.surface).toContain('var(--term-recede-fill) 80%');
+    // The recede sits on a negative rung, so the pane must be its stacking context.
+    expect(style.isolation).toBe('isolate');
+    expect(style.position).toBe('relative');
   });
 
-  it('leaves the focused pane, and every pane while none is focused, without a veil', () => {
+  it('keeps the root style when focus moves, so only the recede restyles', () => {
+    mockFocusedPane = 'other-node';
+    const { result, rerender } = renderHook(() => usePaneShellStyle('node-1'));
+    const before = result.current.style;
     mockFocusedPane = 'node-1';
-    expect(dimOf(renderHook(() => usePaneShellStyle('node-1')).result.current)).toBe(0);
+    rerender();
+    expect(result.current.style).toBe(before);
+    expect(dimOf(result.current)).toBe(0);
+  });
+
+  it('leaves the focused pane, and every pane while none is focused, at its own surface', () => {
+    mockFocusedPane = 'node-1';
+    const focused = renderHook(() => usePaneShellStyle('node-1')).result.current;
+    expect(dimOf(focused)).toBe(0);
+    expect(focused.surface).toBe('var(--term-pane-bg, var(--term-surface))');
     mockFocusedPane = null;
     expect(dimOf(renderHook(() => usePaneShellStyle('node-1')).result.current)).toBe(0);
   });
 
-  it('never dims a pane that opts out', () => {
+  it('never sinks a pane that opts out', () => {
     mockFocusedPane = 'other-node';
     const { result } = renderHook(() => usePaneShellStyle('node-1', { dim: false }));
-    expect(dimOf(result.current)).toBe(0);
-  });
-
-  it('matches the brightness() the Topbar caption cell keeps', () => {
-    for (const focusDim of [0, 20, 40, 100]) {
-      // A black veil at opacity a over color c leaves c * (1 - a): brightness(1 - a).
-      expect(1 - paneDimOpacity(focusDim)).toBeCloseTo(1 - (focusDim / 100) * 0.6);
-    }
+    expect(result.current.recede).toBeNull();
+    expect(result.current.surface).toBe('var(--term-pane-bg, var(--term-surface))');
   });
 });
-// The veil itself (.terminal-pane::after in index.css: black, pointer-events
-// none, over the pane's raised children) is checked in a real browser by
-// e2e/specs/pane-focus-dim.spec.ts; Vitest loads no CSS.
+// The recede itself (.terminal-pane__recede in index.css: the palette's deep
+// surface, under the pane's content, pointer-events none) is checked in a real
+// browser by e2e/specs/pane-focus-dim.spec.ts; Vitest loads no CSS.

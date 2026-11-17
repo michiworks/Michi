@@ -8,6 +8,7 @@ import {
   type MemoryChangedEvent,
   type MemoryCreateRequest,
   type MemoryExtractionState,
+  type MemoryGuess,
   type MemoryListResponse,
   type MemoryMode,
   type MemoryProfileCitation,
@@ -24,8 +25,8 @@ import { backendFetch } from './backendRequest';
 import { openSseFeed } from './sseFeed';
 
 // Michi Memory on this machine's backend (backend/src/routes/memories.ts):
-// the records, the mode, the profile of the user, the change feed, and
-// automatic memory's status (routes/memoryExtraction.ts). A conversation's
+// the records, the mode, the profile of the user, the guesses, the change
+// feed, and automatic memory's status (routes/memoryExtraction.ts). A conversation's
 // memory setting is read from the backend that holds the conversation. A
 // backend without a route answers 404; callers show that as unavailable
 // rather than as a failure.
@@ -78,7 +79,8 @@ export function isMemoryRecord(value: unknown): value is MemoryRecord {
     && isMemoryKind(value.kind) && isMemoryStatus(value.status) && isMemoryOrigin(value.origin)
     && typeof value.version === 'number' && (value.sourceRisk === null || value.sourceRisk === 'untrusted')
     && (value.supersedesId === null || typeof value.supersedesId === 'string')
-    && typeof value.createdAt === 'number' && typeof value.updatedAt === 'number';
+    && typeof value.createdAt === 'number' && typeof value.updatedAt === 'number'
+    && (value.validUntil === undefined || value.validUntil === null || typeof value.validUntil === 'number');
 }
 
 function isMemoryChangedEvent(value: unknown): value is MemoryChangedEvent {
@@ -192,7 +194,7 @@ export async function resetMemories(): Promise<{ removed: number }> {
 
 // ── the profile of the user ("About the user") ─────────────────────────────
 
-/** A line of the profile; `index` is its place in the backend's list, which Remove names. */
+/** A line of the profile; `index` is its place in the backend's list. */
 export interface MemoryProfileLine {
   index: number;
   topic: string;
@@ -233,39 +235,57 @@ export async function rebuildMemoryProfile(): Promise<MemoryProfileView> {
   return profileOf(await request('/memory-profile/rebuild', { method: 'POST', body: {} }));
 }
 
-/**
- * Deletes the memories a line cites (the line goes with them) and asks for a
- * rebuild. `version` is the profile's as read: a version_conflict
- * MemoryApiError when it was rebuilt since, not_found when there is no such line.
- */
-export async function removeMemoryProfileLine(index: number, version: number): Promise<MemoryProfileView> {
-  return profileOf(await request('/memory-profile/remove-line', { method: 'POST', body: { index, version } }));
+// ── guesses ────────────────────────────────────────────────────────────────
+
+function isGuess(value: unknown): value is MemoryGuess {
+  return isObject(value) && typeof value.id === 'string' && typeof value.body === 'string' && typeof value.createdAt === 'number'
+    && Array.isArray(value.cites);
+}
+
+/** The pending guesses, newest first; [] when this backend has none (or no such route). */
+export async function fetchMemoryGuesses(signal?: AbortSignal): Promise<MemoryGuess[]> {
+  try {
+    const body = await request('/memory-guesses', { signal });
+    if (!isObject(body) || !Array.isArray(body.guesses)) return [];
+    return body.guesses.filter(isGuess).map((guess) => ({ ...guess, cites: guess.cites.filter(isCitation) }));
+  } catch (error) {
+    if (isMemoryUnavailable(error)) return [];
+    throw error;
+  }
+}
+
+/** That's right: the guess becomes a memory the user saved; answers that memory. */
+export async function confirmMemoryGuess(id: string): Promise<MemoryRecord> {
+  return recordOf(await request(`/memory-guesses/${encodeURIComponent(id)}/confirm`, { method: 'POST', body: {} }));
+}
+
+/** Not true: the guess goes, and Michi doesn't guess it again. */
+export async function rejectMemoryGuess(id: string): Promise<void> {
+  await request(`/memory-guesses/${encodeURIComponent(id)}/reject`, { method: 'POST', body: {} });
 }
 
 // ── what a reply was based on ──────────────────────────────────────────────
 
 const IMPORT_SOURCES = ['claude', 'codex', 'kiro'];
 
-function isFrom(value: unknown, titleRequired: boolean): boolean {
+function isFrom(value: unknown): boolean {
   return isObject(value) && typeof value.nodeId === 'string' && (value.messageId === null || typeof value.messageId === 'string')
-    && (typeof value.title === 'string' || (!titleRequired && value.title === null));
+    && typeof value.title === 'string';
 }
 
+/** A memory source (an older backend may also list past-conversation turns: they are left out). */
 function isReplyMemorySource(value: unknown): value is ReplyMemorySource {
-  if (!isObject(value) || typeof value.text !== 'string' || typeof value.at !== 'number') return false;
-  if (value.kind === 'memory') {
-    return typeof value.memoryId === 'string' && (value.savedBy === 'user' || value.savedBy === 'michi' || value.savedBy === 'import')
-      && (value.importSource === undefined || IMPORT_SOURCES.includes(value.importSource as string))
-      && (value.from === null || isFrom(value.from, true));
-  }
-  return value.kind === 'conversation' && typeof value.docId === 'number' && isFrom(value.from, false);
+  if (!isObject(value) || value.kind !== 'memory' || typeof value.text !== 'string' || typeof value.at !== 'number') return false;
+  return typeof value.memoryId === 'string' && (value.savedBy === 'user' || value.savedBy === 'michi' || value.savedBy === 'import')
+    && (value.importSource === undefined || IMPORT_SOURCES.includes(value.importSource as string))
+    && (value.from === null || isFrom(value.from));
 }
 
 /**
  * GET /api/nodes/:nodeId/memory-sources on the conversation's backend
- * (`apiBase`): for each of these assistant messages, the memories and past
- * conversations its reply was based on. A message with none is left out. A
- * backend without the route rejects with an unavailable MemoryApiError.
+ * (`apiBase`): for each of these assistant messages, the memories its reply
+ * was based on. A message with none is left out. A backend without the route
+ * rejects with an unavailable MemoryApiError.
  */
 export async function fetchReplyMemorySources(apiBase: string, nodeId: string, messageIds: readonly string[], signal?: AbortSignal): Promise<ReplyMemorySourcesResponse> {
   const query = messageIds.map((id) => encodeURIComponent(id)).join(',');
@@ -275,11 +295,6 @@ export async function fetchReplyMemorySources(apiBase: string, nodeId: string, m
     messages: body.messages.flatMap((message) => (isObject(message) && typeof message.messageId === 'string' && Array.isArray(message.sources)
       ? [{ messageId: message.messageId, sources: message.sources.filter(isReplyMemorySource) }] : [])),
   };
-}
-
-/** Don't recall: the conversation's backend stops recalling that past turn; the conversation itself is unchanged. */
-export async function hideRecalledTurn(apiBase: string, docId: number): Promise<void> {
-  await request('/memory-recall/hide', { method: 'POST', body: { docId } }, apiBase);
 }
 
 // ── automatic memory (C5) ──────────────────────────────────────────────────

@@ -1,12 +1,21 @@
 import type { Prefs } from './prefs';
 import type { Tree, ChatNodeState, ProjectEdge, Project } from './chatTypes';
-import { buildBranchChildrenOf, type TreeNode } from './tree';
+import { buildBranchChildrenOf, isBranchEdge, type TreeNode } from './tree';
 import { isSystemWorkspace } from './assistant/systemWorkspace';
 import { isListedThread, isVisibleConversationNode } from './conversationVisibility';
 import { hasUnseenCompletion } from './completionFacts';
+import { nodeAwaiting } from './spaceConversations/liveStatus';
+import { interruptionCauseOfKind } from './turnInterruption';
 
 
 type ExpandedMaps = Prefs['sidebarExpanded'];
+
+/** The threads of `project` that Select all takes: the ones the sidebar lists, merge chats aside. */
+export function selectableTreeIds(project: Pick<Project, 'trees'>, nodes: Record<string, ChatNodeState>): string[] {
+  return project.trees
+    .filter((tree) => tree.kind !== 'merge' && isListedThread(tree, nodes[tree.rootNodeId]))
+    .map((tree) => tree.id);
+}
 
 /** Explicit user toggle wins; otherwise the active workspace defaults open. */
 export function isWorkspaceExpanded(
@@ -88,6 +97,30 @@ export function orderPinnedFirst(root: TreeNode, pinnedAt: NodePinnedAt): TreeNo
   return visit(root);
 }
 
+/**
+ * The phone drawer's branch level (ST-36): every branch under `root`,
+ * however deep, as a childless child of it, oldest first by when its branch
+ * edge was made (edges with no time first, in tree order), pinned ones on
+ * top as in any sibling group.
+ */
+export function flattenBranches(root: TreeNode, edges: readonly ProjectEdge[], pinnedAt?: NodePinnedAt): TreeNode {
+  const madeAt = new Map<string, number>();
+  for (const edge of edges) {
+    if (isBranchEdge(edge) && edge.createdAt !== undefined) madeAt.set(edge.target, edge.createdAt);
+  }
+  const ids: string[] = [];
+  const visit = (node: TreeNode) => {
+    for (const child of node.children) {
+      ids.push(child.nodeId);
+      visit(child);
+    }
+  };
+  visit(root);
+  ids.sort((a, b) => (madeAt.get(a) ?? 0) - (madeAt.get(b) ?? 0));
+  const flat: TreeNode = { ...root, children: ids.map((nodeId) => ({ nodeId, depth: 1, children: [] })) };
+  return pinnedAt ? orderPinnedFirst(flat, pinnedAt) : flat;
+}
+
 export type OpenState = 'none' | 'idle' | 'streaming';
 
 const RANK: Record<OpenState, number> = { none: 0, idle: 1, streaming: 2 };
@@ -106,7 +139,9 @@ const RANK_TO_STATE: OpenState[] = ['none', 'idle', 'streaming'];
  *   (a background pane you have open in the current view).
  * - 'none' — not streaming, and either not an open pane or the focused pane
  *   (the focused-row highlight already conveys it). 'error' falls here when
- *   unopened; the pane caption surfaces error state, not the sidebar bar.
+ *   unopened; the row's Failed chip (RowAttention) says it, not the bar.
+ *
+ * A turn waiting on you is still 'streaming' here: RowAttention says it waits.
  */
 export function nodeOpenState(
   nodeId: string,
@@ -122,6 +157,43 @@ export function nodeOpenState(
   // Idle is suppressed on the focused row (its highlight already conveys it).
   if (nodeId === focusedPane) return 'none';
   return 'idle';
+}
+
+/**
+ * Max of `perNode` over the subtree at `rootNodeId` (branch edges), skipping
+ * dead nodes with their subtrees and stopping once `top` is reached.
+ */
+function subtreeMax(
+  rootNodeId: string,
+  edges: readonly ProjectEdge[],
+  isAlive: (nodeId: string) => boolean,
+  perNode: (nodeId: string) => number,
+  top: number,
+  childrenOf?: ReadonlyMap<string, readonly string[]>,
+): number {
+  if (!isAlive(rootNodeId)) return 0;
+
+  // Use the shared map when provided; otherwise build one locally.
+  const children: ReadonlyMap<string, readonly string[]> =
+    childrenOf ?? buildBranchChildrenOf(edges);
+
+  let bestRank = perNode(rootNodeId);
+  if (bestRank >= top) return bestRank;
+  const stack = [rootNodeId];
+  const seen = new Set<string>([rootNodeId]);
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    for (const child of children.get(cur) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      if (!isAlive(child)) continue;
+      const r = perNode(child);
+      if (r > bestRank) bestRank = r;
+      if (bestRank >= top) return bestRank; // short-circuit on max
+      stack.push(child);
+    }
+  }
+  return bestRank;
 }
 
 /**
@@ -141,28 +213,122 @@ export function subtreeOpenState(
   perNode: (nodeId: string) => OpenState,
   childrenOf?: ReadonlyMap<string, readonly string[]>,
 ): OpenState {
-  if (!isAlive(rootNodeId)) return 'none';
+  return RANK_TO_STATE[subtreeMax(rootNodeId, edges, isAlive, (id) => RANK[perNode(id)], RANK.streaming, childrenOf)];
+}
 
-  // Use the shared map when provided; otherwise build one locally.
-  const children: ReadonlyMap<string, readonly string[]> =
-    childrenOf ?? buildBranchChildrenOf(edges);
+/**
+ * What a sidebar row says beside running and open (R2, the re-entry review):
+ * 'waiting' — the conversation's turn waits on you, a permission request or a
+ * question; 'failed' — its last turn failed and you have not looked since.
+ * The sidebar decides this for itself (F65: each surface picks the states it
+ * shows): a chip after the title, and for waiting a steady rail.
+ */
+export type RowAttention = 'none' | 'failed' | 'waiting';
 
-  let bestRank = RANK[perNode(rootNodeId)];
-  const stack = [rootNodeId];
-  const seen = new Set<string>([rootNodeId]);
-  while (stack.length > 0) {
-    const cur = stack.pop()!;
-    for (const child of children.get(cur) ?? []) {
-      if (seen.has(child)) continue;
-      seen.add(child);
-      if (!isAlive(child)) continue;
-      const r = RANK[perNode(child)];
-      if (r > bestRank) bestRank = r;
-      if (bestRank === 2) return 'streaming'; // short-circuit on max
-      stack.push(child);
-    }
+const ATTENTION_RANK: Record<RowAttention, number> = { none: 0, failed: 1, waiting: 2 };
+const RANK_TO_ATTENTION: RowAttention[] = ['none', 'failed', 'waiting'];
+
+/**
+ * How long a failure stays marked. Older ones are left to the conversation
+ * itself: when this shipped, 42 of 47 failed conversations had failed more
+ * than 30 days before, and nobody had opened 43 of them since.
+ */
+export const FAILED_MARK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The node fields `nodeAttention` reads. */
+type AttentionFacts = Pick<
+  ChatNodeState,
+  'status' | 'pendingPermission' | 'pendingUserInput' | 'errorKind' | 'errorCompletedAt' | 'viewedAt'
+  | 'pageId' | 'maintenanceJobId' | 'scheduledOnlyJobId'
+>;
+
+/**
+ * A node's RowAttention. Waiting holds while the request is open, focused
+ * or not, as running does. Failed needs a failure time newer than the
+ * user's last view of the node and inside FAILED_MARK_MS, and the node not
+ * focused: looking at it clears it. Focus stamps viewedAt (chatStore), and so
+ * does a pane on screen while the window is in front (useFailureSeen.ts). A turn
+ * a restart or expired credentials cut short is left to the Interrupted
+ * notice, which offers Resume; an outcome hydration could not confirm has no
+ * time and is not marked. A conversation no thread list shows (a page's, a
+ * job's) is never marked here: its own surface reports it.
+ *
+ * `errorCompletedAt` is the backend's clock and `viewedAt` this window's, so a
+ * remote gateway running ahead of the client can hold a mark past a focus
+ * view that should have cleared it — until the next view, or the window
+ * closes. A pane on screen stamps at least the failure's time, so it clears.
+ * Error turns carry no completion sequence, so there is no identity to compare
+ * instead (unlike unread, see completionFacts).
+ */
+export function nodeAttention(
+  nodeId: string,
+  node: AttentionFacts | undefined,
+  focusedNodeId: string | null,
+  now: number,
+): RowAttention {
+  if (!node || !isVisibleConversationNode(node)) return 'none';
+  if (nodeAwaiting(node)) return 'waiting';
+  if (node.status !== 'error' || nodeId === focusedNodeId) return 'none';
+  const failedAt = node.errorCompletedAt;
+  if (failedAt === undefined || failedAt <= (node.viewedAt ?? 0) || now - failedAt > FAILED_MARK_MS) return 'none';
+  return interruptionCauseOfKind(node.errorKind) ? 'none' : 'failed';
+}
+
+/** Roll up `perNode` attention over a subtree, as `subtreeOpenState` does: waiting beats failed. */
+export function subtreeAttention(
+  rootNodeId: string,
+  edges: readonly ProjectEdge[],
+  isAlive: (nodeId: string) => boolean,
+  perNode: (nodeId: string) => RowAttention,
+  childrenOf?: ReadonlyMap<string, readonly string[]>,
+): RowAttention {
+  return RANK_TO_ATTENTION[subtreeMax(rootNodeId, edges, isAlive, (id) => ATTENTION_RANK[perNode(id)], ATTENTION_RANK.waiting, childrenOf)];
+}
+
+/** The stronger of two attentions (`waiting > failed > none`). */
+export function maxAttention(a: RowAttention, b: RowAttention): RowAttention {
+  return ATTENTION_RANK[b] > ATTENTION_RANK[a] ? b : a;
+}
+
+/** Attention a collapsed branch hides: the max over the sub-branches below it. */
+export function hiddenBranchAttention(
+  children: readonly TreeNode[],
+  perNode: (nodeId: string) => RowAttention,
+): RowAttention {
+  let best: RowAttention = 'none';
+  const stack = [...children];
+  while (stack.length > 0 && best !== 'waiting') {
+    const child = stack.pop()!;
+    best = maxAttention(best, perNode(child.nodeId));
+    stack.push(...child.children);
   }
-  return RANK_TO_STATE[bestRank];
+  return best;
+}
+
+/**
+ * The strongest RowAttention in `project`: what a FOLDED workspace row says
+ * (a thread waiting on you, else one whose last turn failed). Only the threads
+ * its rows can lead to — a mark the user cannot trace to a row is noise, so
+ * archived and trashed threads are skipped, as in `workspaceHasUnread`. Pass
+ * the workspace's `childrenOf` (from `buildBranchChildrenOf`) when it has one.
+ */
+export function workspaceAttention(
+  project: Pick<Project, 'trees' | 'edges'>,
+  nodes: Record<string, ChatNodeState>,
+  focusedNodeId: string | null,
+  now: number = Date.now(),
+  childrenOf?: ReadonlyMap<string, readonly string[]>,
+): RowAttention {
+  const children = childrenOf ?? buildBranchChildrenOf(project.edges);
+  const isAlive = (id: string) => !nodes[id]?.deletedAt && isVisibleConversationNode(nodes[id]);
+  const perNode = (id: string) => nodeAttention(id, nodes[id], focusedNodeId, now);
+  let best: RowAttention = 'none';
+  for (const tree of project.trees) {
+    if (!isListedThread(tree, nodes[tree.rootNodeId])) continue;
+    best = maxAttention(best, subtreeAttention(tree.rootNodeId, project.edges, isAlive, perNode, children));
+    if (best === 'waiting') return best;
+  }
+  return best;
 }
 
 /**

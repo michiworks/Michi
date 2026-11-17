@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react';
 import { escLayerOpen } from '../lib/backStack';
 
 /** How far from the left screen edge, in CSS px, a swipe may start. */
-const EDGE_SWIPE_ZONE = 24;
+export const EDGE_SWIPE_ZONE = 24;
 /** Travel before the direction counts: vertical or backward first is a scroll. */
-const DIRECTION_SLOP = 10;
+export const DIRECTION_SLOP = 10;
 /** The share of a track's distance that completes it on release. */
 export const SWIPE_COMMIT_FRACTION = 0.35;
 /** A release this fast (CSS px per ms, forward) completes a shorter swipe. */
@@ -34,7 +34,7 @@ export interface SwipeStart {
 
 /** Content that takes every touch for itself (a map, a drag handle) keeps
  *  its gesture, and so does a text selection being adjusted. */
-function swipeAllowed(target: EventTarget | null): boolean {
+export function swipeAllowed(target: EventTarget | null): boolean {
   const selection = window.getSelection?.();
   if (selection && !selection.isCollapsed) return false;
   for (let el = target instanceof Element ? target : null; el; el = el.parentElement) {
@@ -66,6 +66,14 @@ function clickAt(x: number, y: number) {
 export function swipeCommits(travel: number, distance: number, velocity: number): boolean {
   if (velocity < -0.1) return false;
   return travel >= distance * SWIPE_COMMIT_FRACTION || (velocity >= FLING_VELOCITY && travel >= DIRECTION_SLOP * 2);
+}
+
+/** The release speed, in CSS px per ms of travel, over the last VELOCITY_WINDOW_MS of samples. */
+export function swipeVelocity(samples: ReadonlyArray<{ t: number; travel: number }>): number {
+  const last = samples[samples.length - 1];
+  if (!last) return 0;
+  const first = samples.find((sample) => last.t - sample.t <= VELOCITY_WINDOW_MS) ?? last;
+  return last.t - first.t < 16 ? 0 : (last.travel - first.travel) / (last.t - first.t);
 }
 
 /**
@@ -105,12 +113,6 @@ export function useSwipeTrack(
       if (!current) return;
       if (commit) current.commit();
       else current.cancel();
-    };
-    const velocity = () => {
-      const last = samples[samples.length - 1];
-      if (!last) return 0;
-      const first = samples.find((sample) => last.t - sample.t <= VELOCITY_WINDOW_MS) ?? last;
-      return last.t - first.t < 16 ? 0 : (last.travel - first.travel) / (last.t - first.t);
     };
     const onPointerDown = (e: PointerEvent) => {
       if (e.pointerType === 'touch' && escLayerOpen()) menuAtPointerDown = performance.now();
@@ -163,7 +165,7 @@ export function useSwipeTrack(
         if (tapped) clickAt(tapped.x, tapped.y);
         return;
       }
-      end(swipeCommits(travel, track.distance, velocity()));
+      end(swipeCommits(travel, track.distance, swipeVelocity(samples)));
     };
     const onCancel = () => { tap = null; end(false); };
     const options = { capture: true, passive: true } as const;

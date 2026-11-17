@@ -1,12 +1,12 @@
 import React from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from 'motion/react';
-import { Check, ChevronRight, CircleAlert, CircleStop, Hand, MessageSquare } from 'lucide-react';
 import type { ProgressCardAwaiting, ProgressCardDto, ProgressCardStatus } from 'michi-shared';
 import { useChatProjects, useNodesSelector } from '../../../../state/chatStore';
 import type { ChatNodeState } from '../../../../state/chatTypes';
 import { cardLiveState, replySummary } from '../../../../state/spaceConversations/liveStatus';
 import { Button } from '../../../ui/controls';
 import { formatMichiAgo } from '../../content/michiFormat';
+import { ChatIcon, CheckIcon, ChevronRightIcon, ErrorIcon, HandIcon, StopIcon } from '../../icons';
 import { EASE, SPRING, TRANSITION } from '../../../../motion/tokens';
 import '../../content/michi.css';
 
@@ -20,6 +20,13 @@ interface LiveView {
   waitingFor: string | null;
 }
 
+/** A finished thread's summary, read once per node object: the card's selector runs on every commit. */
+const SUMMARIES = new WeakMap<ChatNodeState, string | null>();
+function summaryOf(node: ChatNodeState): string | null {
+  if (!SUMMARIES.has(node)) SUMMARIES.set(node, replySummary(node));
+  return SUMMARIES.get(node) ?? null;
+}
+
 const sameView = (a: LiveView, b: LiveView) =>
   a.status === b.status && a.line === b.line && a.title === b.title && a.runtimeId === b.runtimeId && a.summary === b.summary
   && a.awaiting === b.awaiting && a.waitingFor === b.waitingFor;
@@ -27,6 +34,15 @@ const sameView = (a: LiveView, b: LiveView) =>
 const STATUS_WORD: Record<ProgressCardStatus, string> = {
   idle: 'Not started',
   running: '',
+  done: 'Done',
+  failed: 'Failed',
+  cancelled: 'Stopped',
+};
+
+/** What the card's live region says when the conversation starts or ends. */
+const SAID: Record<ProgressCardStatus, string> = {
+  idle: '',
+  running: 'Started',
   done: 'Done',
   failed: 'Failed',
   cancelled: 'Stopped',
@@ -55,11 +71,11 @@ const iconKind = (view: LiveView): IconKind => (view.awaiting ? 'waiting'
     : view.status === 'done' ? 'done' : view.status === 'cancelled' ? 'stopped' : 'failed');
 
 function Icon({ kind }: { kind: IconKind }) {
-  if (kind === 'waiting') return <Hand size={14} strokeWidth={1.8} className="space-live-card__waiting" aria-label="Waiting for you" />;
+  if (kind === 'waiting') return <HandIcon className="space-live-card__waiting" aria-label="Waiting for you" />;
   if (kind === 'running') return <span className="agent-spinner" role="img" aria-label="Running" />;
-  if (kind === 'done') return <Check size={14} strokeWidth={2} className="space-live-card__done" aria-label="Done" />;
-  if (kind === 'stopped') return <CircleStop size={14} strokeWidth={1.8} className="space-live-card__stopped" aria-label="Stopped" />;
-  return <CircleAlert size={14} strokeWidth={1.8} className="space-live-card__failed" aria-label="Failed" />;
+  if (kind === 'done') return <CheckIcon className="space-live-card__done" aria-label="Done" />;
+  if (kind === 'stopped') return <StopIcon className="space-live-card__stopped" aria-label="Stopped" />;
+  return <ErrorIcon className="space-live-card__failed" aria-label="Failed" />;
 }
 
 const ICON_STAGE: React.CSSProperties = { display: 'inline-grid', flexShrink: 0 };
@@ -130,12 +146,19 @@ export function SpaceProgressCard({ card, clock, onOpen, onDismiss }: {
       const node = nodes[card.threadNodeId];
       const live = cardLiveState(card, node);
       const finished = live.status !== 'running' && live.status !== 'idle';
-      return { ...live, summary: finished ? card.summary ?? (node ? replySummary(node) : null) : null };
+      return { ...live, summary: finished ? card.summary ?? (node ? summaryOf(node) : null) : null };
     }, [card]),
     sameView,
   );
   const running = view.status === 'running';
   const inProgress = running || view.status === 'idle';
+  // Said once per change of status, never for the status the card first shows or for each running line.
+  const [saidStatus, setSaidStatus] = React.useState(view.status);
+  const [said, setSaid] = React.useState('');
+  if (view.status !== saidStatus) {
+    setSaidStatus(view.status);
+    setSaid(SAID[view.status] && `${SAID[view.status]}: ${view.title}`);
+  }
   const cardRef = React.useRef<HTMLElement>(null);
   // In its list's AnimatePresence: folding away it is out of reach and inert.
   const present = useIsPresent();
@@ -157,9 +180,10 @@ export function SpaceProgressCard({ card, clock, onOpen, onDismiss }: {
         <StatusIcon view={view} />
         <button type="button" className="space-live-card__title" title={view.title} onClick={() => open(false)}>{view.title}</button>
         {view.runtimeId && <span className="michi-tag" data-variant="archived">{runtimeName(view.runtimeId, agentStatus?.availableRuntimes)}</span>}
-        <span className="space-live-card__meta" role={running ? 'status' : undefined}>{meta}</span>
+        <span className="space-live-card__meta">{meta}</span>
+        <span className="sr-only" role="status">{said}</span>
         <button type="button" className="space-live-card__open" onClick={() => open(false)}>
-          Open full chat<ChevronRight size={12} strokeWidth={1.8} aria-hidden="true" />
+          Open full chat<ChevronRightIcon size="sm" aria-hidden="true" />
         </button>
       </header>
       {waiting && view.awaiting ? <>
@@ -178,7 +202,7 @@ export function SpaceProgressCard({ card, clock, onOpen, onDismiss }: {
         <p className="space-live-card__text">{endText(view, card.error)}</p>
         <div className="space-live-card__row">
           <Button size="sm" onClick={() => open(true)}>
-            <MessageSquare size={12} strokeWidth={1.7} aria-hidden="true" />Continue chatting
+            <ChatIcon size="sm" aria-hidden="true" />Continue chatting
           </Button>
           <span className="space-live-card__meta">Opens the chat page</span>
           {dismiss}

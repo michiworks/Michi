@@ -85,12 +85,17 @@ test('remote sign-in prompt can be cancelled, reopened and completed without sen
     return false;
   } });
   await page.goto('/');
+  // A recovery poll asks from the notice corner; only its Sign in opens the dialog.
+  const notice = page.getByRole('region', { name: 'Sign-in for test-host' });
+  await expect(notice).toContainText('test-host: sign-in needs attention.');
   const auth = page.getByRole('dialog', { name: remoteSignInLabel() });
+  await expect(auth).toBeHidden();
+  await notice.getByRole('button', { name: remoteSignInLabel(), exact: true }).click();
   await expect(auth.getByText(/credentials on test-host need attention/i)).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as any).nativeAuth.creates.length)).toBe(1);
   await auth.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(auth).toBeHidden();
-  await page.getByRole('button', { name: remoteSignInLabel(), exact: true }).click();
+  await notice.getByRole('button', { name: remoteSignInLabel(), exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as any).nativeAuth.creates.length)).toBe(2);
   await auth.locator('.xterm-helper-textarea').press('Enter');
   await expect(auth).toBeHidden();

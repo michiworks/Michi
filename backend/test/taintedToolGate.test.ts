@@ -1,17 +1,17 @@
 /**
  * w3-fix D23, D19: Michi's own MCP tools hold the consequence rule
- * themselves, whatever the runtime. A call of a tool that leaves the machine
- * (toolEffects.ts `egress`) or starts work the turn's outside content would
- * not travel with (`indirect` but send_to_thread and start_conversation),
- * from a guarded turn (Michi drove it, or it holds outside content), runs
+ * themselves, whatever the runtime. A call of a tool that starts work
+ * Michi's work would not travel with (toolEffects.ts `indirect` but
+ * send_to_thread and start_conversation), from a turn Michi drove, runs
  * only after the user approved that call: on Codex (and Kiro tools the
  * user's agent pre-allows) no runtime prompt came, so the dispatch asks
  * through ask_user, or refuses without one; where Michi's runtime gate
  * already asked (Claude's hook, Kiro's request_permission, through the
  * permission port's `approved` note) it runs without a second question,
  * once per approval and turn. Reads, Michi-internal and local writes,
- * unguarded turns and tools that ask for themselves are untouched;
- * send_to_thread runs, and its message carries the outside content.
+ * open_url, the user's own turns whatever they read, and tools that ask for
+ * themselves are untouched; send_to_thread runs, and its message carries the
+ * outside content. A check-in's own turn refuses such a call.
  * Real MCP catalog (buildMcpServerForSlot); temp MICHI_DATA_DIR per test.
  */
 
@@ -34,6 +34,7 @@ import { saveNode, saveTree, saveWorkspace } from '../src/services/dbRepository'
 import { McpSlotRegistry, buildMcpServerForSlot, type McpSlot } from '../src/services/mcpServer';
 import { getTurnTrust, recordCompanionTaint, recordUntrustedSource } from '../src/services/turnTrust';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
+import { noteMichiStartedTurn } from '../src/services/turnGuard';
 import { registerLiveSession } from './helpers/liveSession';
 
 const WS = 'ws-a';
@@ -66,6 +67,8 @@ function nextTurn(): string {
 }
 
 const taint = () => recordCompanionTaint({ nodeId: CHAT, turnId }, 'companion_read', 'checkin');
+/** The running turn is Michi's work (start_conversation notes its first turn). */
+const michiWork = () => noteMichiStartedTurn(CHAT, turnId);
 
 function slot(extra: Record<string, unknown> = {}): McpSlot {
   return new McpSlotRegistry().create(CHAT, '/tmp', null, {
@@ -117,14 +120,16 @@ afterEach(() => {
 });
 
 describe('a Michi tool from a guarded turn (D23, D19)', () => {
-  test('Codex-like (no runtime prompt): it asks through ask_user and runs only on "Run it"', async () => {
-    // Unguarded, and the turn's own command output alone: it runs without a question.
+  test('Codex-like (no runtime prompt): in Michi\'s work it asks through ask_user and runs only on "Run it"', async () => {
+    // A turn the user sent, whatever it read: it runs without a question.
     assert.match((await call(slot(), 'spawn_branches', BRANCH)).text, /Spawned 1 branch/);
     recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'shell', runtimeId: 'codex' });
+    recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'WebFetch', runtimeId: 'codex' });
+    taint();
     assert.match((await call(slot(), 'spawn_branches', BRANCH)).text, /Spawned 1 branch/);
     assert.deepEqual([spawned, asked.length], [2, 0]);
 
-    taint();
+    michiWork();
     const ran = await call(slot(), 'spawn_branches', BRANCH);
     assert.match(ran.text, /Spawned 1 branch/);
     assert.equal(asked.length, 1);
@@ -143,43 +148,37 @@ describe('a Michi tool from a guarded turn (D23, D19)', () => {
     assert.match(JSON.parse((await call(slot(), 'spawn_branches', BRANCH)).text).next, /did not answer/);
     assert.equal(spawned, 3, 'only the approved call ran');
 
-    // Sticky: the chat's next turn on the same session asks as well (D17).
+    // The user's next turn on the same session is theirs, whatever the session took in.
     nextTurn();
     answer = 'Run it';
     await call(slot(), 'spawn_branches', BRANCH);
-    assert.deepEqual([spawned, asked.length], [4, 5]);
-  });
-
-  test('a web page the turn read guards it too', async () => {
-    recordUntrustedSource({ nodeId: CHAT, turnId }, { tool: 'WebFetch', runtimeId: 'codex' });
-    await call(slot(), 'spawn_branches', BRANCH);
-    assert.equal(asked.length, 1);
+    assert.deepEqual([spawned, asked.length], [4, 4]);
   });
 
   test('with no channel to ask through it is refused, and the agent is told to ask the user in chat', async () => {
-    taint();
+    michiWork();
     const refused = await call(slot({ onAskUser: undefined }), 'spawn_branches', BRANCH);
     assert.equal(refused.isError, true);
     assert.match(refused.text, /^NEEDS_USER_APPROVAL: in this conversation spawn_branches runs only with the user's approval.*did not run\. Do not retry\. Ask the user in chat/);
     assert.equal(spawned, 0);
   });
 
-  test('reads, Michi-internal and local writes run as before; the gate covers what leaves the machine and work the mark would not reach', async () => {
-    taint();
+  test('reads, Michi-internal and local writes and open_url run as before; the gate covers work the mark would not reach', async () => {
+    michiWork();
     assert.equal((await call(slot(), 'michi_docs', {})).isError, false);
     assert.equal(asked.length, 0);
-    for (const name of ['spawn_branches', 'open_url', 'spawn_agent', 'send_agent_input', 'mcp____michi_internal____open_url']) {
+    for (const name of ['spawn_branches', 'spawn_agent', 'send_agent_input', '@michi/spawn_branches']) {
       assert.equal(taintedMichiToolGate(CHAT, name).kind, 'ask', name);
     }
     for (const name of ['read_page', 'edit_page', 'memory_save', 'save_artifact', '@michi/save_artifact', 'send_to_thread', 'companion_session_send',
-      'start_conversation', 'create_scheduled_job', 'Bash', 'unknown_tool']) {
+      'start_conversation', 'create_scheduled_job', 'open_url', 'mcp____michi_internal____open_url', 'Bash', 'unknown_tool']) {
       assert.equal(taintedMichiToolGate(CHAT, name).kind, 'run', name);
     }
     assert.equal(taintedMichiToolGate(null, 'spawn_branches').kind, 'run', 'no chat: nothing to judge');
   });
 
   test('Claude/Kiro-like: a call Michi\'s runtime prompt approved runs without a second question, once per approval and turn', async () => {
-    taint();
+    michiWork();
     // The adapters' coordinator over Michi's permission port, as Claude and Kiro hold it.
     const approvals = new ApprovalCoordinator({ permissions: michiPermissionPolicy });
     assert.equal(approvals.accept('allow_once', chatOwner(CHAT), 'mcp____michi_internal____spawn_branches'), true);
@@ -199,6 +198,7 @@ describe('a Michi tool from a guarded turn (D23, D19)', () => {
     approvals.accept('reject_once', chatOwner(CHAT), '@michi/spawn_branches');
     approvals.accept('allow_once', chatOwner(CHAT), '@michi/spawn_branches');
     nextTurn();
+    michiWork();
     await call(slot(), 'spawn_branches', BRANCH);
     assert.equal(asked.length, 2);
     // One tool's approval is not another's.
@@ -217,7 +217,7 @@ describe('a Michi tool from a guarded turn (D23, D19)', () => {
   });
 
   test('Pi-like: an approval through Michi\'s own ChatApprovalState is noted the same way', async () => {
-    taint();
+    michiWork();
     assert.equal(new ChatApprovalState().accept('allow_once', chatOwner(CHAT), 'spawn_branches'), true);
     await call(slot(), 'spawn_branches', BRANCH);
     assert.equal(asked.length, 0);

@@ -5,15 +5,11 @@ import { ToolCallGroup } from './ToolCallGroup';
 import { MessageBlock, TermThoughtBlock } from './MessageBlock';
 import { AgentTurnContext } from './AgentLineBlocks';
 import { deriveStreamActivity } from './StreamActivityIndicator';
-import { AgentBlockStyleOverride, type AgentBlockStyle } from '../../state/prefs';
+import { DeferredToolCallsContext, DeferredToolCallsScope, type DeferredToolCalls } from '../../state/deferredToolCalls';
 import type { ChatMessage, ChatNodeState, ToolCallState } from '../../state/chatTypes';
 
 const NB = '\u00A0';
 const T0 = 1_000_000;
-
-function withStyle(ui: React.ReactNode, style: AgentBlockStyle = 'line') {
-  return <AgentBlockStyleOverride.Provider value={style}>{ui}</AgentBlockStyleOverride.Provider>;
-}
 
 function bash(id: string, command: string, description: string | undefined, extra: Partial<ToolCallState> = {}): ToolCallState {
   return {
@@ -65,7 +61,7 @@ describe('line chrome · one call', () => {
     const tool = bash('t1', 'git rev-list --left-right --count dev...origin/dev', 'Count divergence', {
       output: '0\t23', startedAt: T0, endedAt: T0 + 1_400,
     });
-    const { container } = render(withStyle(<ToolCallGroup tools={[tool]} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={[tool]} />);
     const button = header(container);
     expect(button.tagName).toBe('BUTTON');
     expect(button.getAttribute('type')).toBe('button');
@@ -110,7 +106,7 @@ describe('line chrome · one call', () => {
     const writeText = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('denied'));
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     const tool = read('r1', 'frontend/src/a.ts', { output: 'x', startedAt: T0, endedAt: T0 + 100 });
-    const { container } = render(withStyle(<ToolCallGroup tools={[tool]} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={[tool]} />);
     fireEvent.click(header(container));
     const copy = within(container).getByRole('button', { name: 'Copy path' });
     await act(async () => { fireEvent.click(copy); });
@@ -121,13 +117,57 @@ describe('line chrome · one call', () => {
   });
 });
 
+describe('line chrome · a deferred call', () => {
+  function deferredLoader() {
+    let status: 'loading' | 'failed' | undefined;
+    const listeners = new Set<() => void>();
+    const loader = {
+      load: vi.fn(() => { status = 'loading'; listeners.forEach((listener) => listener()); }),
+      status: () => status,
+      subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      fail: () => { status = 'failed'; listeners.forEach((listener) => listener()); },
+    };
+    return loader;
+  }
+  const scoped = (loader: ReturnType<typeof deferredLoader>, tools: ToolCallState[]) =>
+    <DeferredToolCallsContext.Provider value={loader as unknown as DeferredToolCalls}>
+      <DeferredToolCallsScope nodeId="n" messageId="a1"><ToolCallGroup tools={tools} /></DeferredToolCallsScope>
+    </DeferredToolCallsContext.Provider>;
+
+  it('reads its body when it opens, says so meanwhile and shows the output once it comes', () => {
+    const loader = deferredLoader();
+    const stub = bash('t1', 'npm test', 'Run the tests', { deferred: true, hasOutput: true, startedAt: T0, endedAt: T0 + 2_000 });
+    const { container, rerender } = render(scoped(loader, [stub]));
+    expect(loader.load).not.toHaveBeenCalled();
+    fireEvent.click(header(container));
+    expect(loader.load).toHaveBeenCalled();
+    const well = within(bodyOf(header(container))).getByRole('group', { name: 'Details: Run the tests' });
+    const note = () => well.querySelector('.agent-line-payload__wait')?.textContent;
+    expect(note()).toBe('Loading output…');
+    act(() => loader.fail());
+    expect(note()).toContain('Couldn’t load the output.');
+    const asked = loader.load.mock.calls.length;
+    fireEvent.click(within(well).getByRole('button', { name: 'Retry' }));
+    expect(loader.load).toHaveBeenCalledTimes(asked + 1);
+    expect(note()).toBe('Loading output…');
+    rerender(scoped(loader, [{ ...stub, deferred: undefined, hasOutput: undefined, output: '42 passed' }]));
+    expect(within(bodyOf(header(container))).getByRole('group', { name: 'Details: Run the tests' }).textContent).toContain('42 passed');
+  });
+
+  it('opens without an input when it left an output on the server', () => {
+    const loader = deferredLoader();
+    const { container } = render(scoped(loader, [{ id: 't2', title: 'mcp__srv__ping', status: 'completed', deferred: true, hasOutput: true }]));
+    expect(header(container).getAttribute('aria-controls')).toBeTruthy();
+  });
+});
+
 describe('line chrome · what a call touched', () => {
   it('shows a web search\'s query as itself, not as a file with a Copy path button', () => {
     const tool: ToolCallState = {
       id: 'w1', title: 'WebSearch', kind: 'tool', status: 'completed', output: 'results',
       inputJson: JSON.stringify({ query: 'vitest fake timers' }), startedAt: T0, endedAt: T0 + 900,
     };
-    const { container } = render(withStyle(<ToolCallGroup tools={[tool]} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={[tool]} />);
     fireEvent.click(header(container));
     const well = container.querySelector<HTMLElement>('.agent-line-payload')!;
     expect(well.querySelector('.agent-line-payload__cmd code')?.textContent).toBe('vitest fake timers');
@@ -141,7 +181,7 @@ describe('line chrome · what a call touched', () => {
       id: 'k1', title: 'Reading a.ts', kind: 'read', status: 'completed', output: 'x',
       inputJson: JSON.stringify({ operations: [{ mode: 'Line', path: '/repo/a.ts' }] }), startedAt: T0, endedAt: T0 + 100,
     };
-    const { container } = render(withStyle(<ToolCallGroup tools={[tool]} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={[tool]} />);
     fireEvent.click(header(container));
     const well = container.querySelector<HTMLElement>('.agent-line-payload')!;
     expect(well.querySelector('.agent-line-payload__cmd code')?.textContent).toBe('/repo/a.ts');
@@ -151,7 +191,7 @@ describe('line chrome · what a call touched', () => {
 
 describe('line chrome · failure and recovery', () => {
   it('leads with an unrecovered failure: × in the gutter, the error line in danger text', () => {
-    const { container } = render(withStyle(<ToolCallGroup tools={verify()} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={verify()} />);
     // The failed step's name leads, its exit code beside it.
     expect(shownLead(container)).toBe('Run send-scroll E2E');
     expect(container.querySelector('.agent-line__frag')?.textContent).toBe(`exit${NB}1`);
@@ -162,7 +202,7 @@ describe('line chrome · failure and recovery', () => {
 
   it('keeps the sentence when the run went on after a failure, counting it calmly', () => {
     const tools = [...verify(), read('r1', 'e2e/specs/send-scroll.spec.ts', { startedAt: T0 + 131_000, endedAt: T0 + 132_000 })];
-    const { container } = render(withStyle(<ToolCallGroup tools={tools} defaultExpanded={false} />));
+    const { container } = render(<ToolCallGroup tools={tools} />);
     expect(shownLead(container)).toBe('Read send-scroll.spec.ts; send-scroll E2E failed, typecheck and a.test.ts passed');
     expect(container.querySelector('.agent-line__ico .is-fail')).toBeNull();
     const frag = container.querySelector('.agent-line__frag')!;
@@ -172,11 +212,11 @@ describe('line chrome · failure and recovery', () => {
   });
 
   it('returns to the outcome once a later call recovered it, with a muted “rerun passed”', () => {
-    const { container } = render(withStyle(
+    const { container } = render(
       <AgentTurnContext.Provider value={{ recovered: new Map([['t10', 't11']]) }}>
-        <ToolCallGroup tools={verify()} defaultExpanded={false} />
+        <ToolCallGroup tools={verify()} />
       </AgentTurnContext.Provider>,
-    ));
+    );
     const button = header(container);
     expect(button.hasAttribute('data-toolgroup-header')).toBe(true);
     // Settled, one sentence in the order things happened; the rest is empty.
@@ -195,9 +235,8 @@ describe('line chrome · failure and recovery', () => {
     for (const el of container.querySelectorAll('[aria-expanded]')) expect(el.tagName).toBe('BUTTON');
     const failed = rows[2];
     expect(failed.textContent).toContain('rerun passed');
-    expect(failed.querySelector('.agent-line__rest')?.className).not.toContain('is-error');
-    // The command describes a row; it is not its name.
-    expect(failed.getAttribute('aria-describedby')).toBe(failed.querySelector('.agent-line__rest')?.id);
+    // Named in the agent's words: no command beside them, no error once a rerun passed.
+    expect(shownRest(failed)).toBe('');
     fireEvent.click(failed);
     const foot = bodyOf(failed).querySelector('.agent-line-payload__foot')!;
     expect(foot.textContent).toContain('exit 1');
@@ -223,9 +262,9 @@ describe('line chrome · failure and recovery', () => {
         { id: 'a3', kind: 'answer', rawText: ' Done.', streaming: false },
       ],
     };
-    const { container, getByRole } = render(withStyle(
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="compact" />,
-    ));
+    const { container, getByRole } = render(
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts density="compact" />,
+    );
     // The finished turn's work is folded; its row already counts the recovery.
     const fold = getByRole('button', { name: /Worked for/ });
     expect(fold.textContent).toContain('rerun passed');
@@ -247,10 +286,10 @@ describe('line chrome · live', () => {
 
   it('shows the spinner only after 200ms, keeps it spinning and counts whole seconds', () => {
     const running = bash('s1', 'npm test -w backend -- test/chatHub.replay.test.ts', 'Run backend replay tests', { status: 'running', startedAt: T0 });
-    const { container } = render(withStyle(<ToolCallGroup tools={[running]} defaultExpanded />));
+    const { container } = render(<ToolCallGroup tools={[running]} />);
     expect(shownLead(container)).toBe('Run backend replay tests…');
-    // The instruction names the step; what it runs is the detail.
-    expect(shownRest(container)).toBe('npm test -w backend -- test/chatHub.replay.test.ts');
+    // The instruction names the step; the command stays in its payload.
+    expect(shownRest(container)).toBe('');
     expect(spinners(container)).toHaveLength(0);
     expect(header(container).hasAttribute('data-live')).toBe(true);
 
@@ -274,18 +313,18 @@ describe('line chrome · live', () => {
 
   it('names a live call without an instruction by its command', () => {
     const running = bash('s2', './scripts/deploy.sh --fast', undefined, { status: 'running', startedAt: T0 });
-    const { container } = render(withStyle(<ToolCallGroup tools={[running]} defaultExpanded />));
+    const { container } = render(<ToolCallGroup tools={[running]} />);
     expect(shownRest(container)).toBe('./scripts/deploy.sh --fast');
   });
 
   it('keeps each live label at least 400ms', () => {
     const a = read('a', 'src/a.ts', { status: 'running', startedAt: T0 });
-    const { container, rerender } = render(withStyle(<ToolCallGroup tools={[a]} defaultExpanded />));
+    const { container, rerender } = render(<ToolCallGroup tools={[a]} />);
     expect(shownLead(container)).toBe('Read a.ts…');
     act(() => { vi.advanceTimersByTime(100); });
     const done = { ...a, status: 'completed', endedAt: T0 + 100 };
     const b = read('b', 'src/b.ts', { status: 'running', startedAt: T0 + 100 });
-    rerender(withStyle(<ToolCallGroup tools={[done, b]} defaultExpanded />));
+    rerender(<ToolCallGroup tools={[done, b]} />);
     expect(shownLead(container)).toBe('Read a.ts…');
     act(() => { vi.advanceTimersByTime(320); });
     expect(shownLead(container)).toBe('Read b.ts…');
@@ -294,18 +333,18 @@ describe('line chrome · live', () => {
 
   it('says “Working…” in a gap over 600ms while the group is the live tail, then settles', () => {
     const a = read('a', 'src/a.ts', { startedAt: T0 - 300, endedAt: T0 - 100 });
-    const { container, rerender } = render(withStyle(<ToolCallGroup tools={[a]} defaultExpanded={false} live />));
+    const { container, rerender } = render(<ToolCallGroup tools={[a]} live />);
     expect(shownLead(container)).toBe('Read a.ts…');
     act(() => { vi.advanceTimersByTime(600); });
     expect(shownLead(container)).toBe('Working…');
-    rerender(withStyle(<ToolCallGroup tools={[a]} defaultExpanded={false} live={false} />));
+    rerender(<ToolCallGroup tools={[a]} live={false} />);
     expect(shownLead(container)).toBe('Read a.ts');
     expect(header(container).hasAttribute('data-live')).toBe(false);
   });
 
   it('opened mid-run, the header says “Working…” and the running row owns the only spinner', () => {
     const tools = [read('a', 'src/a.ts', { startedAt: T0 - 2_000, endedAt: T0 - 1_000 }), read('b', 'src/b.ts', { status: 'running', startedAt: T0 - 1_000 })];
-    const { container } = render(withStyle(<ToolCallGroup tools={tools} defaultExpanded />));
+    const { container } = render(<ToolCallGroup tools={tools} />);
     expect(spinners(container)).toHaveLength(1);
     fireEvent.click(header(container));
     expect(shownLead(header(container))).toBe('Working…');
@@ -321,18 +360,18 @@ describe('line chrome · thinking', () => {
   it('live: “Thinking…” with the sentence being written', () => {
     vi.useFakeTimers();
     vi.setSystemTime(T0);
-    const { container } = render(withStyle(
+    const { container } = render(
       <TermThoughtBlock text="用户要把它合进 dev 再 push。先确认 origin/dev 有没有" streaming phase="thinking" startedAt={T0} />,
-    ));
+    );
     expect(container.querySelector('[data-agent-block]')).not.toBeNull();
     expect(shownLead(container)).toBe('Thinking…');
     expect(shownRest(container)).toBe('用户要把它合进 dev 再 push。');
   });
 
   it('settled: “Thought for 3.1s” and its conclusion; a question falls back to the label', () => {
-    const { container, unmount } = render(withStyle(
+    const { container, unmount } = render(
       <TermThoughtBlock text="先确认 origin/dev。测试只挑和发送动效有关的。" durationMs={3_100} />,
-    ));
+    );
     const button = header(container);
     expect(shownLead(container)).toBe('Thought for 3.1s');
     expect(button.textContent).toContain('3.1 seconds');
@@ -344,7 +383,7 @@ describe('line chrome · thinking', () => {
     expect(body.textContent).toContain('先确认 origin/dev。');
     unmount();
 
-    const q = render(withStyle(<TermThoughtBlock text="Merged cleanly. Should I push now?" durationMs={2_000} />));
+    const q = render(<TermThoughtBlock text="Merged cleanly. Should I push now?" durationMs={2_000} />);
     expect(shownLead(q.container)).toBe('Thought for 2.0s');
     expect(shownRest(q.container)).toBe('');
   });
@@ -364,9 +403,9 @@ describe('line chrome · thinking', () => {
         { id: 'a1', kind: 'answer', rawText: 'Merged.', streaming: false, startedAt: T0 + 2_000, endedAt: T0 + 2_100 },
       ],
     };
-    const { container } = render(withStyle(
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="compact" />,
-    ));
+    const { container } = render(
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts density="compact" />,
+    );
     const block = container.querySelector<HTMLElement>('[data-agent-block]')!;
     expect(shownLead(block)).toBe('Read TPane.tsx, then merged origin/dev');
     expect(shownRest(block)).toBe('');
@@ -378,18 +417,23 @@ describe('line chrome · thinking', () => {
     // Only calls carry a glyph; the prose between them has none.
     const thoughts = items.filter((li) => li.classList.contains('agent-line-steps__thought'));
     expect(thoughts.map((li) => li.querySelector('svg'))).toEqual([null, null]);
-    // A row shows what it touched beside its name: the path, the command as typed.
-    expect(items.filter((li) => !thoughts.includes(li)).map((li) => shownRest(li as HTMLElement))).toEqual(['src/TPane.tsx', 'git merge origin/dev --no-edit']);
+    // A row shows what it touched beside its name; one named in the agent's words shows no command.
+    const calls = items.filter((li) => !thoughts.includes(li));
+    expect(calls.map((li) => shownRest(li as HTMLElement))).toEqual(['src/TPane.tsx', '']);
+    // The path describes a row; it is not its name.
+    expect(calls[0].querySelector('button.agent-line--step')?.getAttribute('aria-describedby')).toBe(calls[0].querySelector('.agent-line__rest')?.id);
   });
 });
 
 describe('line chrome · step area', () => {
-  /** jsdom has no layout: the step area is `client` tall and holds `scroll`. */
+  /** jsdom has no layout: the step area is `client` tall and holds a list `scroll` tall. */
   function stepArea(scroll: number, client: number) {
     const isArea = (el: Element) => el.classList.contains('agent-line-steps-scroll');
+    const isList = (el: Element) => el.classList.contains('agent-line-steps');
     const sh = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) { return isArea(this) ? scroll : 0; });
+    const oh = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) { return isList(this) ? scroll : 0; });
     const ch = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) { return isArea(this) ? client : 0; });
-    return () => { sh.mockRestore(); ch.mockRestore(); };
+    return () => { sh.mockRestore(); oh.mockRestore(); ch.mockRestore(); };
   }
   const many = (n: number, extra: Partial<ToolCallState> = {}) =>
     Array.from({ length: n }, (_, i) => read(`r${i}`, `src/f${i}.ts`, { startedAt: T0 + i * 100, endedAt: T0 + i * 100 + 50, ...extra }));
@@ -397,7 +441,7 @@ describe('line chrome · step area', () => {
   it('shows an opened run’s steps under its words, in an area that scrolls and fades the edge that hides more', () => {
     const restore = stepArea(400, 148);
     try {
-      const { container } = render(withStyle(<ToolCallGroup tools={many(12)} defaultExpanded={false} />));
+      const { container } = render(<ToolCallGroup tools={many(12)} />);
       fireEvent.click(header(container));
       const area = bodyOf(header(container)).querySelector<HTMLElement>('.agent-line-stepbox > .agent-line-steps-scroll')!;
       expect(area.querySelectorAll('button.agent-line--step')).toHaveLength(12);
@@ -421,7 +465,7 @@ describe('line chrome · step area', () => {
   it('adds no region or tab stop when every step shows', () => {
     const restore = stepArea(96, 96);
     try {
-      const { container } = render(withStyle(<ToolCallGroup tools={many(3)} defaultExpanded={false} />));
+      const { container } = render(<ToolCallGroup tools={many(3)} />);
       fireEvent.click(header(container));
       const area = bodyOf(header(container)).querySelector<HTMLElement>('.agent-line-steps-scroll')!;
       expect(area.hasAttribute('data-more')).toBe(false);
@@ -439,7 +483,7 @@ describe('line chrome · step area', () => {
     try {
       const done = many(10);
       const running = read('live1', 'src/live1.ts', { status: 'running', startedAt: T0 + 4_000 });
-      const { container, rerender } = render(withStyle(<ToolCallGroup tools={[...done, running]} defaultExpanded={false} />));
+      const { container, rerender } = render(<ToolCallGroup tools={[...done, running]} />);
       fireEvent.click(header(container));
       const area = () => bodyOf(header(container)).querySelector<HTMLElement>('.agent-line-steps-scroll')!;
       expect(area().scrollTop).toBe(400);
@@ -447,13 +491,13 @@ describe('line chrome · step area', () => {
       area().scrollTop = 0;
       fireEvent.scroll(area());
       const next = read('live2', 'src/live2.ts', { status: 'running', startedAt: T0 + 4_500 });
-      rerender(withStyle(<ToolCallGroup tools={[...done, { ...running, status: 'completed', endedAt: T0 + 4_500 }, next]} defaultExpanded={false} />));
+      rerender(<ToolCallGroup tools={[...done, { ...running, status: 'completed', endedAt: T0 + 4_500 }, next]} />);
       expect(area().scrollTop).toBe(0);
       // Back at the end, it follows again.
       area().scrollTop = 252;
       fireEvent.scroll(area());
       const last = read('live3', 'src/live3.ts', { status: 'running', startedAt: T0 + 4_800 });
-      rerender(withStyle(<ToolCallGroup tools={[...done, { ...running, status: 'completed', endedAt: T0 + 4_500 }, { ...next, status: 'completed', endedAt: T0 + 4_800 }, last]} defaultExpanded={false} />));
+      rerender(<ToolCallGroup tools={[...done, { ...running, status: 'completed', endedAt: T0 + 4_500 }, { ...next, status: 'completed', endedAt: T0 + 4_800 }, last]} />);
       expect(area().scrollTop).toBe(400);
     } finally {
       restore();
@@ -467,7 +511,7 @@ describe('line chrome · subagents', () => {
       id: 'sa', title: 'Task', kind: 'tool', status: 'running',
       inputJson: JSON.stringify({ subagent_type: 'Explore', description: 'Find every caller of anchorComposer' }),
     };
-    const { getByTestId } = render(withStyle(<ToolCallGroup tools={[agent]} defaultExpanded />));
+    const { getByTestId } = render(<ToolCallGroup tools={[agent]} />);
     const card = getByTestId('subagent-card');
     const line = within(card).getByTestId('subagent-summary');
     expect(line.textContent).toContain('Explore');
@@ -476,28 +520,14 @@ describe('line chrome · subagents', () => {
   });
 });
 
-describe('verbatim mono in every chrome', () => {
-  it.each(['card', 'terminal', 'plain'] as const)('switches ligatures off for command detail (%s)', (style) => {
-    const tool: ToolCallState = {
-      id: 't1', title: 'Bash', kind: 'bash', status: 'completed', startedAt: T0, endedAt: T0 + 100,
-      inputJson: JSON.stringify({ __tool_use_purpose: 'Count divergence', command: 'git rev-list --left-right --count dev...origin/dev' }),
-    };
-    const { container } = render(withStyle(<ToolCallGroup tools={[tool, read('r', 'a.ts')]} defaultExpanded />, style));
-    const detail = [...container.querySelectorAll('.agent-verbatim')].find((el) => el.textContent?.includes('--count'));
-    expect(detail).toBeTruthy();
-  });
-});
-
-describe('one tool kind in every chrome', () => {
-  it.each(['card', 'terminal', 'plain'] as const)('does not call Pi\'s web searches commands (%s)', (style) => {
+describe('one tool kind', () => {
+  it('does not call Pi\'s web searches commands', () => {
     const search = (id: string, query: string): ToolCallState => ({
       id, title: 'web_search', kind: 'execute', status: 'completed', startedAt: T0, endedAt: T0 + 100, inputJson: JSON.stringify({ query }),
     });
     const tools = [search('1', 'a'), search('2', 'b'), search('3', 'c')];
-    const folded = render(withStyle(<ToolCallGroup tools={tools} defaultExpanded={false} />, style));
-    expect(folded.container.textContent).toMatch(/used 3 tools/i);
-    folded.unmount();
-    const { container } = render(withStyle(<ToolCallGroup tools={tools} defaultExpanded />, style));
+    const { container } = render(<ToolCallGroup tools={tools} />);
+    expect(container.textContent).toMatch(/Searched the web 3 times/);
     expect(container.textContent).not.toMatch(/ran 3 commands|Bash/i);
   });
 });
@@ -513,13 +543,12 @@ describe('StreamActivityIndicator · line chrome', () => {
       { id: 'a1', kind: 'answer', rawText: 'Checking.', streaming: false },
       { id: 'b1', kind: 'tool', toolCallId: 't1', section: 'answer', rawOffset: 9 },
     ], [read('t1', 'a.ts')]);
-    expect(deriveStreamActivity(n, { showThoughts: true, agentBlockStyle: 'line' })).toBeNull();
-    expect(deriveStreamActivity(n, { showThoughts: true, agentBlockStyle: 'card' })?.label).toBe('Working');
+    expect(deriveStreamActivity(n, { showThoughts: true })).toBeNull();
     const hiddenOnly = node([
       { id: 'a1', kind: 'answer', rawText: 'Done.', streaming: false },
       { id: 'b1', kind: 'tool', toolCallId: 'h', section: 'answer', rawOffset: 5 },
     ], [{ id: 'h', title: 'set_follow_ups', status: 'completed' }]);
-    expect(deriveStreamActivity(hiddenOnly, { showThoughts: true, agentBlockStyle: 'line' })?.label).toBe('Working');
+    expect(deriveStreamActivity(hiddenOnly, { showThoughts: true })?.label).toBe('Working');
   });
 
   it('keeps the newest tool group of a streaming turn live between calls (MessageBlock)', () => {
@@ -533,9 +562,9 @@ describe('StreamActivityIndicator · line chrome', () => {
         { id: 'b1', kind: 'tool', toolCallId: 't1', section: 'answer', rawOffset: 9 },
       ],
     };
-    const { container } = render(withStyle(
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="compact" hideActions />,
-    ));
+    const { container } = render(
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts density="compact" hideActions />,
+    );
     const group = container.querySelector<HTMLElement>('.agent-line-group')!;
     expect(header(group).hasAttribute('data-live')).toBe(true);
     expect(shownLead(group)).toBe('Working…');
@@ -559,7 +588,7 @@ describe('line chrome · settled sentence', () => {
       return { width: w, height: 20, top: 0, left: 0, right: w, bottom: 20, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
     });
     try {
-      const { container } = render(withStyle(<ToolCallGroup tools={many} defaultExpanded={false} />));
+      const { container } = render(<ToolCallGroup tools={many} />);
       const lead = container.querySelector<HTMLElement>('.agent-line__lead.is-sentence')!;
       // 300px holds 42 characters: what the run looked at goes first; the merge and the checks stay.
       expect(shownLead(container)).toBe(`Merged origin/dev; 2${NB}test files passed${NB}+1`);

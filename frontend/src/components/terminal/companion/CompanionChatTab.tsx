@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendIdentity';
 import { toast } from 'sonner';
-import { X } from 'lucide-react';
 import { companionPostRunId, type CompanionCardDto, type CompanionPostMetadata } from 'michi-shared';
 import TPane from '../TPane';
+import { RevealOnShow } from '../agentBlockMotion';
+import { CloseIcon } from '../icons';
 import { Button } from '../../ui/controls';
 import { AssistantLinkChip, AssistantLinkScope } from '../assistant/AssistantLinks';
 import { MarkdownLinkRendererContext, type MarkdownLinkRenderer } from '../../markdownLinkRenderer';
@@ -344,6 +345,7 @@ function useNarrationOpenOptions(info: AssistantInfo | null, busy: boolean): Rea
   }, [stored, fetched, lastId]);
 }
 
+// 'brief' and 'catch_up' no longer run (2026-11-17); the posts they left still read.
 const POST_LABELS: Partial<Record<CompanionPostMetadata['kind'], string>> = {
   heartbeat: 'check-in',
   wake: 'check-in',
@@ -352,7 +354,7 @@ const POST_LABELS: Partial<Record<CompanionPostMetadata['kind'], string>> = {
   worker_report: 'worker update',
 };
 
-/** "<name> · check-in" ("morning brief", "worker update" by kind; the welcome is just the name), §1.5, §3.3. */
+/** "<name> · check-in" ("worker update" by kind; the welcome is just the name), §1.5, §3.3. */
 export function companionSpeaker(name: string, message: ChatMessage): string {
   if (isNarration(message)) return `${name} · first look`;
   const post = companionPostOf(message);
@@ -363,7 +365,7 @@ export function companionSpeaker(name: string, message: ChatMessage): string {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-const ITEM_ACTIONS: Record<string, string> = { snooze: 'Snoozed', dismiss: 'Dismissed', restore: 'Restored' };
+const ITEM_ACTIONS: Record<string, string> = { snooze: 'Snoozed', dismiss: 'Dismissed', restore: 'Restored', raise: 'Raised', lower: 'No longer raised' };
 const GOAL_ACTIONS: Record<string, string> = { add: 'Added', reword: 'Reworded', remove: 'Removed' };
 
 /**
@@ -437,18 +439,24 @@ function CompanionReceipt({ post, name }: { post: CompanionPostMetadata; name: s
   );
 }
 
-/** The lines under a user message the route decided something about (DESIGN-v2 §1.3, §2.8 T4). */
+/**
+ * The lines under a user message the route decided something about (DESIGN-v2 §1.3, §2.8 T4). The
+ * route's metadata lands after the bubble: on screen the lines grow in, loaded with the conversation
+ * they show settled (TR-36), as in the default pane.
+ */
 function CompanionTurnNotes({ message, name }: { message: ChatMessage; name: string }) {
   const turn = message.role === 'user' ? message.companionTurn : undefined;
-  if (!turn) return null;
+  const carried = !turn?.startTaint && !!turn?.carriedTaint;
   return (
-    <div className="companion-turn-notes">
-      {turn.rulesUnavailable && <p className="companion-turn-note" role="note">{name} couldn’t read your rules, so it won’t act on its own this turn.</p>}
-      {turn.startTaint && <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this turn includes check-in material.</p>}
-      {!turn.startTaint && turn.carriedTaint && (
-        <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this conversation read check-in material earlier.</p>
-      )}
-    </div>
+    <RevealOnShow show={!!(turn?.rulesUnavailable || turn?.startTaint || carried)}>
+      <div className="companion-turn-notes">
+        {turn?.rulesUnavailable && <p className="companion-turn-note" role="note">{name} couldn’t read your rules, so it won’t act on its own this turn.</p>}
+        {turn?.startTaint && <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this turn includes check-in material.</p>}
+        {carried && (
+          <p className="companion-turn-note" role="note">Anything that would leave this machine asks first: this conversation read check-in material earlier.</p>
+        )}
+      </div>
+    </RevealOnShow>
   );
 }
 
@@ -515,7 +523,7 @@ function UpgradeNote({ name, onDismiss }: { name: string; onDismiss(): void }) {
         ⌘J now opens {name}: the same conversation, now with check-ins on your work. Scheduled-job chats are under History.
         Replies use Settings › {name} › Reasoning (High or lower by default).
       </span>
-      <button type="button" className="companion-icon-btn" aria-label="Dismiss" onClick={onDismiss}>×</button>
+      <button type="button" className="companion-icon-btn" aria-label="Dismiss" onClick={onDismiss}><CloseIcon size="sm" /></button>
     </p>
   );
 }
@@ -561,7 +569,7 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
       if (draft) {
         setComposerDraft(nodeId, { value: draft, mentions: [] });
         noteAssistantDraftInjected(nodeId, draft);
-        // Check-in text (a brief card's action): the message it drafts replies to that post (D9, §2.8 T4).
+        // Check-in text (a post's action): the message it drafts replies to that post (D9, §2.8 T4).
         if (request.replyToPost) noteCompanionPostReply(nodeId, request.replyToPost);
       }
     }
@@ -635,11 +643,12 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
       toolCards: (tools) => <MetaChatCards tools={tools} context={cardsContext} />,
       leading: <CompanionGetStartedSlot />,
       afterMessage: (message) => {
-        const post = companionPostOf(message);
+        // A post's receipt grows in when its changes land on screen, and shows settled with history (TR-36).
+        const receipt = companionPostOf(message) ? message.companionPost : undefined;
         const change = byMessage.get(message.id);
         return (
           <>
-            {post && message.companionPost && <CompanionReceipt post={message.companionPost} name={name} />}
+            <RevealOnShow show={!!receipt?.changes.length}>{receipt && <CompanionReceipt post={receipt} name={name} />}</RevealOnShow>
             <CompanionTurnNotes message={message} name={name} />
             {change && (
               <div className="meta-chat-runtime-switch" role="separator" aria-label={`From here on: ${runtimeName(change.runtimeId)}`}>
@@ -690,13 +699,13 @@ export function CompanionChatTab({ snapshot, page }: { snapshot: CompanionSnapsh
         // On a phone the composer rests as one row without it; opening the composer shows it again.
         <span className="meta-chat-panel__target" data-on-screen="" data-composer-ambient="">
           On screen: {onScreen}
-          <button type="button" aria-label="Don’t send what’s on screen" onClick={() => dismissAssistantPage(nodeId)}><X size={11} aria-hidden /></button>
+          <button type="button" aria-label="Don’t send what’s on screen" onClick={() => dismissAssistantPage(nodeId)}><CloseIcon /></button>
         </span>
       )}
       {target && (
         <span className="meta-chat-panel__target">
           Targeting: {target.title || 'this block'}
-          <button type="button" aria-label="Clear target" onClick={() => setCompanionTarget(null)}><X size={11} aria-hidden /></button>
+          <button type="button" aria-label="Clear target" onClick={() => setCompanionTarget(null)}><CloseIcon /></button>
         </span>
       )}
       {!draftHasText && suggestions.length > 0 && (

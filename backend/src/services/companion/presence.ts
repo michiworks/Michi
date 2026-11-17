@@ -10,7 +10,7 @@
  * (DESIGN R2.8): no hidden turn starts while the user types to the
  * Companion, a `composing` beacon stops a running one, and two hours with no
  * window active and no input on the computer is away mode (polling only, no
- * heartbeat or wake; a brief that came due waits for the user's return).
+ * heartbeat or wake).
  * Michi's notices read whether the Companion panel is focused in some window
  * (a reply it shows needs no notice), and so does automatic memory, through
  * an instance server.ts feeds the same beacons: V, which the panel shows and
@@ -22,9 +22,10 @@
  * a window that quit without a last word must not keep the Companion
  * "focused" or the user "typing" forever.
  *
- * The deterministic "Since you left" is not built here: POST /companion/view
- * builds it from the feed and keeps it for the snapshot
- * (repository.recordCompanionView, latestCatchUp).
+ * Presence only says where the user is: marking the panel's messages read
+ * is POST /companion/view's (repository.recordCompanionView), and nothing is
+ * summarized for the user's return (the "Since you left" line went with the
+ * brief, 2026-11-17).
  */
 
 import { COMPANION_LIMITS, type CompanionPresenceInput } from 'michi-shared';
@@ -41,7 +42,7 @@ export const COMPANION_AWAY_AFTER_MS = COMPANION_LIMITS.awayModeAfterMinutes * M
 export interface CompanionPresenceUpdate {
   /** The beacon says the user is composing to the Companion: a running hidden turn should yield. */
   composing: boolean;
-  /** The user is back from away mode: what waited for them (a brief) may go now. */
+  /** The user is back from away mode: what waited for them may go now. */
   returned: boolean;
   /** The Companion panel had focus in some window and now has it in none: the user left the conversation it shows (V). */
   leftPanel: boolean;

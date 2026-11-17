@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { fetchTreeMessagePage, fetchWorkspaceStructure } from '../services/api/persistence';
-import { useChatActions, useChatNode, useChatNodeReader, useChatProjects } from './chatStore';
+import { useChatActions, useChatNodeReader, useChatProjects, useStructuralSelector } from './chatStore';
+import type { ChatNodeState } from './chatTypes';
 import { installTreeMessagePage } from './treeMessageInstall';
 import { findTreeIdForNode } from './tree';
 import { serverEntityId } from '../config/backendIdentity';
@@ -26,15 +27,21 @@ export function useEmbeddedChatNode(descriptor: EmbeddedChatNodeDescriptor | nul
   refreshWorkspace: (expectedNodeId?: string) => Promise<boolean>;
 } {
   const { installWorkspaceSnapshot, dispatch } = useChatActions();
-  const node = useChatNode(descriptor?.nodeId ?? '');
   const readNode = useChatNodeReader();
-  const nodeRef = useRef(node);
-  nodeRef.current = node;
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const projects = useChatProjects().projects;
-  const present = !!node && node.projectId === descriptor?.workspaceId;
-  const placeholder = present && node?.messagesLoaded === false && !node.historyBefore;
+  // Whether the store holds the node here, and still as a placeholder: both
+  // structural, so a reply streaming into it re-renders nothing here.
+  const nodeId = descriptor?.nodeId;
+  const workspaceId = descriptor?.workspaceId;
+  const held = useStructuralSelector(useCallback((nodes: Record<string, ChatNodeState>) => {
+    const node = nodeId ? nodes[nodeId] : undefined;
+    if (!node || node.projectId !== workspaceId) return 'absent';
+    return node.messagesLoaded === false && !node.historyBefore ? 'placeholder' : 'loaded';
+  }, [nodeId, workspaceId]));
+  const present = held !== 'absent';
+  const placeholder = held === 'placeholder';
   const project = descriptor ? projects.find((item) => item.id === descriptor.workspaceId) : undefined;
   const treeId = descriptor?.treeId || (descriptor && project ? findTreeIdForNode(descriptor.nodeId, project) : null);
 
@@ -46,10 +53,10 @@ export function useEmbeddedChatNode(descriptor: EmbeddedChatNodeDescriptor | nul
     const raw = await fetchWorkspaceStructure(descriptor.workspaceId);
     const installed = installWorkspaceSnapshot(raw, readStartedAt);
     const rows = (raw as { nodes?: Array<{ id?: unknown }> } | null)?.nodes;
-    const current = nodeRef.current;
+    const current = readNode(descriptor.nodeId);
     return installed && current?.nodeId === expectedNodeId && current.projectId === descriptor.workspaceId
       || Array.isArray(rows) && rows.some((row) => row?.id === serverEntityId(expectedNodeId, descriptor.backendConnectionId));
-  }, [descriptor, installWorkspaceSnapshot]);
+  }, [descriptor, installWorkspaceSnapshot, readNode]);
 
   useEffect(() => {
     if (!descriptor || present) return undefined;
@@ -59,13 +66,13 @@ export function useEmbeddedChatNode(descriptor: EmbeddedChatNodeDescriptor | nul
         if (controller.signal.aborted) return;
         const installed = installWorkspaceSnapshot(raw, Date.now());
         const rows = (raw as { nodes?: Array<{ id?: unknown }> } | null)?.nodes;
-        if (!installed || nodeRef.current?.projectId !== descriptor.workspaceId) {
+        if (!installed || readNode(descriptor.nodeId)?.projectId !== descriptor.workspaceId) {
           if (!Array.isArray(rows) || !rows.some((row) => row?.id === serverEntityId(descriptor.nodeId, descriptor.backendConnectionId))) setFailed(true);
         }
       })
       .catch(() => { if (!controller.signal.aborted) setFailed(true); });
     return () => controller.abort();
-  }, [descriptor, present, attempt, installWorkspaceSnapshot]);
+  }, [descriptor, present, attempt, installWorkspaceSnapshot, readNode]);
 
   useEffect(() => {
     if (!descriptor || !present || !placeholder || !treeId) return undefined;

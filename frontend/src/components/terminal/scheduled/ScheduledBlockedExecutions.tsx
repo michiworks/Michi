@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { WarningIcon } from '../icons';
 import type { ScheduledJobBlockedExecution, ScheduledJobDto } from 'michi-shared';
 import { confirmScheduledExecutionStopped } from '../../../services/api/scheduledJobs';
 import { confirmDialog } from '../../ui/ConfirmDialog';
@@ -57,7 +57,7 @@ export function ScheduledBlockedExecutions({ executions, jobs, workspaceName, no
   return (
     <section className="sched-banner sched-blocked" role="alert" aria-labelledby={titleId}>
       <div className="sched-blocked-heading">
-        <AlertTriangle size={16} aria-hidden="true" />
+        <WarningIcon size="lg" aria-hidden="true" />
         <div>
           <h2 id={titleId}>Scheduled runs need attention</h2>
           {resumesAt === null

@@ -164,6 +164,11 @@ div.artifacts-row__open {
 .artifacts-row__more:active {
   background: var(--term-alt);
 }
+/* Pressed while its menu is open. */
+.artifacts-row__more[aria-expanded='true'] {
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
 @media (hover: hover) {
   button.artifacts-row__open:hover,
   .artifacts-row__more:hover {

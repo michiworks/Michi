@@ -1,7 +1,8 @@
 import React, { Component, memo, useId, useRef, useState } from 'react';
 import { PAGE_CONTAINER_LIMITS, type MichiPageBlock } from 'michi-shared';
-import { Plus } from 'lucide-react';
+import { PlusIcon } from '../../icons';
 import { MichiMenu, type MichiMenuEntry } from './MichiMenu';
+import { MenuPresence } from '../../../ContextMenu';
 import type { BlockProps, BlockRenderer, MichiBlockCtx } from './blockTypes';
 import { blocksOf, clipWords, list, looseTitle, objects, str, typeLabel } from './michiPageModel';
 import {
@@ -63,10 +64,11 @@ function SlotAdd({ entries, label }: { entries: MichiMenuEntry[]; label: string 
           setAnchor((open) => (open ? null : el));
         }}
       >
-        <Plus size={13} strokeWidth={1.8} aria-hidden="true" />
+        <PlusIcon aria-hidden="true" />
       </button>
-      {anchor && (
+      <MenuPresence>{anchor && (
         <MichiMenu
+          key="add"
           anchor={anchor}
           label={label}
           entries={entries}
@@ -75,7 +77,7 @@ function SlotAdd({ entries, label }: { entries: MichiMenuEntry[]; label: string 
             if (restore) anchor.focus({ preventScroll: true });
           }}
         />
-      )}
+      )}</MenuPresence>
     </div>
   );
 }

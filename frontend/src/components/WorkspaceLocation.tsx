@@ -1,4 +1,4 @@
-import { Monitor, Server } from 'lucide-react';
+import { MonitorIcon, ServerIcon } from './terminal/icons';
 import { LOCAL_BACKEND_CONNECTION_ID, type BackendConnectionSummary } from '../config/backendConnections';
 import { useBackendConnections } from '../state/useBackendConnections';
 import './WorkspaceLocation.css';
@@ -27,9 +27,9 @@ export function WorkspaceLocation({ connectionId, separator }: { connectionId?: 
   const connection = connections.find(item => item.id === connectionId);
   const label = workspaceMachineLabel(connectionId, connections, separator);
   const address = connection?.transport === 'ssh' ? connection.sshHost : connection?.apiUrl;
-  const Icon = remote ? Server : Monitor;
+  const Icon = remote ? ServerIcon : MonitorIcon;
   return <span className="workspace-location" data-remote={remote || undefined} title={remote ? `${label} · ${address || connectionId}` : 'Workspace on this computer'}>
-    <Icon size={12} aria-hidden="true" />
+    <Icon size="sm" aria-hidden="true" />
     <span>{label}</span>
   </span>;
 }

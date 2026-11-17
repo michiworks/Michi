@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import type { PageId } from '../../../state/commands';
 import { useAuthSession } from '../../../services/auth';
 import { signOutAndReset } from '../../../services/signOut';
-import { useChatStore, useNodesSelector } from '../../../state/chatStore';
+import { useChatStore, useStructuralSelector } from '../../../state/chatStore';
 import { usePrefs, type TerminalPalette } from '../../../state/prefs';
 import { PALETTES } from '../tokens';
 import {
@@ -16,17 +16,22 @@ import {
 import {
   buildProfileActivity,
   buildProfileActivityFromSnapshot,
+  profileActivityEqual,
   type ActivityMetric,
   type ProfileActivity,
 } from './profileActivity';
 import { providerRequiresUserKey } from '../../../lib/providerCapabilities';
 import { useKeyEditor } from '../../../hooks/useKeyEditor';
 import { confirmDialog } from '../../ui/ConfirmDialog';
+import { tabStripKeyTarget } from '../tabKeys';
 import {
   activeBackendApiBase,
   backendConnectionIdForWorkspace,
 } from '../../../config/backendConnections';
 import { backendConnectionIdFromApiBase } from '../../../state/agentIdentity';
+import {
+  ArchiveIcon, ChartIcon, ChatIcon, DigestIcon, ExportIcon, KeyIcon, RetryIcon, SettingsIcon, TrashIcon, UserIcon, WorkspacesIcon,
+} from '../icons';
 
 /**
  * Profile page — implementation of the Claude-Design profile.html mock.
@@ -46,7 +51,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
   const session = useAuthSession();
   const user = session?.user;
   const { prefs, setPref } = usePrefs();
-  const { projects, agentStatus } = useChatStore();
+  const { projects, agentStatus, agentStatusUnreachable } = useChatStore();
   const activeBackendConnectionId = backendConnectionIdFromApiBase(activeBackendApiBase());
   const scopedProjects = useMemo(
     () => projects.filter(
@@ -54,8 +59,11 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
     ),
     [activeBackendConnectionId, projects],
   );
-  const localActivity = useNodesSelector(
+  // Counted on the structure channel: streamed chunks change no message count
+  // or user message (chatReducers.structural.test.ts), so they cost nothing.
+  const localActivity = useStructuralSelector(
     React.useCallback((nodes) => buildProfileActivity(scopedProjects, nodes), [scopedProjects]),
+    profileActivityEqual,
   );
   const [activitySnapshot, setActivitySnapshot] = useState<ProfileActivitySnapshot | null>(null);
   useEffect(() => {
@@ -96,7 +104,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
         minHeight: 0,
         overflowY: 'auto',
         background: 'var(--term-page-bg, var(--term-bg))',
-        color: 'var(--fg, var(--term-fg))',
+        color: 'var(--term-fg)',
       }}
     >
       <ProfilePageStyles />
@@ -124,7 +132,7 @@ export default function ProfilePage({ onNav }: { onNav?: (p: PageId) => void } =
 
           <HeatmapCard activity={activity} />
 
-          <ApiKeysSection status={agentStatus} onChanged={reloadAgentStatusSilently} />
+          <ApiKeysSection status={agentStatus} unreachable={agentStatusUnreachable} onChanged={reloadAgentStatusSilently} />
 
           <AccountSettings
             displayName={user?.name || ''}
@@ -169,7 +177,7 @@ function SideNav({
           </a>
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('settings'); }}>
             <span className="profile-sidenav__caret" />
-            <SettingsGearIcon /> <span>profile &amp; settings</span>
+            <SettingsIcon /> <span>profile &amp; settings</span>
           </a>
           <a className="profile-sidenav__item" href="#a-keys">
             <span className="profile-sidenav__caret" />
@@ -188,7 +196,7 @@ function SideNav({
         <div className="profile-sidenav__items">
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('workspaces'); }}>
             <span className="profile-sidenav__caret" />
-            <BranchIcon /> <span>workspaces</span>
+            <WorkspacesIcon /> <span>workspaces</span>
           </a>
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('dashboard'); }}>
             <span className="profile-sidenav__caret" />
@@ -197,7 +205,7 @@ function SideNav({
           {digestEnabled && (
             <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('digest'); }}>
               <span className="profile-sidenav__caret" />
-              <BookIcon /> <span>library</span>
+              <DigestIcon /> <span>library</span>
             </a>
           )}
         </div>
@@ -208,7 +216,7 @@ function SideNav({
         <div className="profile-sidenav__items">
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('settings'); }}>
             <span className="profile-sidenav__caret" />
-            <DownloadIcon /> <span>export data</span>
+            <ExportIcon /> <span>export data</span>
           </a>
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('trash'); }}>
             <span className="profile-sidenav__caret" />
@@ -216,7 +224,7 @@ function SideNav({
           </a>
           <a className="profile-sidenav__item" href="#" onClick={(e) => { e.preventDefault(); onNav?.('archived'); }}>
             <span className="profile-sidenav__caret" />
-            <span style={{ display: 'inline-flex', width: 16, justifyContent: 'center' }}>▣</span> <span>archived</span>
+            <ArchiveIcon /> <span>archived</span>
           </a>
         </div>
       </div>
@@ -300,12 +308,23 @@ function deriveInitials(name?: string | null, email?: string | null): string {
 
 // ─── heatmap ───────────────────────────────────────────────────────────────
 
+/** The metric tabs, in order. */
+const METRICS: readonly ActivityMetric[] = ['nodes', 'branches', 'messages'];
+
 function HeatmapCard({ activity }: { activity: ProfileActivity }) {
   const [metric, setMetric] = useState<ActivityMetric>('nodes');
   const summary = activity.metrics[metric];
   const cells = summary.cells;
   const longest = summary.longestStreak;
   const current = summary.currentStreak;
+  // ← and → select the metric beside the shown one, Home and End the ends (ST-20).
+  const onMetricKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const next = tabStripKeyTarget(event, METRICS.indexOf(metric), METRICS.length);
+    if (next === null) return;
+    event.preventDefault();
+    setMetric(METRICS[next]);
+    event.currentTarget.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus();
+  };
 
   return (
     <div className="heatmap-card" id="a-activity">
@@ -314,10 +333,8 @@ function HeatmapCard({ activity }: { activity: ProfileActivity }) {
           <h3>activity</h3>
           <em>{formatCompact(activity.totalNodes)} nodes · {formatCompact(activity.totalThreads)} threads · {formatCompact(activity.totalMessages)} messages</em>
         </div>
-        <div className="seg-toggle" role="tablist" aria-label="Heatmap metric">
-          <MetricButton metric="nodes" activeMetric={metric} onSelect={setMetric}>nodes</MetricButton>
-          <MetricButton metric="branches" activeMetric={metric} onSelect={setMetric}>branches</MetricButton>
-          <MetricButton metric="messages" activeMetric={metric} onSelect={setMetric}>messages</MetricButton>
+        <div className="seg-toggle" role="tablist" aria-label="Heatmap metric" onKeyDown={onMetricKeyDown}>
+          {METRICS.map((m) => <MetricButton key={m} metric={m} activeMetric={metric} onSelect={setMetric}>{m}</MetricButton>)}
         </div>
       </div>
 
@@ -344,10 +361,10 @@ function HeatmapCard({ activity }: { activity: ProfileActivity }) {
             ? `${formatMetricCount(summary.total, metric)} in the last year`
             : `No ${metricLabel(metric)} yet`}
           {' '}·{' '}
-          longest streak <b style={{ color: 'var(--fg)' }}>{longest} days</b>
+          longest streak <b style={{ color: 'var(--term-fg)' }}>{longest} days</b>
           {current > 0 && (
             <>
-              {' '}· current <b style={{ color: 'var(--fg)' }}>{current} days</b>
+              {' '}· current <b style={{ color: 'var(--term-fg)' }}>{current} days</b>
             </>
           )}
         </span>
@@ -376,11 +393,14 @@ function MetricButton({
   onSelect: (metric: ActivityMetric) => void;
   children: React.ReactNode;
 }) {
+  const selected = activeMetric === metric;
   return (
     <button
       type="button"
-      className={activeMetric === metric ? 'is-active' : ''}
-      aria-pressed={activeMetric === metric}
+      role="tab"
+      className={selected ? 'is-active' : ''}
+      aria-selected={selected}
+      tabIndex={selected ? 0 : -1}
       onClick={() => onSelect(metric)}
     >
       {children}
@@ -418,9 +438,13 @@ function reloadAgentStatusSilently() {
 
 function ApiKeysSection({
   status,
+  unreachable,
   onChanged,
 }: {
+  /** Null until the agent status is read. */
   status: AgentStatus | null;
+  /** The status could not be read: the providers are not loaded, which is not "none". */
+  unreachable: boolean;
   onChanged: () => void;
 }) {
   const providers = (status?.providers ?? []).filter(providerRequiresUserKey);
@@ -449,7 +473,9 @@ function ApiKeysSection({
         </span>
       </div>
 
-      {providers.length === 0 ? (
+      {status === null ? (
+        <div className="profile-empty" role="status">{unreachable ? 'providers not loaded.' : 'loading providers…'}</div>
+      ) : providers.length === 0 ? (
         <div className="profile-empty">no providers configured.</div>
       ) : (
         <>
@@ -600,10 +626,10 @@ function KeyRow({
         {provider.hasKey && !editing && (
           <>
             <button type="button" className="icon-btn" aria-label="Replace" onClick={() => { setEditing(true); editor.reset(); }}>
-              <RotateIcon />
+              <RetryIcon />
             </button>
             <button type="button" className="icon-btn icon-btn--danger" aria-label="Remove" onClick={() => void remove()} disabled={busy}>
-              <TrashSmallIcon />
+              <TrashIcon />
             </button>
           </>
         )}
@@ -713,20 +739,7 @@ function AccountSettings({
   );
 }
 
-// ─── inline icons ─────────────────────────────────────────────────────────
-
-const stroke = { fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
-function UserIcon()        { return <svg viewBox="0 0 24 24" {...stroke}><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>; }
-function SettingsGearIcon(){ return <svg viewBox="0 0 24 24" {...stroke}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>; }
-function KeyIcon()         { return <svg viewBox="0 0 24 24" {...stroke}><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>; }
-function ChartIcon()       { return <svg viewBox="0 0 24 24" {...stroke}><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg>; }
-function BranchIcon()      { return <svg viewBox="0 0 24 24" {...stroke}><circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/><circle cx="19" cy="12" r="2"/><path d="M7 6h6a3 3 0 0 1 3 3v3"/><path d="M7 18h6a3 3 0 0 0 3-3v0"/></svg>; }
-function ChatIcon()        { return <svg viewBox="0 0 24 24" {...stroke}><path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>; }
-function BookIcon()        { return <svg viewBox="0 0 24 24" {...stroke}><path d="M4 19V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14"/><path d="M4 19a2 2 0 0 0 2 2h14"/></svg>; }
-function DownloadIcon()    { return <svg viewBox="0 0 24 24" {...stroke}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>; }
-function TrashIcon()       { return <svg viewBox="0 0 24 24" {...stroke}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>; }
-function RotateIcon()      { return <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>; }
-function TrashSmallIcon()  { return <svg width="14" height="14" viewBox="0 0 24 24" {...stroke}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>; }
+// ─── brand mark ──────────────────────────────────────────────────────────
 
 function GoogleGlyph() {
   return (
@@ -744,17 +757,6 @@ function GoogleGlyph() {
 function ProfilePageStyles() {
   return (
     <style>{`
-      /* --fg, --fg-muted, --fg-subtle, --surface*, --line*, --accent*, --danger
-         and --ok come from the global aliases in index.css, with the same
-         meaning as everywhere else (fg-muted = term-mid, fg-subtle =
-         term-muted). Only the Profile-specific names are defined here. */
-      .profile-page {
-        --app-bg-muted: var(--term-alt);
-        --accent-tint: var(--term-accent-f);
-        --digest: var(--term-digest);
-        --digest-f: var(--term-digest-f);
-      }
-
       .profile-shell {
         display: grid;
         grid-template-columns: 220px 1fr;
@@ -773,35 +775,35 @@ function ProfilePageStyles() {
       .profile-sidenav { padding: 14px 0; position: sticky; top: 0; align-self: start; display: flex; flex-direction: column; gap: 22px; }
       .profile-sidenav h4 {
         font-size: var(--fs-xs); letter-spacing: var(--ls-caps-wide); text-transform: uppercase;
-        color: var(--fg-subtle); font-weight: 500; margin: 0 0 6px 4px;
+        color: var(--term-muted); font-weight: 500; margin: 0 0 6px 4px;
         font-family: var(--ui-font);
       }
       .profile-sidenav__items { display: flex; flex-direction: column; }
       .profile-sidenav__item {
         display: flex; align-items: center; gap: 9px; padding: 5px 8px 5px 4px;
         font-family: var(--ui-font); font-size: var(--fs-lg);
-        color: var(--fg-muted); cursor: pointer;
+        color: var(--term-mid); cursor: pointer;
         transition: background var(--t-quick), color var(--t-quick);
         text-decoration: none;
         border-left: 2px solid transparent;
       }
-      .profile-sidenav__item:hover { background: var(--surface-hover); color: var(--fg); }
+      .profile-sidenav__item:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
       .profile-sidenav__item.is-active {
-        background: var(--surface-alt); color: var(--fg);
-        border-left-color: var(--accent);
+        background: var(--term-alt); color: var(--term-fg);
+        border-left-color: var(--term-accent);
       }
       .profile-sidenav__caret {
-        width: 8px; color: var(--accent); font-size: var(--fs-xs);
+        width: 8px; color: var(--term-accent); font-size: var(--fs-xs);
         display: inline-block; text-align: center;
       }
       .profile-sidenav__item svg { width: 14px; height: 14px; opacity: 0.85; flex-shrink: 0; }
       .profile-sidenav__count {
-        margin-left: auto; font-size: var(--fs-xs); color: var(--fg-subtle);
+        margin-left: auto; font-size: var(--fs-xs); color: var(--term-muted);
         font-variant-numeric: tabular-nums;
-        padding: 0 4px; border: 1px solid var(--line);
+        padding: 0 4px; border: 1px solid var(--term-line);
       }
       .profile-sidenav__item.is-active .profile-sidenav__count {
-        color: var(--accent); border-color: var(--accent-soft); background: var(--accent-soft);
+        color: var(--term-accent-text); border-color: var(--term-accent-f); background: var(--term-accent-f);
       }
 
       .profile-main { padding: 8px 0 80px; min-width: 0; }
@@ -813,7 +815,7 @@ function ProfilePageStyles() {
         gap: 18px;
         align-items: center;
         padding-bottom: 22px;
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid var(--term-line);
       }
       .phero__avatar {
         width: 56px; height: 56px;
@@ -821,35 +823,35 @@ function ProfilePageStyles() {
         position: relative;
       }
       .phero__avatar--img {
-        border: 1px solid var(--line);
+        border: 1px solid var(--term-line);
       }
       .phero__avatar--initials {
         display: inline-flex; align-items: center; justify-content: center;
-        background: var(--accent); color: var(--accent-fg);
+        background: var(--term-accent); color: var(--on-accent);
         font-family: var(--ui-font); font-weight: 600; font-size: var(--fs-4xl);
         letter-spacing: var(--ls-wide);
       }
       .phero__avatar--initials::after {
         content: ''; position: absolute; inset: 3px;
-        border: 1px solid color-mix(in srgb, var(--app-bg) 30%, transparent);
+        border: 1px solid color-mix(in srgb, var(--term-bg) 30%, transparent);
         pointer-events: none;
       }
       .phero__info { min-width: 0; }
       .phero__name {
         font-family: var(--ui-font);
         font-size: var(--fs-4xl); font-weight: 500; letter-spacing: var(--ls-tight);
-        color: var(--fg); margin: 0 0 6px; line-height: 1.15;
+        color: var(--term-fg); margin: 0 0 6px; line-height: 1.15;
       }
       .phero__meta {
         display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--fg-muted);
+        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-mid);
       }
       .phero__field { display: inline-flex; align-items: baseline; gap: 6px; }
       .phero__k {
-        color: var(--fg-subtle); font-size: var(--fs-sm);
+        color: var(--term-muted); font-size: var(--fs-sm);
         letter-spacing: var(--ls-caps); text-transform: uppercase;
       }
-      .phero__v { color: var(--fg); }
+      .phero__v { color: var(--term-fg); }
       .phero__sep { color: var(--term-faint); }
       .phero__right {
         display: inline-flex; align-items: center; gap: 10px;
@@ -858,19 +860,19 @@ function ProfilePageStyles() {
       .phero__streak {
         display: inline-flex; align-items: center; gap: 7px;
         padding: 5px 9px;
-        border: 1px solid var(--accent-soft); background: var(--accent-soft);
-        color: var(--accent);
+        border: 1px solid var(--term-accent-f); background: var(--term-accent-f);
+        color: var(--term-accent-text);
         font-family: var(--ui-font); font-size: var(--fs-sm); white-space: nowrap;
       }
-      .phero__streak b { color: var(--fg); font-weight: 500; }
+      .phero__streak b { color: var(--term-fg); font-weight: 500; }
       .phero__streak-dot {
         width: 6px; height: 6px;
         border-radius: var(--ui-radius-pill); /* the only intentional radius */
-        background: var(--accent);
+        background: var(--term-accent);
       }
       .phero__signout {
-        background: transparent; color: var(--fg-muted);
-        border: 1px solid var(--line);
+        background: transparent; color: var(--term-mid);
+        border: 1px solid var(--term-line);
         padding: 5px 12px;
         font-family: var(--ui-font); font-size: var(--fs-sm);
         letter-spacing: var(--ls-wide);
@@ -878,7 +880,7 @@ function ProfilePageStyles() {
         transition: color var(--t-soft), border-color var(--t-soft), background var(--t-soft);
       }
       .phero__signout:hover {
-        color: var(--accent); border-color: var(--accent);
+        color: var(--term-accent-text); border-color: var(--term-accent);
       }
 
       /* heatmap — flush in page, square cells, color-mix from accent */
@@ -891,39 +893,39 @@ function ProfilePageStyles() {
       .heatmap-card__title h3 {
         font-family: var(--ui-font); font-size: var(--fs-md); font-weight: 600;
         letter-spacing: var(--ls-caps-wide); text-transform: uppercase;
-        margin: 0; color: var(--fg); white-space: nowrap;
+        margin: 0; color: var(--term-fg); white-space: nowrap;
         display: flex; align-items: center; gap: 10px;
       }
       .heatmap-card__title h3::before {
         content: ''; display: inline-block;
-        width: 4px; height: 12px; background: var(--accent);
+        width: 4px; height: 12px; background: var(--term-accent);
       }
       .heatmap-card__title em {
         font-family: var(--ui-font); font-style: normal;
-        font-size: var(--fs-md); color: var(--fg-muted);
+        font-size: var(--fs-md); color: var(--term-mid);
       }
       .seg-toggle {
         display: inline-flex;
-        border: 1px solid var(--line);
-        background: var(--app-bg-muted);
+        border: 1px solid var(--term-line);
+        background: var(--term-alt);
       }
       .seg-toggle button {
         border: 0; background: transparent;
         font-family: var(--ui-font); font-size: var(--fs-sm);
-        color: var(--fg-muted); padding: 5px 12px; cursor: pointer;
-        border-right: 1px solid var(--line);
+        color: var(--term-mid); padding: 5px 12px; cursor: pointer;
+        border-right: 1px solid var(--term-line);
         text-transform: lowercase; letter-spacing: var(--ls-wide);
         transition: color var(--t-quick), background var(--t-quick);
       }
       .seg-toggle button:last-child { border-right: 0; }
-      .seg-toggle button:hover { color: var(--fg); }
+      .seg-toggle button:hover { color: var(--term-fg); }
       .seg-toggle button.is-active {
-        background: var(--fg); color: var(--app-bg);
+        background: var(--term-fg); color: var(--term-bg);
       }
       .heatmap { display: grid; grid-template-columns: 28px 1fr; gap: 6px; align-items: start; }
       .heatmap__day-labels {
         display: grid; grid-template-rows: repeat(7, 1fr);
-        font-family: var(--ui-font); font-size: var(--fs-xs); color: var(--fg-subtle);
+        font-family: var(--ui-font); font-size: var(--fs-xs); color: var(--term-muted);
       }
       .heatmap__day-labels span:nth-child(odd) { visibility: hidden; }
       .heatmap__day-labels span { height: 13px; line-height: 13px; }
@@ -935,33 +937,33 @@ function ProfilePageStyles() {
       }
       .heatmap__cell {
         width: 12px; height: 12px;
-        background: var(--surface-alt);
+        background: var(--term-alt);
         transition: outline var(--t-quick);
       }
       .heatmap__cell:hover {
-        outline: 1px solid var(--accent); outline-offset: 1px;
+        outline: 1px solid var(--term-accent); outline-offset: 1px;
         position: relative; z-index: 2;
       }
-      .heatmap__cell.l0 { background: color-mix(in srgb, var(--line) 70%, var(--app-bg)); }
-      .heatmap__cell.l1 { background: color-mix(in srgb, var(--accent) 22%, var(--app-bg-muted)); }
-      .heatmap__cell.l2 { background: color-mix(in srgb, var(--accent) 45%, var(--app-bg-muted)); }
-      .heatmap__cell.l3 { background: color-mix(in srgb, var(--accent) 70%, var(--app-bg)); }
-      .heatmap__cell.l4 { background: var(--accent); }
+      .heatmap__cell.l0 { background: color-mix(in srgb, var(--term-line) 70%, var(--term-bg)); }
+      .heatmap__cell.l1 { background: color-mix(in srgb, var(--term-accent) 22%, var(--term-alt)); }
+      .heatmap__cell.l2 { background: color-mix(in srgb, var(--term-accent) 45%, var(--term-alt)); }
+      .heatmap__cell.l3 { background: color-mix(in srgb, var(--term-accent) 70%, var(--term-bg)); }
+      .heatmap__cell.l4 { background: var(--term-accent); }
       .heatmap__cell.is-future { opacity: 0.25; }
       .heatmap__legend {
         display: flex; justify-content: space-between; align-items: center;
-        margin-top: 10px; font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--fg-muted);
+        margin-top: 10px; font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--term-mid);
         flex-wrap: wrap; gap: 8px;
       }
-      .heatmap__legend b { color: var(--fg); font-weight: 500; }
+      .heatmap__legend b { color: var(--term-fg); font-weight: 500; }
       .heatmap__legend-scale {
         display: flex; align-items: center; gap: 4px;
-        font-size: var(--fs-sm); color: var(--fg-subtle);
+        font-size: var(--fs-sm); color: var(--term-muted);
       }
       .heatmap__legend-scale .heatmap__cell { width: 11px; height: 11px; }
 
       /* sections — uppercase header w/ accent bar */
-      .profile-section { margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--line); scroll-margin-top: 24px; }
+      .profile-section { margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--term-line); scroll-margin-top: 24px; }
       .profile-section__head {
         display: flex; align-items: baseline; gap: 16px;
         flex-wrap: wrap; margin-bottom: 16px;
@@ -969,35 +971,35 @@ function ProfilePageStyles() {
       .profile-section__head h2 {
         font-family: var(--ui-font); font-size: var(--fs-md); font-weight: 600;
         letter-spacing: var(--ls-caps-wide); text-transform: uppercase;
-        margin: 0; color: var(--fg); white-space: nowrap;
+        margin: 0; color: var(--term-fg); white-space: nowrap;
         display: flex; align-items: center; gap: 10px;
       }
       .profile-section__head h2::before {
         content: ''; display: inline-block;
-        width: 4px; height: 12px; background: var(--accent);
+        width: 4px; height: 12px; background: var(--term-accent);
       }
       .profile-section__meta {
-        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--fg-muted);
+        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-mid);
         flex: 1; min-width: 0;
       }
       .profile-section__count {
-        font-size: var(--fs-sm); color: var(--fg-subtle);
+        font-size: var(--fs-sm); color: var(--term-muted);
         font-variant-numeric: tabular-nums;
-        padding: 2px 8px; border: 1px solid var(--line);
+        padding: 2px 8px; border: 1px solid var(--term-line);
         font-family: var(--ui-font);
       }
 
       .profile-empty {
-        padding: 22px; background: var(--surface);
-        border: 1px solid var(--line);
-        font-family: var(--ui-font); font-size: var(--fs-lg); color: var(--fg-muted);
+        padding: 22px; background: var(--term-surface);
+        border: 1px solid var(--term-line);
+        font-family: var(--ui-font); font-size: var(--fs-lg); color: var(--term-mid);
         text-align: center;
       }
 
       /* api keys — single sharp stack, [saved]/[missing] tag, $ prompt */
       .keys {
         display: flex; flex-direction: column;
-        border: 1px solid var(--line); background: var(--surface);
+        border: 1px solid var(--term-line); background: var(--term-surface);
       }
       .keys-add {
         display: flex; align-items: center; gap: 12px;
@@ -1006,32 +1008,32 @@ function ProfilePageStyles() {
       .keys-add__label {
         font-family: var(--ui-font); font-size: var(--fs-sm);
         letter-spacing: var(--ls-wide); text-transform: uppercase;
-        color: var(--fg-subtle);
+        color: var(--term-muted);
       }
       .keys-add__select {
         flex: 1; min-width: 0;
-        background: var(--surface); color: var(--fg);
-        border: 1px solid var(--line);
+        background: var(--term-surface); color: var(--term-fg);
+        border: 1px solid var(--term-line);
         padding: 8px 10px;
         font-family: var(--ui-font); font-size: var(--fs-lg);
         cursor: pointer;
       }
-      .keys-add__select:hover { border-color: var(--accent); }
-      .keys-add__select:focus { outline: none; border-color: var(--accent); }
+      .keys-add__select:hover { border-color: var(--term-accent); }
+      .keys-add__select:focus { outline: none; border-color: var(--term-accent); }
       .key-row {
         display: grid; grid-template-columns: 36px 1fr auto;
         gap: 14px; align-items: center;
         padding: 14px 16px;
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid var(--term-line);
       }
       .key-row:last-child { border-bottom: 0; }
-      .key-row.is-missing { background: color-mix(in srgb, var(--app-bg) 60%, var(--surface)); }
+      .key-row.is-missing { background: color-mix(in srgb, var(--term-bg) 60%, var(--term-surface)); }
       .key-row__icon {
         width: 28px; height: 28px;
         display: inline-flex; align-items: center; justify-content: center;
         font-family: var(--ui-font); font-size: var(--fs-lg); font-weight: 600;
-        border: 1px solid var(--line);
-        color: var(--fg);
+        border: 1px solid var(--term-line);
+        color: var(--term-fg);
       }
       .key-row.is-missing .key-row__icon { color: var(--term-faint); }
       .key-row__icon--anthropic,
@@ -1043,145 +1045,145 @@ function ProfilePageStyles() {
         display: flex; align-items: center; gap: 10px;
         font-family: var(--ui-font); margin-bottom: 4px; flex-wrap: wrap;
       }
-      .key-row__label { font-size: var(--fs-lg); font-weight: 500; color: var(--fg); }
+      .key-row__label { font-size: var(--fs-lg); font-weight: 500; color: var(--term-fg); }
       .key-row__tag {
         font-family: var(--ui-font); font-size: var(--fs-sm);
         letter-spacing: var(--ls-wide); font-weight: 500;
       }
-      .key-row__tag.is-ok { color: var(--accent); }
-      .key-row__tag.is-muted { color: var(--fg-subtle); }
+      .key-row__tag.is-ok { color: var(--term-accent-text); }
+      .key-row__tag.is-muted { color: var(--term-muted); }
       .key-row__env {
         font-family: var(--ui-font); font-size: var(--fs-sm);
-        color: var(--fg-subtle); letter-spacing: var(--ls-wide);
-        padding: 1px 6px; border: 1px solid var(--line);
+        color: var(--term-muted); letter-spacing: var(--ls-wide);
+        padding: 1px 6px; border: 1px solid var(--term-line);
       }
       .key-row__sub {
-        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--fg-muted);
+        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-mid);
         display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
         min-height: 18px;
       }
       .key-row__sub code {
-        font-family: var(--ui-font); background: var(--app-bg-muted);
-        padding: 1px 7px; color: var(--fg-muted);
-        border: 1px solid var(--line);
+        font-family: var(--ui-font); background: var(--term-alt);
+        padding: 1px 7px; color: var(--term-mid);
+        border: 1px solid var(--term-line);
       }
       .key-row__sep { color: var(--term-faint); }
-      .key-row__link { color: var(--accent); text-decoration: none; }
+      .key-row__link { color: var(--term-accent-text); text-decoration: none; }
       .key-row__link:hover { text-decoration: underline; }
       .key-row__editor {
         display: inline-flex; gap: 6px; align-items: center;
         flex-wrap: wrap; width: 100%;
       }
-      .key-row__prompt { color: var(--accent); font-weight: 600; }
+      .key-row__prompt { color: var(--term-accent); font-weight: 600; }
       .key-row__input {
         flex: 1; min-width: 200px; height: 26px; padding: 0 8px;
-        border: 1px solid var(--line-strong);
-        background: var(--app-bg);
+        border: 1px solid var(--term-line-s);
+        background: var(--term-bg);
         font-family: var(--ui-font); font-size: var(--fs-md);
-        color: var(--fg); outline: none;
+        color: var(--term-fg); outline: none;
       }
-      .key-row__input:focus { border-color: var(--accent); }
-      .key-row__error { font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--danger); margin-top: 6px; }
+      .key-row__input:focus { border-color: var(--term-accent); }
+      .key-row__error { font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--term-danger-text); margin-top: 6px; }
       .key-row__actions { display: flex; gap: 4px; align-items: center; }
 
       /* form grid (account settings) — sharp, bordered stack */
-      .form-grid { background: var(--surface); border: 1px solid var(--line); }
+      .form-grid { background: var(--term-surface); border: 1px solid var(--term-line); }
       .form-row {
         display: grid; grid-template-columns: minmax(160px, 200px) 1fr auto;
         gap: 18px; padding: 14px 16px; align-items: center;
-        border-bottom: 1px solid var(--line);
+        border-bottom: 1px solid var(--term-line);
       }
       .form-row:last-child { border-bottom: 0; }
       .form-row__label {
         font-family: var(--ui-font); font-size: var(--fs-md); font-weight: 500;
-        color: var(--fg); letter-spacing: var(--ls-wide);
+        color: var(--term-fg); letter-spacing: var(--ls-wide);
       }
       .form-row__hint {
         font-family: var(--ui-font); font-size: var(--fs-sm);
-        color: var(--fg-subtle); margin-top: 3px;
+        color: var(--term-muted); margin-top: 3px;
       }
       .profile-input {
         width: 100%; max-width: 320px; height: 30px; padding: 0 10px;
-        border: 1px solid var(--line-strong);
-        background: var(--app-bg);
+        border: 1px solid var(--term-line-s);
+        background: var(--term-bg);
         font-family: var(--ui-font); font-size: var(--fs-lg);
-        color: var(--fg); outline: none;
+        color: var(--term-fg); outline: none;
       }
-      .profile-input:focus { border-color: var(--accent); }
-      .profile-input--readonly { background: var(--app-bg-muted); color: var(--fg-muted); cursor: default; }
+      .profile-input:focus { border-color: var(--term-accent); }
+      .profile-input--readonly { background: var(--term-alt); color: var(--term-fg); cursor: text; }
       .google-pill {
         display: inline-flex; align-items: center; gap: 8px;
         padding: 4px 10px;
-        border: 1px solid var(--line); background: var(--app-bg-muted);
-        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--fg);
+        border: 1px solid var(--term-line); background: var(--term-alt);
+        font-family: var(--ui-font); font-size: var(--fs-md); color: var(--term-fg);
         max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .google-pill__check {
-        color: var(--ok); font-size: var(--fs-sm); letter-spacing: var(--ls-wide);
+        color: var(--term-digest); font-size: var(--fs-sm); letter-spacing: var(--ls-wide);
       }
       .theme-picker { display: flex; gap: 8px; flex-wrap: wrap; }
       .theme-swatch {
         position: relative;
         width: 56px; height: 32px;
-        border: 1px solid var(--line);
+        border: 1px solid var(--term-line);
         background-clip: padding-box;
         padding: 0; cursor: pointer;
         transition: border-color var(--t-quick);
       }
-      .theme-swatch:hover { border-color: var(--line-strong); }
+      .theme-swatch:hover { border-color: var(--term-line-s); }
       .theme-swatch.is-active {
-        border-color: var(--accent);
-        box-shadow: inset 0 0 0 1px var(--accent);
+        border-color: var(--term-accent);
+        box-shadow: inset 0 0 0 1px var(--term-accent);
       }
 
       /* shared bits — sharp buttons */
       .profile-btn {
         display: inline-flex; align-items: center; justify-content: center;
         gap: 6px; height: 30px; padding: 0 12px;
-        border: 1px solid var(--line-strong);
-        background: var(--surface); color: var(--fg);
+        border: 1px solid var(--term-line-s);
+        background: var(--term-surface); color: var(--term-fg);
         font-family: var(--ui-font); font-size: var(--fs-md); font-weight: 500;
         cursor: pointer; text-transform: lowercase; letter-spacing: var(--ls-wide);
         transition: background var(--t-quick), border-color var(--t-quick), color var(--t-quick);
       }
       .profile-btn:hover {
-        background: var(--surface-hover);
-        border-color: var(--accent);
-        color: var(--accent);
+        background: var(--term-hover-bg, var(--term-alt));
+        border-color: var(--term-accent);
+        color: var(--term-accent-text);
       }
-      .profile-btn:disabled { opacity: 0.4; cursor: default; }
-      .profile-btn:disabled:hover { background: var(--surface); border-color: var(--line-strong); color: var(--fg); }
+      .profile-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .profile-btn:disabled:hover { background: var(--term-surface); border-color: var(--term-line-s); color: var(--term-fg); }
       .profile-btn--sm { height: 24px; padding: 0 9px; font-size: var(--fs-sm); }
       .profile-btn--ghost {
-        background: transparent; border-color: transparent; color: var(--fg-muted);
+        background: transparent; border-color: transparent; color: var(--term-mid);
       }
       .profile-btn--ghost:hover {
-        background: var(--surface-hover); border-color: transparent; color: var(--fg);
+        background: var(--term-hover-bg, var(--term-alt)); border-color: transparent; color: var(--term-fg);
       }
       .icon-btn {
         width: 26px; height: 26px;
         display: inline-flex; align-items: center; justify-content: center;
-        color: var(--fg-muted); background: transparent;
+        color: var(--term-mid); background: transparent;
         border: 1px solid transparent; cursor: pointer;
         transition: background var(--t-quick), color var(--t-quick), border-color var(--t-quick);
       }
-      .icon-btn:hover { background: var(--surface-hover); color: var(--fg); border-color: var(--line); }
-      .icon-btn--danger:hover { color: var(--danger); border-color: var(--danger); background: transparent; }
+      .icon-btn:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); border-color: var(--term-line); }
+      .icon-btn--danger:hover { color: var(--term-danger-text); border-color: var(--term-danger); background: transparent; }
 
       /* footer — sharp, terminal-faint */
       .profile-footer {
-        margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--line);
+        margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--term-line);
         display: flex; justify-content: space-between; align-items: center;
         gap: 12px; flex-wrap: wrap;
-        font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--fg-subtle);
+        font-family: var(--ui-font); font-size: var(--fs-sm); color: var(--term-muted);
       }
-      .profile-footer a { color: var(--fg-muted); white-space: nowrap; text-decoration: none; }
-      .profile-footer a:hover { color: var(--fg); }
+      .profile-footer a { color: var(--term-mid); white-space: nowrap; text-decoration: none; }
+      .profile-footer a:hover { color: var(--term-fg); }
       .profile-footer nav { display: flex; gap: 18px; }
 
       /* scrollbar polish */
       .heatmap__main::-webkit-scrollbar { height: 6px; }
-      .heatmap__main::-webkit-scrollbar-thumb { background: var(--line-strong); }
+      .heatmap__main::-webkit-scrollbar-thumb { background: var(--term-line-s); }
     `}</style>
   );
 }

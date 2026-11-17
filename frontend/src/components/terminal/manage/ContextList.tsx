@@ -1,13 +1,18 @@
 import React from 'react';
 import type { ArtifactEntry } from '../../../state/chatTypes';
 import { artifactType } from '../artifacts/artifactOpen';
-import { manageFileType, MANAGE_COLORS } from './tokens';
+import { manageFileType, MANAGE_LINK_TYPE } from './tokens';
 import { Button } from '../../ui/controls';
+import { HoverTip } from '../../ui/Popover';
 import { formatBytes } from '../../../lib/formatBytes';
+import { FolderOpenIcon, StarIcon, TrashIcon } from '../icons';
+import ManageListEmpty from './ManageListEmpty';
+import './manage.css';
 
 interface Props {
   artifacts: ArtifactEntry[];
   filter: string;
+  onClearFilter?: () => void;
   selectedContextId: string | null;
   onSelect: (id: string) => void;
   onPin: (id: string) => void;
@@ -27,6 +32,7 @@ const TYPE_GROUPS: Array<{ key: 'doc' | 'file' | 'image' | 'link'; title: string
 export default function ContextList({
   artifacts,
   filter,
+  onClearFilter,
   selectedContextId,
   onSelect,
   onPin,
@@ -65,6 +71,7 @@ export default function ContextList({
   return (
     <div>
       <Strip totalBytes={totalBytes} favoriteCount={favoriteCount} onAdd={onAdd} />
+      {filtered.length === 0 && <ManageListEmpty query={filter.trim()} empty="no artifacts yet — add one above" onClearFilter={onClearFilter} />}
       {TYPE_GROUPS.map((g) => (
         <Section
           key={g.key}
@@ -135,7 +142,6 @@ function Section({
   onDelete: (id: string) => void;
   onOpen: (artifact: ArtifactEntry) => void;
 }) {
-  const [hoverId, setHoverId] = React.useState<string | null>(null);
   if (rows.length === 0) return null;
   return (
     <section style={{ marginBottom: 28 }}>
@@ -173,32 +179,19 @@ function Section({
       </div>
       {rows.map((c) => {
         const isLink = artifactType(c) === 'link';
-        const ft = isLink ? { label: 'url', color: MANAGE_COLORS.link } : manageFileType(c.name);
+        const ft = isLink ? MANAGE_LINK_TYPE : manageFileType(c.name);
         const metaLine = isLink ? c.url ?? '' : `${c.kind === 'reference' ? '↗ ' : c.kind === 'symlink' ? '⇄ ' : ''}${c.filePath}`;
         const selected = selectedId === c.id;
-        const hovered = hoverId === c.id;
         return (
           <div
             key={c.id}
+            className="manage-row"
             data-selected={selected}
-            data-hovered={hovered}
-            onMouseEnter={() => setHoverId(c.id)}
-            onMouseLeave={() =>
-              setHoverId((cur) => (cur === c.id ? null : cur))
-            }
-            onClick={() => onSelect(c.id)}
             style={{
               display: 'flex',
               gap: 14,
               alignItems: 'center',
               padding: '12px 14px',
-              background: selected
-                ? 'color-mix(in srgb, var(--term-accent) 14%, transparent)'
-                : hovered
-                  ? 'var(--term-hover-bg)'
-                  : 'transparent',
-              cursor: 'pointer',
-              position: 'relative',
             }}
           >
             {selected && (
@@ -218,8 +211,8 @@ function Section({
               style={{
                 width: 30,
                 height: 36,
-                background: `${ft.color}15`,
-                color: ft.color,
+                background: ft.fill,
+                color: ft.text,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -234,8 +227,14 @@ function Section({
               {ft.label}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div
+              <button
+                type="button"
+                className="manage-row__open"
+                aria-current={selected || undefined}
+                onClick={() => onSelect(c.id)}
                 style={{
+                  display: 'block',
+                  width: '100%',
                   fontFamily: 'var(--ui-font)',
                   fontSize: 'var(--fs-xl)',
                   lineHeight: 1.3,
@@ -247,7 +246,7 @@ function Section({
                 }}
               >
                 {c.name}
-              </div>
+              </button>
               <div
                 style={{
                   fontSize: 'var(--fs-md)',
@@ -262,7 +261,8 @@ function Section({
                 {metaLine}
               </div>
             </div>
-            {hovered ? (
+            <div className="manage-row__above manage-artifact__end">
+              <RowMeta size={c.size} />
               <RowActions
                 favorite={!!c.pinnedAt}
                 onPreview={() => onOpen(c)}
@@ -270,9 +270,7 @@ function Section({
                 onDelete={() => onDelete(c.id)}
                 contextName={c.name}
               />
-            ) : (
-              <RowMeta size={c.size} />
-            )}
+            </div>
           </div>
         );
       })}
@@ -283,6 +281,7 @@ function Section({
 function RowMeta({ size }: { size: number | undefined }) {
   return (
     <span
+      className="manage-artifact__size"
       style={{
         display: 'inline-flex',
         gap: 12,
@@ -313,6 +312,7 @@ function RowActions({
 }) {
   return (
     <span
+      className="manage-artifact__actions"
       style={{
         display: 'inline-flex',
         gap: 4,
@@ -331,11 +331,10 @@ function RowActions({
           ? `Remove ${contextName} from favorites`
           : `Add ${contextName} to favorites`}
         title={favorite ? 'Remove from favorites' : 'Add to favorites'}
-        active={favorite}
-        ariaPressed={favorite}
+        pressed={favorite}
         onClick={onPin}
       >
-        <StarIcon filled={favorite} />
+        <StarIcon fill={favorite ? 'currentColor' : 'none'} />
       </IconBtn>
       <IconBtn
         ariaLabel={`delete ${contextName}`}
@@ -354,88 +353,28 @@ function IconBtn({
   onClick,
   ariaLabel,
   title,
-  active,
-  ariaPressed,
+  pressed,
   danger,
 }: {
   children: React.ReactNode;
   onClick: () => void;
   ariaLabel: string;
   title: string;
-  active?: boolean;
-  ariaPressed?: boolean;
+  pressed?: boolean;
   danger?: boolean;
 }) {
   return (
-    <button
-      type="button"
-      aria-label={ariaLabel}
-      aria-pressed={ariaPressed}
-      title={title}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
-      style={{
-        border: 'none',
-        background: 'transparent',
-        cursor: 'pointer',
-        color: danger
-          ? 'var(--term-danger, #a8261a)'
-          : active
-            ? 'var(--term-accent)'
-            : 'var(--term-muted)',
-        padding: '2px 6px',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        lineHeight: 0,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function FolderOpenIcon() {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      strokeLinecap="round"
-    >
-      <path d="M1.5 4.5h4.5l1.5 1.5h6.5v2.5" />
-      <path d="M2 7.5h12.5l-1.6 5.5H1.5L2 7.5z" />
-    </svg>
-  );
-}
-
-function StarIcon({ filled }: { filled: boolean }) {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 16 16"
-      fill={filled ? 'currentColor' : 'none'}
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M8 1.5l1.95 3.95 4.36.63-3.15 3.07.74 4.34L8 11.44l-3.9 2.05.74-4.34-3.15-3.07 4.36-.63L8 1.5z" />
-    </svg>
-  );
-}
-
-function TrashIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <path d="M3 4h10M6 4V2.5h4V4M4.5 4l.5 9.5h6L11.5 4M7 6.5v5M9 6.5v5" strokeLinecap="round" />
-    </svg>
+    <HoverTip label={title}>
+      <button
+        type="button"
+        className="t-icon-btn manage-icon-btn"
+        aria-label={ariaLabel}
+        aria-pressed={pressed}
+        data-danger={danger || undefined}
+        onClick={onClick}
+      >
+        {children}
+      </button>
+    </HoverTip>
   );
 }

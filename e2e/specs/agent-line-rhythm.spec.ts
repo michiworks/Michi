@@ -3,8 +3,8 @@ import { installMockApi } from '../fixtures/mockApi';
 
 /**
  * The line chrome's rhythm in a real layout (jsdom has none): a run is set a
- * size below the prose and sits 22px under the prose before it and 4px over
- * the prose that reports it, its rows are 28px (36px, 32px for a step, on touch), and an opened run shows twelve step
+ * size below the prose with 12px on either side, its rows are 28px (36px,
+ * 32px for a step, on touch), and an opened run shows twelve step
  * rows under its words (six on a phone), scrolling the rest, with the hidden
  * edge faded. The
  * turn is finished, so its work sits in a Work fold above the final answer:
@@ -49,7 +49,7 @@ const workspace = {
 async function openChat(page: Page, { phone = false } = {}) {
   await installMockApi(page, { workspaces: [workspace] });
   await page.addInitScript((phone) => localStorage.setItem('michi:v1:prefs', JSON.stringify({
-    onboardingCompletedAt: 1, sidebarCollapsed: phone, reduceMotion: true, agentBlockStyle: 'line',
+    onboardingCompletedAt: 1, sidebarCollapsed: phone, reduceMotion: true,
   })), phone);
   await page.goto('/');
   if (phone) await page.getByRole('button', { name: 'Open sidebar', exact: true }).click();
@@ -129,12 +129,12 @@ async function openSteps(page: Page) {
   });
 }
 
-test('a run sits loose above and tight below the prose, a size below it, and opens to twelve step rows that scroll', async ({ page }) => {
+test('a run sits equally spaced from prose, a size below it, and opens to twelve step rows that scroll', async ({ page }) => {
   await openChat(page);
-  expect(await measureFold(page)).toEqual({ rowHeight: 28, below: 4 });
+  expect(await measureFold(page)).toEqual({ rowHeight: 28, below: 12 });
   await openWork(page);
   const m = await measure(page);
-  expect(m.runs).toEqual([{ above: 22, below: 4 }, { above: 22, below: null }]);
+  expect(m.runs).toEqual([{ above: 12, below: 12 }, { above: 12, below: null }]);
   // The folded prose is a step quieter than the final answer below it.
   expect(m.noteColor).toBe(m.colors.mid);
   expect(m.noteColor).not.toBe(m.finalColor);
@@ -171,10 +171,50 @@ test('on a phone, rows are 36px and steps 32px, and the step area shows six', as
     const m = await measure(page);
     test.skip(!m.coarse, 'this browser does not report a coarse pointer under touch emulation');
     expect(m.rowHeight).toBe(36);
-    expect(m.runs).toEqual([{ above: 22, below: 4 }, { above: 22, below: null }]);
+    expect(m.runs).toEqual([{ above: 12, below: 12 }, { above: 12, below: null }]);
     const area = await openSteps(page);
     expect(area).toMatchObject({ stepHeight: 32, height: 6 * 32 + 4, overflows: true });
   } finally {
     await context.close();
   }
+});
+
+test('a run whose steps all show fades no edge after a step’s payload opens and closes', async ({ page }) => {
+  const node = 'short-node';
+  const tools = ['a', 'b'].map((f, i) => ({
+    id: `s${i}`, title: 'Read', kind: 'read', status: 'completed',
+    inputJson: JSON.stringify({ file_path: `src/${f}.ts` }), output: 'export {};', startedAt: 1_000 + i * 2_000, endedAt: 2_500 + i * 2_000,
+  }));
+  await installMockApi(page, { workspaces: [{
+    workspace: { id: 'short-ws', name: 'Short', active_tree_id: 'short-tree', created_at: 1 },
+    trees: [{ id: 'short-tree', workspace_id: 'short-ws', root_node_id: node, name: 'Short', created_at: 1, last_active_at: 1 }],
+    nodes: [{ id: node, workspace_id: 'short-ws', tree_id: 'short-tree', kind: 'chat', title: 'Short', runtime_id: 'claude', status: 'idle', created_at: 1 }],
+    edges: [], contexts: [],
+    messages: [
+      { id: 'ask', node_id: node, role: 'user', seq: 1, content: 'Read both.' },
+      {
+        id: 'answer', node_id: node, role: 'assistant', seq: 2, content: 'Both read.',
+        tool_calls: JSON.stringify(tools),
+        blocks: JSON.stringify([
+          ...tools.map((t) => ({ id: `b-${t.id}`, kind: 'tool', toolCallId: t.id, section: 'answer', rawOffset: 0 })),
+          { id: 'a1', kind: 'answer', rawText: 'Both read.' },
+        ]),
+      },
+    ],
+  }] });
+  // Motion on: a closed payload leaves as a sliding ghost only when it animates.
+  await page.addInitScript(() => localStorage.setItem('michi:v1:prefs', JSON.stringify({
+    onboardingCompletedAt: 1, reduceMotion: false,
+  })));
+  await page.goto('/');
+  await page.locator(`.terminal-sidebar [data-sidebar-row="${node}"]`).click();
+  const message = page.locator('[data-msg-id="answer"]');
+  await message.locator('.agent-line-group button[data-toolgroup-header]').click();
+  const area = message.locator('.agent-line-steps-scroll');
+  const step = area.locator('button.agent-line--step').last();
+  await step.click();
+  await expect(area.locator('.agent-line-body:not([hidden])')).toHaveCount(1);
+  await step.click();
+  await expect(area.locator('.agent-line-body:not([hidden])')).toHaveCount(0);
+  await expect(area).not.toHaveAttribute('data-more');
 });

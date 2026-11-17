@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import {
+  companionRaiseUntil,
   isOpenCompanionItem,
-  type CompanionCatchUpDto,
   type CompanionChangedEvent,
   type CompanionItemAction,
   type CompanionItemDto,
@@ -51,8 +51,6 @@ export interface CompanionStoreState {
    * entrance.
    */
   arrivals: Readonly<Record<string, number>>;
-  /** The latest "Since you left" the panel was given (POST /companion/view). */
-  catchUp: CompanionCatchUpDto | null;
 }
 
 const REFRESH_DEBOUNCE_MS = 150;
@@ -64,7 +62,7 @@ const SEEN_BATCH = 100;
 const SEEN_RETRY_MIN_MS = 5_000;
 const SEEN_RETRY_MAX_MS = 60_000;
 
-const INITIAL: CompanionStoreState = { availability: 'unknown', snapshot: null, stale: false, arrivals: {}, catchUp: null };
+const INITIAL: CompanionStoreState = { availability: 'unknown', snapshot: null, stale: false, arrivals: {} };
 
 let state: CompanionStoreState = INITIAL;
 /** The last snapshot the backend confirmed, with the answers of actions merged in. */
@@ -142,36 +140,6 @@ function noteArrivals(snapshot: CompanionSnapshot): void {
 }
 
 /**
- * Per machine (small UI state, localStorage): a brief has reached this
- * machine before, so Today announces the next one as "Next brief", not as
- * the first.
- */
-const BRIEF_SEEN_KEY = 'michi:companion:brief-seen';
-let briefSeen: boolean | null = null;
-
-function noteBriefSeen(): void {
-  if (briefSeen === true) return;
-  briefSeen = true;
-  try {
-    window.localStorage.setItem(BRIEF_SEEN_KEY, '1');
-  } catch {
-    // Storage unavailable: a later window may word the next brief as the first.
-  }
-}
-
-/** Some window on this machine has had a brief from the Companion. */
-export function companionBriefSeenBefore(): boolean {
-  if (briefSeen === null) {
-    try {
-      briefSeen = window.localStorage.getItem(BRIEF_SEEN_KEY) === '1';
-    } catch {
-      briefSeen = true;
-    }
-  }
-  return briefSeen;
-}
-
-/**
  * Where the agent's one conversation V lives (`GET /api/assistant`):
  * `unsupported` (a 404 or an answer of another shape) is final, the button
  * and the panel's Chat then never show. The Companion snapshot is not needed:
@@ -205,7 +173,6 @@ function adopt(snapshot: CompanionSnapshot, readAtAssistantEpoch = assistantEpoc
     && readAtAssistantEpoch === assistantEpoch) {
     setAssistant({ status: 'ready', info: viaSnapshot, error: null });
   }
-  if (snapshot.brief) noteBriefSeen();
   noteArrivals(snapshot);
   confirmed = snapshot;
   publish({ availability: 'available', stale: false });
@@ -316,10 +283,14 @@ function applyAction(item: CompanionItemDto, action: CompanionItemAction, now: n
   switch (action.action) {
     case 'seen': return item.status === 'new' ? { ...item, status: 'seen' } : item;
     case 'snooze': return { ...item, status: 'snoozed', snoozedUntil: action.until, updatedAt: now };
-    case 'dismiss': return { ...item, status: 'dismissed', updatedAt: now };
-    case 'mute': return { ...item, status: 'muted', updatedAt: now };
+    // Put away, it no longer waits on the user: the agent's raise goes with it (repository.ts).
+    case 'dismiss': return { ...item, status: 'dismissed', raised: null, updatedAt: now };
+    case 'mute': return { ...item, status: 'muted', raised: null, updatedAt: now };
     case 'restore': return { ...item, status: 'seen', snoozedUntil: null, updatedAt: now };
     case 'feedback': return { ...item, feedback: action.feedback, feedbackReason: action.feedback === 'down' ? action.reason ?? null : null, updatedAt: now };
+    // raise and lower are a check-in's own: no window sends them, and the snapshot brings the result.
+    case 'raise': return { ...item, raised: { reason: action.reason, at: now, until: companionRaiseUntil(now) }, updatedAt: now };
+    case 'lower': return { ...item, raised: null, updatedAt: now };
   }
 }
 
@@ -433,8 +404,7 @@ export function markCompanionItemsSeen(ids: readonly string[], now = Date.now())
 
 /**
  * The panel came on screen or got focus (POST /companion/view): the backend
- * notes the view and clears the unread count, and answers "Since you left"
- * when the user was away long enough. At most once per 30s.
+ * notes the view and clears the unread count. At most once per 30s.
  */
 export function noteCompanionViewed(now = Date.now()): void {
   if (state.availability !== 'available' || now - lastViewAt < VIEW_THROTTLE_MS) return;
@@ -443,9 +413,7 @@ export function noteCompanionViewed(now = Date.now()): void {
     confirmed = { ...confirmed, counts: { ...confirmed.counts, unreadMessages: 0 } };
     publish();
   }
-  postCompanionView().then((catchUp) => {
-    if (catchUp) set({ catchUp });
-  }, () => {});
+  postCompanionView().catch(() => {});
 }
 
 /**
@@ -607,7 +575,6 @@ export function resetCompanionStoreForTests(patch: Partial<CompanionStoreState> 
   arrivals = {};
   nodeIds.clear();
   lastViewAt = 0;
-  briefSeen = null;
   assistantInflight = null;
   assistantEpoch = 0;
   assistant = patch.assistant ?? { status: 'idle', info: null, error: null };

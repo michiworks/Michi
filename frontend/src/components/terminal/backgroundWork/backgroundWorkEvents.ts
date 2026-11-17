@@ -23,6 +23,8 @@ export interface OpenBackgroundWorkDetail {
   nodeId: string;
   /** Item to expand and scroll into view. */
   focus?: BackgroundWorkFocus;
+  /** Subagents to list whatever turn they ran in: the transcript's roster line lists its agents. */
+  subagentIds?: readonly string[];
 }
 
 export function openBackgroundWork(detail: OpenBackgroundWorkDetail): void {
@@ -63,10 +65,15 @@ function readFocus(value: unknown): BackgroundWorkFocus | undefined {
 export function readOpenBackgroundWorkDetail(event: Event): OpenBackgroundWorkDetail | null {
   const detail = (event as CustomEvent<unknown>).detail;
   if (!detail || typeof detail !== 'object') return null;
-  const { nodeId, focus } = detail as Record<string, unknown>;
+  const { nodeId, focus, subagentIds } = detail as Record<string, unknown>;
   if (typeof nodeId !== 'string' || !nodeId) return null;
   const parsed = readFocus(focus);
-  return parsed ? { nodeId, focus: parsed } : { nodeId };
+  const ids = Array.isArray(subagentIds) ? subagentIds.filter((id): id is string => typeof id === 'string' && !!id) : [];
+  return {
+    nodeId,
+    ...(parsed ? { focus: parsed } : {}),
+    ...(ids.length > 0 ? { subagentIds: ids } : {}),
+  };
 }
 
 /** Subscribe to open requests; returns the unsubscribe function. */

@@ -52,6 +52,35 @@ describe('subscribeWorkflowRuns', () => {
     expect(onDisconnect).toHaveBeenCalledWith(undefined);
   });
 
+  it('asks for patches, merges each into the run the feed sent, and reads the run whole when one does not fit it', async () => {
+    const node = { id: 'a', kind: 'agent' as const, title: 'alpha', status: 'running' as const, prompt: 'Map the auth flow.', currentTool: 'Read a.ts' };
+    const patch = (value: unknown) => ({ event: 'workflow_run_patch', data: { version: 1, event: 'workflow_run_patch', run: null, patch: value, emittedAt: 2 } });
+    const stream = vi.spyOn(streamTransport, 'fetchStream').mockResolvedValueOnce(sseResponse([
+      { event: 'workflow_run', data: { version: 1, event: 'workflow_run', run: run({ nodes: [node] }), emittedAt: 1 } },
+      patch({ id: 'wfr_1', baseRevision: 1, revision: 2, set: { updatedAt: 2 }, nodes: [{ id: 'a', set: { currentTool: 'Edit a.ts' } }] }),
+      // Against a revision this feed did not send: read whole.
+      patch({ id: 'wfr_1', baseRevision: 7, revision: 8, set: { status: 'failed' } }),
+    ]));
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ run: run({ revision: 8, status: 'completed', actions: [], nodes: [{ ...node, status: 'completed', currentTool: undefined }] }) })));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const onRun = vi.fn();
+      subscribeWorkflowRuns('ws', { onRun });
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(3));
+      expect(String(stream.mock.calls[0][0])).toContain('patches=1');
+      const runs = onRun.mock.calls.map(([value]) => value as WorkflowRunDtoV1);
+      expect(runs.map((value) => [value.revision, value.status, value.nodes[0].currentTool, value.nodes[0].prompt])).toEqual([
+        [1, 'running', 'Read a.ts', 'Map the auth flow.'],
+        [2, 'running', 'Edit a.ts', 'Map the auth flow.'],
+        [8, 'completed', undefined, 'Map the auth flow.'],
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(String((fetch.mock.calls[0] as unknown[])[0])).toMatch(/\/workflow-runs\/wfr_1$/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('hands ended background subagents to their callback, validated', async () => {
     const ended = (backgroundSubagentsEnded: unknown) => ({
       event: 'background_subagents_ended',

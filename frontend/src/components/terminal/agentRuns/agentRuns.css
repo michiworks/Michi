@@ -1,0 +1,36 @@
+/* Agent-run controls are Button, .t-text-btn and .t-icon-btn; these two need more. */
+
+/* The run's name is the pane's title, a text button that opens its metadata. */
+.t-text-btn.agent-run-name {
+  color: var(--term-fg);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  text-decoration: underline dotted var(--term-line-s);
+  text-underline-offset: 3px;
+}
+.t-text-btn.agent-run-name[aria-expanded='true'] {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+
+/* The Activity view's fold of agent runs: a header row, muted while nothing in it is recent. */
+.agent-runs-fold {
+  color: var(--term-fg);
+  cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
+}
+.agent-runs-fold[data-empty] {
+  color: var(--term-muted);
+}
+@media (hover: hover) {
+  .agent-runs-fold:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.agent-runs-fold:active {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+.agent-runs-fold:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}

@@ -1,11 +1,11 @@
 import React from 'react';
 import { useIsPresent } from 'motion/react';
-import { ChevronRight, MessageSquare, X } from 'lucide-react';
 import { measureSurface, PopoverSurface } from '../../ui/Popover';
 import { Button } from '../../ui/controls';
 import { placeBelowAnchor, useAnchoredPosition } from '../../ui/useAnchoredPosition';
 import { useBackLayer } from '../../../lib/backStack';
 import { formatMichiAgo } from '../content/michiFormat';
+import { ChatIcon, ChevronRightIcon, CloseIcon } from '../icons';
 import { fetchSourcePreview, type SourcePreview } from '../../../state/sourceNav/sourceApi';
 import type { SourcePopoverState } from '../../../state/sourceNav/sourceNav';
 import './source.css';
@@ -88,6 +88,8 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
     const onPointer = (event: PointerEvent) => {
       const node = event.target as Node | null;
       if (node && (surfaceRef.current?.contains(node) || anchor?.contains(node))) return;
+      // Focus inside goes back to the link; the fading popover takes none (ST-10).
+      if (surfaceRef.current?.contains(document.activeElement)) anchor?.focus({ preventScroll: true });
       onCloseRef.current();
     };
     document.addEventListener('keydown', onKey, true);
@@ -122,14 +124,14 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
     >
       <div ref={focusRef} tabIndex={-1} className="source-pop__focus" />
       <header className="source-pop__head">
-        <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
+        <ChatIcon aria-hidden="true" />
         <span className="source-pop__kind">Source</span>
         <strong className="source-pop__title" title={title}>{title}</strong>
         {runtime && <span className="source-pop__tag">{runtime}</span>}
         {meta && <span className="source-pop__meta">{meta}</span>}
         <span className="source-pop__spacer" />
         <button type="button" className="t-icon-btn source-pop__close" aria-label="Close" onClick={() => { anchor?.focus({ preventScroll: true }); onClose(); }}>
-          <X size={13} strokeWidth={1.7} aria-hidden="true" />
+          <CloseIcon aria-hidden="true" />
         </button>
       </header>
       {loaded.status === 'loading' && <blockquote className="source-pop__quote source-pop__quote--loading" aria-busy="true">Loading the message…</blockquote>}
@@ -138,7 +140,7 @@ export function SourcePopover({ popover, onClose, onGo }: SourcePopoverProps) {
       {loaded.status === 'error' && <p className="source-pop__note" role="status">The message could not be loaded.</p>}
       <div className="source-pop__actions">
         <Button variant="primary" size="sm" disabled={closed || loaded.status === 'loading'} onClick={() => onGo(true, preview)}>
-          Continue this chat <ChevronRight size={12} strokeWidth={1.8} aria-hidden="true" />
+          Continue this chat <ChevronRightIcon size="sm" aria-hidden="true" />
         </Button>
         <Button size="sm" disabled={closed || loaded.status === 'loading'} onClick={() => onGo(false, preview)}>Open full chat</Button>
       </div>

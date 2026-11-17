@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { isWorkflowContainerNode, isWorkflowRunTerminal, workflowProgress, type WorkflowAction, type WorkflowNodeDto, type WorkflowRunDtoV1, type WorkflowRuntime } from 'michi-shared';
 import MarkdownContent from '../../MarkdownContent';
 import { modelDisplayLabel } from '../../../lib/modelLabel';
@@ -8,19 +8,24 @@ import { WorkflowActions } from './WorkflowRunCard';
 import { useNow } from '../../../hooks/useNow';
 import { formatClockTime, formatMessageTime } from '../../../lib/messageTime';
 import { WorkflowApprovals } from './WorkflowApprovals';
+import { CloseIcon, WorkflowIcon } from '../icons';
+import { DisclosureChevron } from '../primitives';
+import { StateGlyph } from '../backgroundWork/workCardParts';
 import type { WorkflowPendingKind } from '../../../state/workflowDomain';
 import {
-  NODE_STATUS_COLOR,
   NODE_STATUS_LABEL,
+  NODE_STATUS_TEXT_COLOR,
   RUNTIME_LABEL,
   RUN_NOUN,
   WORKFLOW_STATUS_COLOR,
   WORKFLOW_STATUS_LABEL,
+  WORKFLOW_STATUS_TEXT_COLOR,
   formatWorkflowTokens,
   nodeDurationMs,
   workflowElapsedLabel,
   workflowNodeRows,
 } from './workflowPresentation';
+import './WorkflowRunCard.css';
 
 /**
  * A workflow run as a pane: the AgentRunPane header (name, status · elapsed,
@@ -55,14 +60,17 @@ function Section({ label, aside, children }: { label: string; aside?: React.Reac
 
 function NodeGlyph({ node }: { node: WorkflowNodeDto }) {
   if (node.status === 'failed') {
-    return <span aria-hidden style={{ width: 8, flexShrink: 0, color: 'var(--term-danger)', fontSize: 'var(--fs-xs)', lineHeight: 1 }}>×</span>;
+    return <CloseIcon size={8} style={{ flexShrink: 0, color: 'var(--term-danger)' }} />;
   }
   if (node.status === 'queued' || node.status === 'skipped') {
     return <span aria-hidden style={{ width: 8, flexShrink: 0, color: 'var(--term-faint)', fontSize: 'var(--fs-xs)', lineHeight: 1 }}>○</span>;
   }
+  // A finished node takes Background work's green ✓ (ST-19); the column keeps its width.
   return (
     <span aria-hidden style={{ width: 8, flexShrink: 0, display: 'inline-flex', alignSelf: 'center' }}>
-      <span className={node.status === 'running' ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} />
+      {node.status === 'completed'
+        ? <StateGlyph state="completed" />
+        : <span className={node.status === 'running' ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} />}
     </span>
   );
 }
@@ -106,7 +114,7 @@ function NodeRow({ node, runtime, depth, now }: { node: WorkflowNodeDto; runtime
           </span>
         )}
         <span style={{ marginLeft: 'auto', paddingLeft: 8, display: 'inline-flex', alignItems: 'baseline', gap: 6, flexShrink: 0, fontSize: 'var(--fs-xs)' }}>
-          <span style={{ color: NODE_STATUS_COLOR[node.status] }}>{NODE_STATUS_LABEL[node.status]}</span>
+          <span style={{ color: NODE_STATUS_TEXT_COLOR[node.status] }}>{NODE_STATUS_LABEL[node.status]}</span>
           {duration !== undefined && node.status !== 'running' && <span style={{ fontFamily: MONO, color: 'var(--term-muted)' }}>{formatDurationMs(duration)}</span>}
         </span>
       </div>
@@ -128,10 +136,11 @@ function NodeRow({ node, runtime, depth, now }: { node: WorkflowNodeDto; runtime
               aria-controls={open ? detailId : undefined}
               aria-label={`${open ? 'Hide' : 'Show'} ${node.title} details`}
               onClick={() => setOpen((value) => !value)}
-              className="t-hover-fg"
-              style={{ border: 0, padding: 0, background: 'transparent', font: 'inherit', fontFamily: MONO, fontSize: 'var(--fs-xs)', cursor: 'pointer', color: node.error ? 'var(--term-danger)' : 'var(--term-muted)', display: 'inline-flex', gap: 6 }}
+              className="t-hover-fg workflow-pane-toggle"
+              data-error={node.error ? '' : undefined}
+              style={{ display: 'inline-flex', gap: 6 }}
             >
-              <span aria-hidden style={{ fontSize: 'var(--fs-2xs)', color: 'var(--term-faint)' }}>{open ? '▾' : '▸'}</span>
+              <DisclosureChevron open={open} style={{ fontSize: 'var(--fs-2xs)', color: 'var(--term-faint)' }} />
               {[node.prompt ? 'task' : undefined, node.error ? 'error' : node.result ? 'result' : undefined].filter(Boolean).join(' · ')}
             </button>
           </div>
@@ -187,14 +196,15 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
   const [definitionOpen, setDefinitionOpen] = useState(false);
   const rows = workflowNodeRows(run.nodes);
   const progress = workflowProgress(run);
-  const color = WORKFLOW_STATUS_COLOR[run.status];
+  const color = WORKFLOW_STATUS_TEXT_COLOR[run.status];
+  const mark = WORKFLOW_STATUS_COLOR[run.status];
   const tokens = formatWorkflowTokens(run.usage?.totalTokens);
   return (
     <div data-testid="workflow-run-detail" className={className} style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0, ...style }}>
       {controls && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: MONO, fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase', color, fontWeight: 600, flexShrink: 0 }}>
-            <span aria-hidden style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: color }} />
+            <span aria-hidden style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: mark }} />
             {WORKFLOW_STATUS_LABEL[run.status]} · {workflowElapsedLabel(run, now)}
           </span>
           <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{RUNTIME_LABEL[run.runtime]}</span>
@@ -205,7 +215,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
       )}
       {run.description && <div style={{ fontSize: 'var(--fs-md)', color: 'var(--term-mid)', lineHeight: 1.5 }}>{run.description}</div>}
       {(run.statusDetail && run.status !== 'running') || error ? (
-        <div role={error ? 'alert' : undefined} style={{ fontSize: 'var(--fs-sm)', color: error || run.status === 'failed' ? 'var(--term-danger-text)' : run.status === 'paused' ? 'var(--term-select)' : 'var(--term-muted)' }}>
+        <div role={error ? 'alert' : undefined} style={{ fontSize: 'var(--fs-sm)', color: error || run.status === 'failed' ? 'var(--term-danger-text)' : run.status === 'paused' ? 'var(--term-waiting-text)' : 'var(--term-muted)' }}>
           {error ?? run.statusDetail}
         </div>
       ) : null}
@@ -218,8 +228,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
 
       {run.definition && (
         <Section label={run.runtime === 'claude' ? 'script' : 'inputs'} aside={(
-          <button type="button" aria-expanded={definitionOpen} onClick={() => setDefinitionOpen((value) => !value)} className="t-hover-fg"
-            style={{ border: 0, padding: 0, background: 'transparent', fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', cursor: 'pointer' }}>
+          <button type="button" aria-expanded={definitionOpen} onClick={() => setDefinitionOpen((value) => !value)} className="t-hover-fg workflow-pane-toggle">
             {definitionOpen ? 'hide' : 'show'}
           </button>
         )}>
@@ -254,7 +263,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
                   {formatClockTime(entry.at)}
                 </span>
                 {entry.nodeId && <span style={{ fontFamily: MONO, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{entry.nodeId}</span>}
-                <span style={{ color: entry.severity === 'error' ? 'var(--term-danger-text)' : entry.severity === 'warning' ? 'var(--term-select)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
+                <span style={{ color: entry.severity === 'error' ? 'var(--term-danger-text)' : entry.severity === 'warning' ? 'var(--term-waiting-text)' : 'var(--term-mid)', overflowWrap: 'anywhere' }}>{entry.text}</span>
               </li>
             ))}
           </ol>
@@ -278,7 +287,7 @@ export function WorkflowRunDetail({ run, now, pending, error, onAction, onAnswer
         <span aria-hidden>·</span>
         <span>started {formatMessageTime(run.startedAt, new Date(now))}</span>
         {onOpenParent && run.nodeId && (
-          <button type="button" onClick={onOpenParent} style={{ marginLeft: 'auto', border: 0, padding: 0, background: 'transparent', color: 'var(--term-accent)', font: 'inherit', cursor: 'pointer' }}>
+          <button type="button" onClick={onOpenParent} style={{ marginLeft: 'auto', border: 0, padding: 0, background: 'transparent', color: 'var(--term-accent-text)', font: 'inherit', cursor: 'pointer' }}>
             ↰ Open chat
           </button>
         )}
@@ -298,23 +307,25 @@ export function WorkflowRunPane({ run, pending, error, onClose, onAction, onAnsw
 }) {
   const live = !isWorkflowRunTerminal(run.status);
   const now = useNow(1_000, live);
-  const color = WORKFLOW_STATUS_COLOR[run.status];
+  const color = WORKFLOW_STATUS_TEXT_COLOR[run.status];
+  const mark = WORKFLOW_STATUS_COLOR[run.status];
+  const closeRef = useRef<HTMLButtonElement>(null);
   return (
     <section data-testid="workflow-run-pane" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, height: '100%', background: 'var(--term-bg)', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)' }}>
       <header style={{ height: 36, display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', padding: '0 12px', background: 'var(--term-surface)', flexShrink: 0, minWidth: 0 }}>
-        <span aria-hidden style={{ color: 'var(--term-mauve)', fontSize: 'var(--fs-sm)' }}>⧉</span>
+        <WorkflowIcon size="sm" style={{ color: 'var(--term-mauve)', flexShrink: 0 }} />
         <span style={{ color: 'var(--term-fg)', fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{run.name}</span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontFamily: MONO, fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase', color, fontWeight: 600, flexShrink: 0 }}>
-          <span aria-hidden style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: color }} />
+          <span aria-hidden style={{ width: 5, height: 5, borderRadius: 'var(--ui-radius-pill)', background: mark }} />
           {WORKFLOW_STATUS_LABEL[run.status]} · {workflowElapsedLabel(run, now)}
         </span>
         <span style={{ flex: 1 }} />
         <span style={{ fontFamily: MONO, fontSize: 'var(--fs-sm)', color: 'var(--term-muted)', flexShrink: 0 }}>{RUNTIME_LABEL[run.runtime]}</span>
         <span style={{ display: 'inline-flex', gap: 12, fontSize: 'var(--fs-md)' }}>
-          <WorkflowActions run={run} pending={pending} onAction={onAction} />
+          <WorkflowActions run={run} pending={pending} onAction={onAction} focusFallback={() => closeRef.current} />
         </span>
-        <button type="button" aria-label="Close workflow pane" onClick={onClose}
-          style={{ border: 0, background: 'transparent', color: 'var(--term-muted)', cursor: 'pointer', fontSize: 'var(--fs-xl)' }}>×</button>
+        <button ref={closeRef} type="button" aria-label="Close workflow pane" onClick={onClose}
+          style={{ border: 0, background: 'transparent', color: 'var(--term-muted)', cursor: 'pointer', display: 'inline-flex' }}><CloseIcon /></button>
       </header>
 
       <WorkflowRunDetail

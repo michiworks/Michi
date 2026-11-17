@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { toast } from 'sonner';
-import { Check, Minus } from 'lucide-react';
 import type { CompanionGetStartedDto, CompanionSettings } from 'michi-shared';
 import { Button } from '../../ui/controls';
+import { CheckIcon, MinusIcon } from '../icons';
 import { LOCAL_BACKEND_CONNECTION_ID } from '../../../config/backendIdentity';
 import {
   CompanionApiError,
@@ -18,17 +18,6 @@ import { OPEN_SETTINGS_SECTION_EVENT } from '../scheduled/metaAgent/metaAgentNav
 
 /** What Watch covers: local Michi conversations, in the card's order (D17). */
 const WATCHED = [{ kind: 'michi', label: 'Michi conversations' }] as const;
-
-const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-/** "Weekdays", "Every day", "Weekends" or the days themselves. */
-export function workdaysLabel(days: readonly number[]): string {
-  const key = [...days].sort((a, b) => a - b).join(',');
-  if (key === '1,2,3,4,5') return 'Weekdays';
-  if (key === '0,1,2,3,4,5,6') return 'Every day';
-  if (key === '0,6') return 'Weekends';
-  return [...days].sort((a, b) => a - b).map((day) => WEEKDAY[day]).join(', ');
-}
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -70,8 +59,8 @@ function HomesProgress() {
 
 function Mark({ on }: { on: boolean }) {
   return on
-    ? <Check size={13} className="companion-get-started__mark" data-on="" aria-label="On" />
-    : <Minus size={13} className="companion-get-started__mark" aria-label="Off" />;
+    ? <CheckIcon className="companion-get-started__mark" data-on="" aria-label="On" />
+    : <MinusIcon className="companion-get-started__mark" aria-label="Off" />;
 }
 
 /**
@@ -116,8 +105,8 @@ export function CompanionGetStarted({ getStarted, settings, name }: {
 
   const intro = (
     <p className="companion-get-started__intro">
-      I’m {name}. I keep a home page for each workspace from its conversations, list what needs you in Today, and write you a
-      morning brief.{started ? '' : ' Choose what I may do; nothing starts until you press Start.'}
+      I’m {name}. I keep a home page for each workspace from its conversations, list what needs you in Today, and speak up when
+      something needs you.{started ? '' : ' Choose what I may do; nothing starts until you press Start.'}
     </p>
   );
 
@@ -133,7 +122,6 @@ export function CompanionGetStarted({ getStarted, settings, name }: {
     );
   }
 
-  const brief = settings.brief.enabled ? `${workdaysLabel(settings.workdays)} ${settings.brief.time}` : 'Off';
   const homesShown = started ? getStarted.homesOn : homes;
   const watchLabel = (started && watchedNow.length > 0 && !allWatched ? watchedNow : WATCHED).map((source) => source.label).join(' · ');
   return (
@@ -166,7 +154,6 @@ export function CompanionGetStarted({ getStarted, settings, name }: {
               </label>
             )}
           </li>
-          <li className="companion-get-started__fact">Morning brief: {brief}</li>
           <li className="companion-get-started__fact">
             Learn from conversations: {memory === null ? '…' : memory.learning ? 'On' : 'Off'} ·{' '}
             <button type="button" className="companion-link-btn" onClick={openMemorySettings}>Settings › Memory</button>

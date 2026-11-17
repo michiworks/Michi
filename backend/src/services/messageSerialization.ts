@@ -1,4 +1,4 @@
-import { extractKiroSteering, finalizeTurnContent, stripTurnMetadataSentinels } from 'michi-shared';
+import { contentWithBlocksFallback, extractKiroSteering, finalizeTurnContent, stripTurnMetadataSentinels } from 'michi-shared';
 
 export function stripSentinelsStreamingSafe(raw: string): string {
     return stripTurnMetadataSentinels(extractKiroSteering(raw).text);
@@ -31,6 +31,8 @@ export function deriveAssistantContentFromBlocks(blocks: unknown): string | null
         }
     }
     if (!Array.isArray(value)) return null;
+    const blockList = value.filter((b): b is { kind: string; fallbackText?: unknown } =>
+        !!b && typeof b === "object" && typeof (b as { kind?: unknown }).kind === "string");
     const raw = value
         .map((b) => {
             if (!b || typeof b !== "object") return "";
@@ -39,7 +41,7 @@ export function deriveAssistantContentFromBlocks(blocks: unknown): string | null
         })
         .join("");
     // The content a finished turn stores, so a restored row reads and searches like the original.
-    return finalizeTurnContent(raw);
+    return contentWithBlocksFallback(finalizeTurnContent(raw), blockList);
 }
 
 export function contentFromIncomingMessage(message: Record<string, unknown>): string {

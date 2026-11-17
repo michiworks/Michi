@@ -262,6 +262,10 @@ describe('createDefaultHost', () => {
     assert.deepEqual(bindings.forkAnchors.readKiroForkAnchor('n1', 's1', 'v3', 'a1'), { messageId: 'k1' });
     bindings.forkAnchors.saveClaudeForkAnchor({ nodeId: 'n1', nativeSessionId: 's1', assistantMessageId: 'a1', nativeMessageId: 'na1' });
     assert.equal(bindings.forkAnchors.readClaudeForkAnchor({ nodeId: 'n1', nativeSessionId: 's1', messageId: 'a1' }), 'na1');
+    bindings.forkAnchors.saveClaudeForkBoundary({ nodeId: 'n1', nativeSessionId: 'child', boundaryAt: 'T1' });
+    assert.equal(bindings.forkAnchors.readClaudeForkBoundary('n1', 'child'), 'T1', 'read before the chat binds to it');
+    bindings.forkAnchors.saveClaudeForkBoundary({ nodeId: 'gone', nativeSessionId: 'child', boundaryAt: 'T1' });
+    assert.equal(bindings.forkAnchors.readClaudeForkBoundary('gone', 'child'), null);
   });
 
   it('crew memory defaults to persistent and pins onto the node', () => {

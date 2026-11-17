@@ -19,7 +19,6 @@ function show(message: Partial<ChatMessage>, onMentionClick = vi.fn()) {
       onEdit={noop}
       copyText={() => ''}
       showThoughts={false}
-      fontFamily="inherit"
       density="comfortable"
       onMentionClick={onMentionClick}
     />,

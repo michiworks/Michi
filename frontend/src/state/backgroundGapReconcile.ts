@@ -266,6 +266,7 @@ function mergeGapNode(
     pendingComments: local?.pendingComments,
     pendingQueued: local?.pendingQueued,
     queueErrored: local?.queueErrored,
+    queueStopped: local?.queueStopped,
     viewedAt: local?.viewedAt ?? server.viewedAt,
     lastAssistantAt: Math.max(local?.lastAssistantAt ?? 0, server.lastAssistantAt ?? 0) || undefined,
     // A seen mark may not have reached the server yet; both counts only grow.
@@ -331,7 +332,7 @@ export function nodePageInstallable(page: TreeMessagePage, nodeId: string, messa
 // replay barrier reading the backend again.
 const INSTALL_TIME_LOCAL_FIELDS = new Set<keyof ChatNodeState>([
   'viewedAt', 'seenCompletionSeq', 'composerDraft', 'pendingComments', 'pendingQueued',
-  'queueErrored', 'agentCommands', 'commandResult',
+  'queueErrored', 'queueStopped', 'agentCommands', 'commandResult',
   // Typing settles a deferred draft (chatReducers set-composer-draft).
   'deferredNodeFields',
 ]);

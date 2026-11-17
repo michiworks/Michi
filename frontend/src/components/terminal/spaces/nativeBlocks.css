@@ -2,13 +2,8 @@
    read: figures without cards, titles at the home's section size, a timeline
    of rings on one rail. Michi's own pages keep michiPage.css as it is. */
 
-[data-native-page] [data-tone='info'] { --tone: var(--term-accent); }
-[data-native-page] [data-tone='warn'] { --tone: var(--term-select); }
-[data-native-page] [data-tone='success'] { --tone: var(--term-digest); }
-[data-native-page] [data-tone='danger'] { --tone: var(--term-danger); }
-
-[data-native-page] :is([data-michi-block='next-steps'], [data-michi-block='timeline']) .michi-doc-block-title {
-  margin: 0 0 10px;
+/* A block's own title is the page's section title, at one size whatever the block; inside a container it stays small. */
+[data-native-page] :is(.michi-doc-block-title, .desk-block-title):not(.michi-doc-slot *) {
   font-size: var(--fs-2xl);
   font-weight: 600;
   line-height: 1.4;
@@ -18,23 +13,20 @@
 
 [data-native-page] .michi-doc-metrics { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 18px 28px; padding: 4px 0; }
 [data-native-page] .michi-doc-metric { gap: 0; padding: 0; border: 0; }
-[data-native-page] .michi-doc-metric > dt {
-  color: var(--term-muted);
-  font-size: var(--fs-md);
-  font-weight: 400;
-  line-height: 1.45;
-  letter-spacing: normal;
-  text-transform: none;
-}
-/* 26px is Michi's page title size (.michi-doc-title); the type scale has no step there. */
+/* Michi's page title size (.michi-doc-title). */
 [data-native-page] .michi-doc-metric__value {
   font-family: var(--ui-font);
-  font-size: 26px;
-  font-weight: 650;
+  font-size: var(--fs-5xl);
+  font-weight: 600;
   line-height: 1.3;
   letter-spacing: var(--ls-tight);
 }
-[data-native-page] .michi-doc-metric__hint { font-size: var(--fs-md); line-height: 1.45; }
+
+/* Labelled facts and what was forgotten are read like the text around them, not like chrome. */
+[data-native-page] .michi-doc-kv { gap: 8px 20px; font-size: var(--fs-lg); line-height: 1.5; }
+[data-native-page] .michi-doc-forgot__item { --forgot-line: calc(var(--message-body-size-base) * 1.45); }
+[data-native-page] .michi-doc-forgot__title { font-size: var(--message-body-size-base); }
+[data-native-page] .michi-doc-forgot__detail { color: var(--term-mid); font-size: calc(var(--message-body-size-base) - 1px); }
 
 [data-native-page] [data-michi-block='timeline'] .michi-doc-dated { position: relative; gap: 14px; padding-left: 26px; }
 [data-native-page] [data-michi-block='timeline'] .michi-doc-dated::before {
@@ -65,7 +57,7 @@
   background: var(--term-bg);
 }
 [data-native-page] [data-michi-block='timeline'] .michi-doc-dated__title { order: 1; min-width: 0; color: var(--term-fg); font-weight: 600; overflow-wrap: anywhere; }
-[data-native-page] [data-michi-block='timeline'] .michi-doc-dated__when { order: 2; font-size: var(--fs-sm); }
+[data-native-page] [data-michi-block='timeline'] .michi-doc-dated__when { order: 2; }
 [data-native-page] [data-michi-block='timeline'] .michi-doc-dated__text {
   order: 3;
   flex-basis: 100%;
@@ -77,17 +69,23 @@
 .native-page-decision-note {
   margin: 6px 0 0;
   color: var(--term-danger-text);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
+}
+/* Plain information about a block (a refused edit, where kept words went) sits on it, muted. */
+.native-page-note {
+  margin: 6px 0 0;
+  color: var(--term-muted);
+  font-size: var(--fs-md);
 }
 
 /* The pointer marker spans the destination block, including across Home segments. */
 .native-page-drop {
   position: fixed;
   height: 2px;
-  border-radius: 2px;
+  border-radius: var(--ui-radius-sm);
   background: var(--term-accent);
   pointer-events: none;
-  z-index: 2000;
+  z-index: var(--z-drag);
 }
 [data-native-page] .michi-doc-block__handle { touch-action: none; }
 [data-native-page][data-dragging] { user-select: none; }
@@ -109,4 +107,4 @@
 }
 [data-native-page] .michi-doc-toolbar--icons .michi-doc-toolbar__btn svg { width: 14px; height: 14px; }
 [data-native-page] .michi-doc-toolbar--icons .michi-doc-toolbar__btn[aria-pressed='true'] { color: var(--term-accent); background: var(--term-accent-f); }
-[data-native-page] .michi-doc-toolbar--icons .michi-doc-toolbar__btn:disabled { opacity: 0.4; cursor: default; }
+[data-native-page] .michi-doc-toolbar--icons .michi-doc-toolbar__btn:disabled { opacity: 0.5; cursor: not-allowed; }

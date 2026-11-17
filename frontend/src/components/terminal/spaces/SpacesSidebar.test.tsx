@@ -16,6 +16,7 @@ const data = vi.hoisted(() => ({
   spaceReads: [] as string[],
   databaseReads: [] as string[],
   databases: {} as Record<string, unknown[]>,
+  databasesPending: false,
   treeStatus: 'ready',
   spaces: [
     { id: 'space-1', workspaceId: 'ws-a', parentId: null, position: 0, title: 'Release', pendingProposals: 1 },
@@ -41,7 +42,7 @@ vi.mock('../../../state/pages/pageEvents', () => ({ subscribePageChanges: () => 
 vi.mock('../../../state/pages/useSpacesHome', () => ({ useSpacesHomeWorkspaces: () => ({ data: data.homes, status: data.homesStatus, error: data.homesError, stale: !!data.homesError, refresh: data.refreshHomes }) }));
 vi.mock('../../../services/api/pages', () => ({ listWorkspaceDatabases: (workspaceId: string) => {
   data.databaseReads.push(workspaceId);
-  return Promise.resolve(data.databases[workspaceId] ?? []);
+  return data.databasesPending ? new Promise(() => {}) : Promise.resolve(data.databases[workspaceId] ?? []);
 } }));
 vi.mock('./home/homeCounts', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./home/homeCounts')>()),
@@ -119,8 +120,27 @@ describe('SpacesSidebar', () => {
     data.spaceReads = [];
     data.databaseReads = [];
     data.databases = { 'ws-a': [{ id: 'db-1', workspaceId: 'ws-a', title: 'Launch list', rowCount: 6, updatedAt: 1 }] };
+    data.databasesPending = false;
     data.treeStatus = 'ready';
     projects.list = LOCAL_PROJECTS;
+  });
+
+  it('says its lists are loading, or could not be read, rather than empty', () => {
+    data.spaces = null as unknown as typeof data.spaces;
+    data.homes = null;
+    data.homesStatus = 'loading';
+    data.databasesPending = true;
+    const { unmount } = render(<SpacesSidebar current={{ kind: 'home' }} onOpenHome={vi.fn()} onOpenWorkspace={vi.fn()} onOpenPage={vi.fn()} onNewSpace={vi.fn()} />);
+    expect(screen.getByText('Loading pages…')).toBeTruthy();
+    expect(screen.getByText('Loading databases…')).toBeTruthy();
+    expect(screen.queryByText('No pages yet.')).toBeNull();
+    expect(screen.queryByText('No databases yet.')).toBeNull();
+    unmount();
+    data.homesStatus = 'error';
+    renderSidebar();
+    expect(screen.getByRole('alert').textContent).toContain('Couldn’t read the pages.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(data.refreshHomes).toHaveBeenCalledOnce();
   });
 
   it('lists a remote connection\'s pages from that connection, but not its databases', async () => {

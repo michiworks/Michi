@@ -1,5 +1,6 @@
 import React from 'react';
-import { MoreHorizontal } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { MoreIcon } from '../../icons';
 import { MichiMenu, type MichiMenuItem } from '../../content/page/MichiMenu';
 import { LayoutRulesPopover } from './LayoutRulesPopover';
 import { useLayoutRules } from './useLayoutRules';
@@ -9,7 +10,7 @@ export interface LayoutRulesMenu {
   count: number;
   /** The "Layout rules N" entry for a page's ⋯ menu; it opens the list from `anchor`. */
   entry: (anchor: HTMLElement | null) => MichiMenuItem;
-  /** The open list, or null. */
+  /** The list while it is open or fading out. */
   popover: React.ReactNode;
 }
 
@@ -34,8 +35,9 @@ export function useLayoutRulesMenu({ pageId, backendConnectionId, readOnly = fal
       setAnchor(from);
     },
   }), [count, pageId, state]);
-  const popover = anchor && pageId ? (
+  const popover = <AnimatePresence>{anchor && pageId && (
     <LayoutRulesPopover
+      key="layout-rules"
       anchor={anchor}
       rules={state.rules}
       error={state.error}
@@ -48,7 +50,7 @@ export function useLayoutRulesMenu({ pageId, backendConnectionId, readOnly = fal
         if (restore) from.focus({ preventScroll: true });
       }}
     />
-  ) : null;
+  )}</AnimatePresence>;
   return { count, entry, popover };
 }
 
@@ -64,10 +66,11 @@ export function LayoutRulesMenuButton({ pageId, backendConnectionId, readOnly }:
     <>
       <button type="button" className="michi-doc-title__open" aria-label="Page actions" aria-haspopup="menu" aria-expanded={Boolean(menuAnchor)}
         disabled={!pageId} onClick={(event) => setMenuAnchor(menuAnchor ? null : event.currentTarget)}>
-        <MoreHorizontal size={16} strokeWidth={1.6} />
+        <MoreIcon size="lg" />
       </button>
-      {menuAnchor && (
+      <AnimatePresence>{menuAnchor && (
         <MichiMenu
+          key="page-actions"
           anchor={menuAnchor}
           label="Page actions"
           width={232}
@@ -75,7 +78,7 @@ export function LayoutRulesMenuButton({ pageId, backendConnectionId, readOnly }:
           entries={[menu.entry(menuAnchor)]}
           onClose={(restore) => { const anchor = menuAnchor; setMenuAnchor(null); if (restore) anchor.focus({ preventScroll: true }); }}
         />
-      )}
+      )}</AnimatePresence>
       {menu.popover}
     </>
   );

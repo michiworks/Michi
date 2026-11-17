@@ -67,7 +67,7 @@ function fromDesk<K extends Type>(type: K, Render: DeskRenderer<K>, Fallback: Bl
     return <MichiMantine><PageImagesContext.Provider value={ctx.loadImages === true}><div data-michi-block={type}>
       {type === 'gallery' && typeof block.title === 'string' && <h3 className="michi-doc-block-title">{block.title}</h3>}
       <Render block={desk as DeskBlockProps<K>['block']} ctx={ctx} hid={hid} />
-      {type === 'chart' && typeof block.unit === 'string' && <span className="michi-doc-caption">{block.unit}</span>}
+      {type === 'chart' && typeof block.unit === 'string' && <span className="michi-doc-label">{block.unit}</span>}
     </div></PageImagesContext.Provider></MichiMantine>;
   }
   DeskDrawn.displayName = `Desk(${type})`;

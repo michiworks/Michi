@@ -1,0 +1,49 @@
+/* The runtime choice: native radios in bordered rows, each row the radio's
+   label so all of it is the target. */
+.first-run-runtimes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.first-run-runtime {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  /* 12px 14px inside the 1px border. */
+  padding: 11px 13px;
+  border: 1px solid var(--term-line);
+  font-family: var(--ui-font);
+  cursor: pointer;
+  transition: border-color var(--t-soft) var(--t-ease),
+              background-color var(--t-soft) var(--t-ease);
+}
+.first-run-runtime > input {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--term-accent);
+  cursor: inherit;
+}
+.first-run-runtime:has(> input:checked) {
+  border-color: var(--term-accent);
+  background-color: color-mix(in srgb, var(--term-accent) 6%, var(--term-surface));
+}
+@media (hover: hover) {
+  .first-run-runtimes:not([aria-disabled='true']) > .first-run-runtime:not(:has(> input:checked, > input:disabled)):hover {
+    border-color: var(--term-line-s);
+  }
+}
+.first-run-runtimes:not([aria-disabled='true']) > .first-run-runtime:not(:has(> input:checked, > input:disabled)):active {
+  background-color: color-mix(in srgb, var(--term-alt) 70%, transparent);
+}
+/* Not available here: its note says why. */
+.first-run-runtime:has(> input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* While a choice saves, the rows keep focus but take no pick. */
+.first-run-runtimes[aria-disabled='true'] > .first-run-runtime {
+  opacity: 0.5;
+  cursor: progress;
+}

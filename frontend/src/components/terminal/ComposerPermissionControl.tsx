@@ -4,7 +4,7 @@ import type { ChatPermissionChoice, ChatPermissionMode } from 'michi-shared';
 import { useCrewIntegration } from './CrewIntegrationStatus';
 import { activeBackendApiBase } from '../../config/backendConnections';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
-import { ShieldIcon, ShieldOffIcon } from './icons';
+import { CheckIcon, ShieldIcon, ShieldOffIcon } from './icons';
 import { composerMenuBelowEdge, composerMenusOpenBelow, type PaneMenuAnchor } from './PaneComposerToolbarLeft';
 import { toast } from 'sonner';
 import { supportsChatYolo } from '../../lib/chatPermissionModes';
@@ -71,9 +71,12 @@ export function ComposerPermissionControl({ mode, runtimeIds, approveForMeRuntim
         space from the model name instead. Callers switch it to icon-only. */}
     <button type="button" className="t-toolbar-chip" data-icononly={compact || undefined} style={{ flexShrink: 0 }}
       aria-label={`Permissions: ${label}`} title={yoloRestartHint && supportsYolo ? `${baseTitle}. ${yoloRestartHint}` : baseTitle}
-      aria-haspopup="menu" aria-expanded={!!anchor} disabled={disabled || saving}
+      aria-haspopup="menu" aria-expanded={!!anchor} disabled={disabled}
+      // While a choice saves the chip only refuses clicks, so keyboard focus stays on it.
+      aria-disabled={saving || undefined} aria-busy={saving || undefined}
       onClick={(event) => {
         event.stopPropagation();
+        if (saving) return;
         const rect = event.currentTarget.getBoundingClientRect();
         setAnchor(anchor ? null : { x: rect.left, y: composerMenuBelowEdge(event.currentTarget), anchorBottom: rect.top - 6, trigger: event.currentTarget,
           preferBelow: composerMenusOpenBelow(event.currentTarget) });
@@ -94,7 +97,7 @@ export function ComposerPermissionControl({ mode, runtimeIds, approveForMeRuntim
             : choice.mode === 'approve' ? `${choice.description}${approveScopeNote}` : choice.description,
           yoloRestartHint && supportsYolo && crossesYolo(choice.mode) ? yoloRestartHint : undefined,
         ].filter(Boolean).join(' '),
-        glyph: choice.mode === displayedMode ? '✓' : undefined,
+        glyph: choice.mode === displayedMode ? <CheckIcon size="sm" /> : undefined,
         run: () => {
           setSaving(true);
           void Promise.resolve().then(() => onChange(choice.mode))

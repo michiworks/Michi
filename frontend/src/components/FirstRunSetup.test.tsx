@@ -44,8 +44,8 @@ describe('FirstRunSetup', () => {
     render(<FirstRunSetup />);
     expect(screen.queryByText(/recommended/i)).toBeNull();
     expect(screen.queryByText('Kiro')).toBeNull();
-    const choices = screen.getAllByRole('button', { pressed: false });
-    expect(choices.map(button => button.textContent?.split('Uses')[0].split('Bring')[0])).toEqual(['Claude', 'Codex', 'Pi']);
+    const choices = screen.getAllByRole('radio', { checked: false });
+    expect(choices.map(radio => (radio as HTMLInputElement).value)).toEqual(['claude', 'codex', 'pi']);
     expect((screen.getByRole('button', { name: 'Choose a runtime' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole('button', { name: 'Close' })).toBeNull();
     fireEvent.keyDown(window, { key: 'Escape' });
@@ -55,7 +55,7 @@ describe('FirstRunSetup', () => {
 
   it('waits for saved selection and refreshed status before completing without Kiro', async () => {
     const view = render(<FirstRunSetup />);
-    fireEvent.click(screen.getByRole('button', { name: /^Codex/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Codex/ }));
     await waitFor(() => expect(mocks.store.refreshAgentStatus).toHaveBeenCalledOnce());
     expect(mocks.save).toHaveBeenCalledWith({ runtime: 'codex' });
     expect((screen.getByRole('button', { name: 'Choose a runtime' }) as HTMLButtonElement).disabled).toBe(true);
@@ -69,12 +69,28 @@ describe('FirstRunSetup', () => {
     if (failure === 'response') mocks.save.mockResolvedValueOnce({ ok: false, error: 'Selection failed' });
     else mocks.save.mockRejectedValueOnce(new Error('Selection failed'));
     render(<FirstRunSetup />);
-    fireEvent.click(screen.getByRole('button', { name: /^Codex/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Codex/ }));
     expect((await screen.findByRole('alert')).textContent).toContain('Selection failed');
     expect(mocks.setPref).not.toHaveBeenCalled();
     expect(mocks.store.refreshAgentStatus).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /^Codex/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Codex/ }));
     await waitFor(() => expect(mocks.store.refreshAgentStatus).toHaveBeenCalledOnce());
+  });
+
+  it('keeps the choices focusable but busy while a choice saves', async () => {
+    let finish!: (result: { ok: true }) => void;
+    mocks.save.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    render(<FirstRunSetup />);
+    const codex = screen.getByRole('radio', { name: /^Codex/ });
+    fireEvent.click(codex);
+    const group = screen.getByRole('radiogroup', { name: 'Runtime' });
+    expect(group.getAttribute('aria-disabled')).toBe('true');
+    expect(group.getAttribute('aria-busy')).toBe('true');
+    expect((codex as HTMLInputElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect(mocks.save).toHaveBeenCalledOnce();
+    finish({ ok: true });
+    await waitFor(() => expect(group.getAttribute('aria-disabled')).toBeNull());
   });
 
   it('hands a chosen API runtime to key setup', () => {

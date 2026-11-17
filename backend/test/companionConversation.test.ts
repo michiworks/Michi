@@ -56,7 +56,6 @@ import { createMemory, deleteMemory, setMemorySettings, updateMemory, type Creat
 import { companionPostReceipt } from '../src/services/companion/prompts';
 import {
   applyItemAction,
-  briefForDate,
   cardDto,
   companionHeadline,
   currentRevision,
@@ -64,11 +63,9 @@ import {
   finishRun,
   getItem,
   getRun,
-  insertBrief,
   listCheckinRunsToClean,
   listUnreportedCards,
   recordRunChange,
-  setBriefCardFeedback,
   setCompanionRules,
   startRun,
   upsertItem,
@@ -218,7 +215,7 @@ function draft(itemKey: string, overrides: Partial<ItemDraft> = {}): ItemDraft {
 function material(overrides: Partial<CompanionMaterial> = {}): CompanionMaterial {
   return {
     now: T0, lastLookAt: T0 - HOUR, changes: [], open: [], goals: [], notes: '', notesRevision: 0, rules: '', reminders: [],
-    displayName: 'Michi', focus: [], cardResults: [], reports: [], catchUp: null, briefCurate: null, ...overrides,
+    displayName: 'Michi', focus: [], cardResults: [], reports: [], ...overrides,
   };
 }
 
@@ -565,22 +562,25 @@ describe('the agent\'s check-ins', () => {
       assert.equal(hub.posts.length, 2);
     });
 
-    test('once withdrawn it stays so: a brief refused mid-turn is never published, even when the note changes back before its reply', async () => {
+    test('once withdrawn it stays so: a raise made while the note was broken is undone, even when the note comes back before its reply', async () => {
       const v = ensureAssistant();
-      const req = request('brief');
-      let refused = '';
-      hub.respond = (args) => hub.answer(args, 'Your brief is up.', {
+      const item = upsertItem(draft('cr:CR-1'), T0).item;
+      const req = request('heartbeat', { open: [item] });
+      hub.respond = (args) => hub.answer(args, 'CR-1 waits on you.', {
         during: async (turn) => {
-          const note = remember('No briefs on Fridays.');
-          const result = await tool('companion_publish_brief').execute(toolContext(args.nodeId, v.workspaceId, turn), { headline: 'Today', cards: [], closing: 'Done.' });
-          refused = result.content.map((part) => part.text).join('');
+          const raised = await tool('companion_update_item').execute(toolContext(args.nodeId, v.workspaceId, turn),
+            { itemId: item.id, action: 'raise', reason: 'Its reviewer is waiting on you' });
+          assert.equal(raised.isError, undefined, JSON.stringify(raised));
+          assert.equal(getItem(item.id)?.raised?.reason, 'Its reviewer is waiting on you');
+          const note = remember('Never raise a review on a Friday.');
+          assert.equal(checkinMemoryHolds(req.runId), false, 'what it read changed under it');
           deleteMemory(me, note.id);
+          assert.equal(checkinMemoryHolds(req.runId), false, 'and asking again never takes that back');
         },
       });
       const outcome = await runner().run(req);
-      assert.match(refused, /^WITHDRAWN: /);
-      assert.equal(briefForDate(localDateKey(T0)), null, 'no brief of its own');
       assert.deepEqual([outcome.outcome, outcome.detail, hub.posts.length], ['error', COMPANION_WITHDRAWN_NOTE, 0]);
+      assert.equal(getItem(item.id)?.raised, null, 'the raise goes with the withdrawn turn');
     });
   });
 
@@ -640,7 +640,7 @@ describe('the agent\'s check-ins', () => {
     });
   });
 
-  test('the morning brief\'s note carries the last brief with the user\'s thumbs, and the kinds they rated useful (conv-1)', async () => {
+  test('the heartbeat\'s note carries the kinds the user rated useful, by item and version (conv-1)', async () => {
     const draftCr = upsertItem(draft('cr:CR-1:mine', { subtype: 'cr_unpublished', bucket: 'stalled', severity: 'digest', title: 'CR-1: draft not published' }), T0 - 3 * DAY).item;
     const review = upsertItem(draft('cr:CR-2:review', { subtype: 'cr_review_requested', severity: 'digest', title: 'Review requested: CR-2' }), T0 - 3 * DAY).item;
     const moved = upsertItem(draft('pipeline:P', { source: 'pipeline', subtype: 'pipeline_blocked', bucket: 'needs_you', title: 'P is blocked' }), T0 - 3 * DAY).item;
@@ -649,26 +649,16 @@ describe('the agent\'s check-ins', () => {
     applyItemAction(review.id, { action: 'dismiss' }, T0 - 2 * DAY);
     applyItemAction(moved.id, { action: 'feedback', feedback: 'up' }, T0 - 2 * DAY);
     upsertItem(draft('pipeline:P', { source: 'pipeline', subtype: 'pipeline_blocked', bucket: 'needs_you', title: 'P is blocked', version: 'v2' }), T0 - DAY);
-    const yesterday = insertBrief({
-      date: localDateKey(T0 - DAY), headline: 'A draft and a review', origin: 'llm', now: T0 - DAY, closing: 'That is all.',
-      cards: [
-        { title: 'Drafts not published', body: 'One draft.', itemIds: [draftCr.id], action: null },
-        { title: 'A review waits', body: 'CR-2.', itemIds: [review.id], action: null },
-      ],
-    })!;
-    setBriefCardFeedback(yesterday.id, 0, 'down');
-
-    await runner().run(request('brief', { open: [draftCr] }));
+    await runner().run(request('heartbeat', { open: [getItem(draftCr.id)!] }));
     const text = hub.starts[0].text;
-    assert.match(text, /\[YOUR LAST BRIEF — 2026-11-04; the thumbs on its cards are the user's\]\n- headline: "A draft and a review"/);
-    assert.ok(text.includes('- rated down · "Drafts not published" · items'), text);
     assert.match(text, /\n- cr_review_requested items: 1 rated useful\n/, 'thumbs on items no longer open count too');
     assert.doesNotMatch(text, /pipeline_blocked items/, 'a thumb on an older version is not this version\'s (conv-1)');
     assert.doesNotMatch(text, /cr_unpublished items/, 'thumbs down are about one item, never a kind');
-    assert.ok(text.indexOf('[YOUR LAST BRIEF') < text.indexOf('>>>end of collector data'), 'inside the collector data');
+    assert.ok(text.indexOf('[FEEDBACK') < text.indexOf('>>>end of collector data'), 'inside the collector data');
+    assert.match(text, /- item [^\n]*"CR-1: draft not published": rated not useful \(too_noisy\)/, 'the item they rated down, by its own line');
 
     await runner().run(request('wake', { open: [draftCr] }));
-    assert.doesNotMatch(hub.starts[1].text, /\[YOUR LAST BRIEF|rated useful/, 'only the brief reads its past');
+    assert.doesNotMatch(hub.starts[1].text, /\[FEEDBACK|rated useful/, 'only the heartbeat reviews Today whole');
   });
 
   test('every note lists the agent\'s cards still waiting for the user', async () => {
@@ -769,9 +759,10 @@ describe('the agent\'s check-ins', () => {
       busy.delete(v.nodeId);
     }
     assert.deepEqual([manager.opened, hub.starts], [[], []]);
-    const catchUp = await turns.run(request('catch_up'));
-    assert.equal(catchUp.outcome, 'skipped');
-    assert.match(catchUp.detail ?? '', /deterministic/);
+    for (const gone of ['catch_up', 'brief'] as const) {
+      const skipped = await turns.run(request(gone));
+      assert.deepEqual([skipped.outcome, skipped.detail], ['skipped', `A ${gone} check-in no longer runs`], gone);
+    }
     assert.deepEqual([manager.opened, hub.starts], [[], []]);
   });
 

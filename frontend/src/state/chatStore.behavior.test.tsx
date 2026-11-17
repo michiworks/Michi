@@ -80,6 +80,7 @@ import * as persistence from '../services/api/persistence';
 import { dismissAttention, presentAttention, type AttentionIntent } from '../services/attention/policy';
 import { setPanePresenceDashboardVisible } from './panePresenceVisibility';
 import { ChatProvider, useChatStore, useChatNode, useChatNodesSnapshot } from './chatStore';
+import { useSendPreview } from './sendPreview';
 import { PrefsProvider } from './prefs';
 import type { ChatNodeState } from './chatTypes';
 import { dispatchChatStreamEvent } from '../services/chatStreamEvents';
@@ -284,6 +285,28 @@ describe('auto-branch behavior (real provider)', () => {
     expect(result.current.nodes[nodeId].pendingQueued?.length ?? 0).toBe(accepted ? 0 : 1);
     expect(result.current.nodes[nodeId].pendingQueued?.[0]?.steering).not.toBe(true);
     expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['here', (handlers: api.StreamHandlers) => handlers.onAborted?.()],
+    ['in another window', (handlers: api.StreamHandlers) => handlers.onDone?.('cancelled')],
+  ] as const)('a Stop %s keeps the queue for the user, and Send now sends it', async (_where, stop) => {
+    const { result } = renderHook(() => useStoreAndNodes(), { wrapper });
+    await act(async () => { await result.current.store.createProject('test', undefined); });
+    let nodeId = '';
+    await act(async () => { nodeId = result.current.store.createThread()!; });
+    await act(async () => { result.current.store.sendMessage(nodeId, 'hello'); });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+    act(() => { result.current.store.queueMessage(nodeId, { id: 'q1', value: 'then push it', mentions: [], attachments: [], queuedAt: 1 }); });
+    await act(async () => { stop(mockStreamMessage.mock.calls[0][2]); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(mockStreamMessage).toHaveBeenCalledTimes(1);
+    expect(result.current.nodes[nodeId]).toMatchObject({ queueErrored: true, queueStopped: true });
+
+    await act(async () => { result.current.store.sendQueuedNow(nodeId); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(2));
+    expect(mockStreamMessage.mock.calls[1][1]).toContain('then push it');
+    expect(result.current.nodes[nodeId].pendingQueued).toBeUndefined();
+    expect(result.current.nodes[nodeId].queueStopped).toBeUndefined();
   });
 
   it('includes a newly created tree in an immediate first-turn prerequisite', async () => {
@@ -1160,6 +1183,46 @@ describe('auto-branch behavior (real provider)', () => {
     expect(result.current.node?.commandResult).toBeUndefined();
   });
 
+  describe('editing a sent message', () => {
+      it('an edit resends what the message carried: its quote, review comments, attachments and the chats it mentioned', async () => {
+        vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+          workspace: { id: 'edit-ws', name: 'Edits', created_at: 1, active_tree_id: 'edit-tree' },
+          trees: [{ id: 'edit-tree', root_node_id: 'edit-node', created_at: 1, last_active_at: 1 }],
+          nodes: [
+            { id: 'edit-node', status: 'idle', acp_session_id: 'native-session', runtime_id: 'kiro' },
+            { id: 'other-node', status: 'idle', title: 'Other thread' },
+          ],
+          messages: [
+            { id: 'edit-user', node_id: 'edit-node', role: 'user', content: 'compare with @Other thread', seq: 0,
+              metadata: {
+                quotedText: 'the quoted passage',
+                attachments: [{ name: 'shot.png', absPath: '/ws/shot.png' }],
+                comments: [{ id: 'c1', quotedText: 'a line', body: 'too long', createdAt: 1 }],
+                mentions: [{ kind: 'node', refId: 'other-node', label: 'Other thread' }],
+              } },
+            { id: 'edit-answer', node_id: 'edit-node', role: 'assistant', content: 'partial', seq: 1 },
+          ],
+        }]);
+        mockEnsureSession.mockImplementation(() => Promise.resolve({ chatId: 'edit-node', currentModeId: null, resumeStrategy: 'fresh', runtimeId: 'kiro' }));
+        const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('edit-node') }), { wrapper });
+        await waitFor(() => expect(result.current.node?.messages[0]?.mentions).toHaveLength(1));
+
+        await act(async () => { await result.current.store.editAndResend('edit-node', 0, 'compare it with @Other thread'); });
+        await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+        const [, text, , options] = mockStreamMessage.mock.calls[0];
+        expect(text).toMatch(/^The user referenced the following chat nodes\./);
+        expect(text).toContain('## My Comments on Previous Reply');
+        expect(text).toContain('the quoted passage');
+        expect(text).toMatch(/compare it with \n\n\[Attached files: shot\.png — \/ws\/shot\.png\]$/);
+        expect(options.userMetadata).toMatchObject({
+          quotedText: 'the quoted passage',
+          attachments: [{ name: 'shot.png', absPath: '/ws/shot.png' }],
+          mentions: [{ kind: 'node', refId: 'other-node', label: 'Other thread' }],
+        });
+        expect(result.current.node?.messages[0]).toMatchObject({ text: 'compare it with @Other thread', quotedText: 'the quoted passage' });
+      });
+  });
+
   describe('a message that names a skill', () => {
     const review = { id: 'library:review', name: 'review', description: 'Review a change', origin: 'library' as const,
       userInvocable: true, modelInvocable: true, enabled: true };
@@ -1578,13 +1641,15 @@ describe('auto-branch behavior (real provider)', () => {
       ] });
     }));
     try {
-      const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node'), lazy: useChatNode('lazy-node') }), { wrapper });
+      const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node'), lazy: useChatNode('lazy-node'),
+        preview: useSendPreview('cancel-node') }), { wrapper });
       await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(false));
       await act(async () => { result.current.store.openPane('cancel-node'); });
       await waitFor(() => expect(api.subscribeBackground).toHaveBeenCalledTimes(1));
       const text = `compare with ${encodeNodeMentionToken('lazy-node')}`;
       act(() => { result.current.store.sendMessage('cancel-node', text); });
       await waitFor(() => expect(persistence.fetchTreeMessagePage).toHaveBeenCalled());
+      expect(result.current.preview?.map((message) => message.role)).toEqual(['user', 'assistant']);
       act(() => {
         dispatchChatStreamEvent({ event: 'turn_start', data: {
           nodeId: 'cancel-node', turnId: 'self-turn', assistantId: 'self-a', seq: 0, userText: '', selfInitiated: true,
@@ -1594,6 +1659,7 @@ describe('auto-branch behavior (real provider)', () => {
       await act(async () => { answerPage(); });
       await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(true));
       await waitFor(() => expect(result.current.node?.composerDraft?.value).toBe(text));
+      expect(result.current.preview).toBeUndefined();
       expect(mockStreamMessage).not.toHaveBeenCalled();
     } finally {
       vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
@@ -1623,14 +1689,62 @@ describe('auto-branch behavior (real provider)', () => {
       ], pages: [{ nodeId: 'lazy-node', total: 2, before: null }] });
     }));
     try {
-      const { result } = renderHook(() => ({ store: useChatStore(), lazy: useChatNode('lazy-node') }), { wrapper });
+      const { result } = renderHook(() => ({ store: useChatStore(), lazy: useChatNode('lazy-node'), node: useChatNode('cancel-node'),
+        preview: useSendPreview('cancel-node') }), { wrapper });
       await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(false));
       act(() => { result.current.store.sendMessage('cancel-node', `compare with ${encodeNodeMentionToken('lazy-node')}`); });
       await waitFor(() => expect(persistence.fetchTreeMessagePage).toHaveBeenCalled());
+      // Shown while it waits, under the ids it lands with.
+      const shownIds = result.current.preview?.map((message) => message.id);
+      expect(shownIds).toHaveLength(2);
       act(() => { result.current.store.renameNode('lazy-node', 'Renamed meanwhile'); });
       await act(async () => { answerPage(); });
       await waitFor(() => expect(mockStreamMessage).toHaveBeenCalledTimes(1));
+      expect(result.current.node?.messages.slice(-2).map((message) => message.id)).toEqual(shownIds);
+      expect(result.current.preview).toBeUndefined();
       expect(result.current.lazy).toMatchObject({ messagesLoaded: true, title: 'Renamed meanwhile' });
+    } finally {
+      vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
+    }
+  });
+
+  it('a Stop while a send waits for history withdraws it to the composer and leaves the earlier turn alone', async () => {
+    vi.mocked(api.fetchAllWorkspacesMeta).mockResolvedValue([{
+      workspace: { id: 'cancel-ws', name: 'Cancellation', created_at: 1, active_tree_id: 'cancel-tree' },
+      trees: [
+        { id: 'cancel-tree', root_node_id: 'cancel-node', created_at: 1, last_active_at: 1 },
+        { id: 'lazy-tree', root_node_id: 'lazy-node', created_at: 2, last_active_at: 2 },
+      ],
+      nodes: [
+        { id: 'cancel-node', tree_id: 'cancel-tree', status: 'idle', acp_session_id: 'native-session', runtime_id: 'claude',
+          last_applied_turn_id: 'old-foreground', last_applied_seq: 1 },
+        { id: 'lazy-node', tree_id: 'lazy-tree', status: 'idle', runtime_id: 'claude', message_count: 2 },
+      ],
+      messages: [],
+    }]);
+    vi.mocked(api.fetchTreeMessagePage).mockReturnValue(new Promise(() => {}));
+    const actual = await vi.importActual<typeof import('../services/api/persistence')>('../services/api/persistence');
+    let answerPage!: () => void;
+    vi.mocked(persistence.fetchTreeMessagePage).mockImplementationOnce(() => new Promise((resolve) => {
+      answerPage = () => resolve({ messages: [
+        { id: 'lazy-u', node_id: 'lazy-node', role: 'user', content: 'lazy question', seq: 0 },
+        { id: 'lazy-a', node_id: 'lazy-node', role: 'assistant', content: 'lazy answer', seq: 1 },
+      ], pages: [{ nodeId: 'lazy-node', total: 2, before: null }] });
+    }));
+    try {
+      const { result } = renderHook(() => ({ store: useChatStore(), node: useChatNode('cancel-node'), lazy: useChatNode('lazy-node'),
+        preview: useSendPreview('cancel-node') }), { wrapper });
+      await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(false));
+      const text = `compare with ${encodeNodeMentionToken('lazy-node')}`;
+      act(() => { result.current.store.sendMessage('cancel-node', text); });
+      await waitFor(() => expect(result.current.preview).toBeDefined());
+      act(() => { result.current.store.cancelStream('cancel-node'); });
+      expect(result.current.preview).toBeUndefined();
+      expect(result.current.node?.composerDraft?.value).toBe(text);
+      await act(async () => { answerPage(); });
+      await waitFor(() => expect(result.current.lazy?.messagesLoaded).toBe(true));
+      expect(mockStreamMessage).not.toHaveBeenCalled();
+      expect(api.cancelChatAndObserve).not.toHaveBeenCalled();
     } finally {
       vi.mocked(persistence.fetchTreeMessagePage).mockImplementation(actual.fetchTreeMessagePage);
     }

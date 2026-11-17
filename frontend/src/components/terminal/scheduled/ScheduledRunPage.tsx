@@ -1,10 +1,11 @@
 import React from 'react';
 import { toast } from 'sonner';
-import { FolderInput, History, MessageSquare } from 'lucide-react';
+import { ChatIcon, FolderInputIcon, HistoryIcon } from '../icons';
 import { SCHEDULED_ONLY_KEPT_DAYS, SCHEDULED_ONLY_RETENTION, type ScheduledJobDto, type ScheduledJobRunDto } from 'michi-shared';
 import { Button } from '../../ui/controls';
 import TPane from '../TPane';
-import { useChatActions, useChatNode, useChatProjects } from '../../../state/chatStore';
+import { useChatActions, useChatProjects, useStructuralSelector } from '../../../state/chatStore';
+import type { ChatNodeState } from '../../../state/chatTypes';
 import { usePrefs } from '../../../state/prefs';
 import { useNow } from '../../../hooks/useNow';
 import { useEmbeddedChatNode } from '../../../state/useEmbeddedChatNode';
@@ -75,11 +76,16 @@ export function ScheduledRunPage({ job, runId, now: pageNow, onOpenJob }: {
   // Loads the thread into the store when this window does not hold it yet.
   const thread = useEmbeddedChatNode(descriptor);
   // Held, it shows at once, like a pane: a running run's thread streams in
-  // before its history page lands (the pane loads that itself).
-  const node = useChatNode(run?.nodeId ?? '');
-  const held = !!run?.nodeId && !!node && node.projectId === run.workspaceId;
+  // before its history page lands (the pane loads that itself). Both reads
+  // are structural, so the header leaves the stream to the pane.
+  const nodeId = run?.nodeId;
+  const runWorkspaceId = run?.workspaceId;
+  const held = useStructuralSelector(React.useCallback((nodes: Record<string, ChatNodeState>) =>
+    !!nodeId && nodes[nodeId]?.projectId === runWorkspaceId, [nodeId, runWorkspaceId]));
+  const nodeTitle = useStructuralSelector(React.useCallback((nodes: Record<string, ChatNodeState>) =>
+    (nodeId ? nodes[nodeId]?.title?.trim() : undefined), [nodeId]));
   const workspaceName = projects.find((project) => project.id === (run?.workspaceId ?? job.workspaceId))?.name ?? 'its workspace';
-  const title = node?.title?.trim() || job.name;
+  const title = nodeTitle || job.name;
 
   // The top bar names the conversation, as it does for any other.
   React.useEffect(() => {
@@ -118,7 +124,7 @@ export function ScheduledRunPage({ job, runId, now: pageNow, onOpenJob }: {
   } else if (!run.nodeId) {
     body = (
       <div className="sched-run-page-empty">
-        <MessageSquare size={26} aria-hidden="true" />
+        <ChatIcon size={26} aria-hidden="true" />
         <p>{run.error && run.status !== 'succeeded'
           ? run.error
           : `This run’s thread was removed. Michi keeps the latest ${SCHEDULED_ONLY_RETENTION.maxRuns} runs from the past ${SCHEDULED_ONLY_KEPT_DAYS} days, and always the latest ${SCHEDULED_ONLY_RETENTION.minRuns}.`}</p>
@@ -159,17 +165,17 @@ export function ScheduledRunPage({ job, runId, now: pageNow, onOpenJob }: {
         </div>
         <div className="sched-run-page-actions">
           <Button size="sm" variant="ghost" onClick={onOpenJob} aria-label={`${job.name} details and runs`}>
-            <History size={14} aria-hidden="true" />Runs
+            <HistoryIcon aria-hidden="true" />Runs
           </Button>
           {run?.nodeId && (run.scheduledOnly
             ? (
               <Button size="sm" variant="primary" onClick={() => { void move(); }} disabled={moving}
                 title={`Show this thread among ${workspaceName}’s conversations, where you can continue it`}>
-                <FolderInput size={14} aria-hidden="true" />{moving ? 'Moving…' : 'Move to workspace'}
+                <FolderInputIcon aria-hidden="true" />{moving ? 'Moving…' : 'Move to workspace'}
               </Button>
             ) : (
               <Button size="sm" onClick={() => { void openInWorkspace(run); }}>
-                <MessageSquare size={14} aria-hidden="true" />Open in workspace
+                <ChatIcon aria-hidden="true" />Open in workspace
               </Button>
             ))}
         </div>

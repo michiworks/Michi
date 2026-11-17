@@ -3,8 +3,8 @@ import type { ChatNodeState, Project } from './chatTypes';
 const api = vi.hoisted(() => ({ fetchTreeMessageSnapshot: vi.fn(), fetchTreeMessagePage: vi.fn() }));
 vi.mock('../services/api', () => api);
 import {
-  REMOTE_FIRST_PAGE_LIMIT, TREE_PREFETCH_CONCURRENCY, TREE_PREFETCH_LIMIT, TREE_PREFETCH_TTL_MS, TreeMessageRequests,
-  sameTreeMessageAnchor,
+  LOCAL_FIRST_PAGE_MIN_MESSAGES, TREE_FIRST_PAGE, TREE_FIRST_PAGE_LIMIT, TREE_PREFETCH_CONCURRENCY, TREE_PREFETCH_LIMIT,
+  TREE_PREFETCH_TTL_MS, TreeMessageRequests, sameTreeMessageAnchor,
 } from './treeMessageRequests';
 
 const projects: Project[] = Array.from({ length: 8 }, (_, i) => ({
@@ -146,11 +146,33 @@ describe('provider-scoped tree reads', () => {
     const remote = { ...projects[0], backendConnectionId: 'remote-a' };
     const entry = pool.acquire(remote, 't0', nodes, signal());
     await expect(entry!.promise).resolves.toBe(page);
-    expect(api.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith('ws-0', 't0', 'remote-a', expect.any(AbortSignal), { limit: REMOTE_FIRST_PAGE_LIMIT });
-    expect(REMOTE_FIRST_PAGE_LIMIT).toBeLessThan(50);
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith('ws-0', 't0', 'remote-a', expect.any(AbortSignal), TREE_FIRST_PAGE);
+    expect(TREE_FIRST_PAGE_LIMIT).toBeLessThan(50);
     expect(onRemotePage).toHaveBeenCalledExactlyOnceWith(remote, 't0', page);
     expect(api.fetchTreeMessageSnapshot).not.toHaveBeenCalled();
     pool.clear();
+  });
+
+  it('opens a local tree on its first page in the phone layout, and a long one in any window', async () => {
+    api.fetchTreeMessagePage.mockReset().mockResolvedValue({ messages: [] });
+    const phone = new TreeMessageRequests({ phoneLayout: () => true });
+    await phone.acquire(projects[0], 't0', nodes, signal())!.promise;
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith('ws-0', 't0', undefined, expect.any(AbortSignal), TREE_FIRST_PAGE);
+    phone.clear();
+
+    // On a desktop, what decides is the tree's messages summed over its nodes.
+    const desktop = new TreeMessageRequests({ phoneLayout: () => false });
+    const half = LOCAL_FIRST_PAGE_MIN_MESSAGES / 2;
+    const pair: Project = { ...projects[1], chatIds: ['n1', 'n7'], edges: [{ source: 'n1', target: 'n7' }] };
+    const long = { ...nodes, n1: { ...nodes.n1, messageCount: half }, n7: { ...nodes.n7, projectId: pair.id, messageCount: half + 1 } };
+    await desktop.acquire(pair, 't1', long, signal())!.promise;
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledTimes(2);
+    expect(api.fetchTreeMessagePage).toHaveBeenLastCalledWith('ws-1', 't1', undefined, expect.any(AbortSignal), TREE_FIRST_PAGE);
+    const short = { ...nodes, n2: { ...nodes.n2, messageCount: LOCAL_FIRST_PAGE_MIN_MESSAGES } };
+    await desktop.acquire(projects[2], 't2', short, signal())!.promise;
+    expect(api.fetchTreeMessagePage).toHaveBeenCalledTimes(2);
+    expect(api.fetchTreeMessageSnapshot).toHaveBeenCalledExactlyOnceWith('ws-2', 't2', undefined, expect.any(AbortSignal));
+    desktop.clear();
   });
 
   it('hands a read started before its nodes existed to the first caller for that tree', async () => {

@@ -174,7 +174,7 @@ test('every tray icon the app can load exists and ships in the package; the glyp
   const tray = require('../electron/dist/tray.js');
   const dto = (badge) => ({
     displayName: 'Michi', enabled: true, paused: false, welcomeWanted: false, conversationWaiting: false,
-    statusLine: { text: 'Watching', tone: 'ok' }, badge, needsYou: [], needsYouTotal: 0, briefReady: false, revision: 1,
+    statusLine: { text: 'Watching', tone: 'ok' }, badge, needsYou: [], needsYouTotal: 0, revision: 1,
   });
   const states = [{ kind: 'loading' }, { kind: 'ready', dto: dto(0) }, { kind: 'ready', dto: dto(3) }];
   const loaded = new Set();

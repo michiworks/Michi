@@ -282,6 +282,21 @@ describe('the Chat tab (DESIGN-v2 §1.3)', () => {
     ]);
   });
 
+  it('grows route lines and a receipt in when their metadata lands on screen, and shows them settled with the conversation', () => {
+    const asked = message('u-1', 'user', 'what changed?');
+    const post = message('cmp-post-r1', 'assistant', 'Tidied Tasks.');
+    conversation([asked, post]);
+    const view = show();
+    conversation([{ ...asked, companionTurn: { startTaint: 'checkin' } }, { ...post, companionPost: POST }]);
+    view.rerender(<Tab />);
+    const shown = () => [screen.getByRole('note').closest('.companion-turn-notes')!, screen.getByRole('group', { name: 'What Michi changed' })]
+      .map((block) => (block.parentElement as HTMLElement).style.opacity);
+    expect(shown()).toEqual(['0', '0']);
+    view.unmount();
+    show();
+    expect(shown()).toEqual(['1', '1']);
+  });
+
   it('gives the conversation the Get started card as its leading slot, and asks for no welcome (D17)', () => {
     show({ welcome: { wanted: true } });
     expect(mocks.decorations?.leading).toBeTruthy();

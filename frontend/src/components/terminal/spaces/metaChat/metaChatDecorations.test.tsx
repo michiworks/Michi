@@ -23,7 +23,7 @@ function renderReply(decorations: MetaChatDecorations | null) {
   return render(
     <MetaChatDecorationsContext.Provider value={decorations}>
       <MessageBlock m={reply} index={0} isDark={false} onEdit={() => {}} copyText={() => ''} showThoughts={false}
-        fontFamily="inherit" density="comfortable" workspaceId="ws-assistant" backendConnectionId="local" />
+        density="comfortable" workspaceId="ws-assistant" backendConnectionId="local" />
     </MetaChatDecorationsContext.Provider>,
   );
 }
@@ -34,32 +34,43 @@ describe('the Meta agent window decorations on the shared message list', () => {
     // A pane's reply has no speaker line; its meta line sits under it.
     expect(screen.queryByText('> michi')).toBeNull();
     expect(document.querySelector('.t-answer-meta')).not.toBeNull();
-    expect(document.querySelector('[data-tool-lines]')).toBeNull();
   });
 
-  it('labels the reply, lists each tool call as one line, and adds its cards and divider', () => {
+  it('labels the reply and adds its cards and divider', () => {
     renderReply({
       assistantLabel: <span>Meta agent</span>,
-      toolLine: (t) => (t.id === 't1' ? 'Read Home · 6 blocks' : 'List pages · rabbitholes'),
       toolCards: (tools) => <div data-testid="cards">{tools.length} tools</div>,
       afterMessage: (m) => <div role="separator">From here on: Kiro after {m.id}</div>,
     });
     expect(screen.queryByText('> michi')).toBeNull();
     expect(screen.getByText('Meta agent')).toBeTruthy();
-    const lines = [...document.querySelectorAll('[data-tool-lines] [data-tool-line]')].map((el) => el.textContent?.trim());
-    expect(lines).toEqual(['▸Read Home · 6 blocks', '▸List pages · rabbitholes']);
     expect(screen.getByTestId('cards').textContent).toBe('2 tools');
     expect(screen.getByRole('separator').textContent).toBe('From here on: Kiro after a-1');
+  });
+
+  // The window words its calls but draws them as any pane does.
+  const toolLine = (t: ToolCallState) => (t.id === 't1' ? 'Read Home · 6 blocks' : 'List pages · rabbitholes');
+  it('names each tool call in its own words inside the line run', () => {
+    render(
+      <MetaChatDecorationsContext.Provider value={{ toolLine }}>
+        <MessageBlock m={reply} index={0} isDark={false} copyText={() => ''} showThoughts={false} density="comfortable" />
+      </MetaChatDecorationsContext.Provider>,
+    );
+    fireEvent.click(document.querySelector('button.agent-line') as HTMLElement);
+    const steps = [...document.querySelectorAll('button.agent-line')].slice(1).map((el) => el.textContent ?? '');
+    expect(steps.some((text) => text.includes('Read Home · 6 blocks'))).toBe(true);
+    expect(steps.some((text) => text.includes('List pages · rabbitholes'))).toBe(true);
   });
 
   it('keeps the window\'s corner actions on hover, even under its latest reply', () => {
     render(
       <MetaChatDecorationsContext.Provider value={{ assistantLabel: <span>Meta agent</span> }}>
         <MessageBlock m={reply} index={0} isDark={false} copyText={() => ''} showThoughts={false}
-          fontFamily="inherit" density="comfortable" pinned />
+          density="comfortable" pinned />
       </MetaChatDecorationsContext.Provider>,
     );
-    expect((document.querySelector('.t-msg-actions') as HTMLElement).style.opacity).toBe('0');
+    expect(document.querySelector('.t-msg-actions')).not.toBeNull();
+    expect(document.querySelector('[data-msg-actions="pinned"]')).toBeNull();
   });
 });
 

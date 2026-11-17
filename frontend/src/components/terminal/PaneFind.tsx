@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { smoothScrollBehavior } from '../../hooks/useReducedMotion';
 import { isImeComposing } from '../../lib/ime';
 import { flashMatchOverlay, usePaneFindMatches } from './paneFindMatches';
+import { ChevronLeftIcon, ChevronRightIcon, CloseIcon } from './icons';
 
 export interface PaneFindProps {
   open: boolean;
@@ -21,13 +22,20 @@ export interface PaneFindProps {
    * can retype without first clearing.
    */
   focusNonce?: number;
+  /**
+   * The conversation's older history, which find cannot search before it is
+   * read: being read, still partly unread ('more'), or a read that failed.
+   * onLoadOlder reads (more of) it.
+   */
+  olderHistory?: 'reading' | 'more' | 'failed';
+  onLoadOlder?: () => void;
 }
 
 // One highlight name for every pane: find closes when its pane loses focus,
 // so two panes rarely paint at once, and then the latest wins.
 const HIGHLIGHT_NAME = 'pane-find';
 
-export default function PaneFind({ open, rootRef, onClose, onVisitMatch, focusNonce }: PaneFindProps) {
+export default function PaneFind({ open, rootRef, onClose, onVisitMatch, focusNonce, olderHistory, onLoadOlder }: PaneFindProps) {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [currentIdx, setCurrentIdx] = useState(0);
@@ -133,12 +141,23 @@ export default function PaneFind({ open, rootRef, onClose, onVisitMatch, focusNo
           }
         }}
       />
-      <button type="button" className="t-pane-find-nav" onClick={() => go(-1)} aria-label="prev">◀</button>
-      <button type="button" className="t-pane-find-nav" onClick={() => go(1)} aria-label="next">▶</button>
-      <span className="t-pane-find-counter">
-        {matches.length === 0 ? '0 / 0' : `${current + 1} / ${matches.length}`}
+      <button type="button" className="t-pane-find-nav" onClick={() => go(-1)} aria-label="prev"><ChevronLeftIcon size="sm" /></button>
+      <button type="button" className="t-pane-find-nav" onClick={() => go(1)} aria-label="next"><ChevronRightIcon size="sm" /></button>
+      <span className="t-pane-find-counter" aria-busy={olderHistory === 'reading' || undefined}>
+        {olderHistory === 'reading' && matches.length === 0 ? '…'
+          : `${matches.length === 0 ? '0 / 0' : `${current + 1} / ${matches.length}`}${olderHistory === 'reading' ? '…' : ''}`}
       </span>
-      <button type="button" className="t-pane-find-close" onClick={onClose} aria-label="close">×</button>
+      {(olderHistory === 'more' || olderHistory === 'failed') && onLoadOlder && (
+        <button
+          type="button"
+          className="t-pane-find-older"
+          onClick={onLoadOlder}
+          title={olderHistory === 'failed' ? "Couldn't read the older messages" : 'Older messages are not searched yet'}
+        >
+          {olderHistory === 'failed' ? 'Retry' : 'Search older'}
+        </button>
+      )}
+      <button type="button" className="t-pane-find-close" onClick={onClose} aria-label="close"><CloseIcon size="sm" /></button>
     </div>
   );
 }
@@ -147,7 +166,7 @@ const FIND_CSS = `
 /* CSS Custom Highlight API rule for ⌘F per-pane find. Keep this runtime-injected
    so Lightning CSS does not warn on the valid ::highlight() pseudo-element. */
 ::highlight(pane-find) {
-  background-color: color-mix(in srgb, var(--term-select, #ffd54f) 38%, transparent);
+  background-color: color-mix(in srgb, var(--term-select) 38%, transparent);
 }
 .t-pane-find {
   position: absolute; top: 8px; right: 8px;
@@ -162,18 +181,30 @@ const FIND_CSS = `
 }
 .t-pane-find-input {
   width: 160px;
-  background: transparent; border: 0; outline: none;
+  background: transparent; border: 0; outline: 2px solid transparent;
   font: inherit; color: var(--term-fg);
   padding: 2px 6px;
 }
+/* The bar is the field's frame: it carries the ring while the input has focus. */
+.t-pane-find:has(.t-pane-find-input:focus-visible) { outline: var(--focus-ring); outline-offset: 1px; }
 .t-pane-find-input::placeholder { color: var(--term-faint); }
 .t-pane-find-nav, .t-pane-find-close {
+  display: inline-flex; align-items: center;
   background: transparent; border: 0; cursor: pointer;
   color: var(--term-mid);
   padding: 2px 4px;
   font: inherit;
   border-radius: var(--ui-radius-sm);
 }
+.t-pane-find-older {
+  background: transparent; border: 0; cursor: pointer;
+  color: var(--term-mid);
+  padding: 2px 4px;
+  font: inherit;
+  white-space: nowrap;
+  border-radius: var(--ui-radius-sm);
+}
+.t-pane-find-older:hover,
 .t-pane-find-nav:hover, .t-pane-find-close:hover {
   background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg);
 }

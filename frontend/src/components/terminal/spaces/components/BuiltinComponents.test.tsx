@@ -1,12 +1,16 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PAGE_BLOCK_CATALOG, PAGE_BLOCK_TYPES, parsePageBlockInput } from 'michi-shared';
 import { BuiltinComponents, builtinComponents } from './BuiltinComponents';
+import { TICKED_HOLD_MS } from '../../content/page/blocks/data';
 
 const NOW = new Date(2026, 9, 21, 12).getTime();
 const cardOf = (name: string) => screen.getAllByRole('article').find((article) => article.querySelector('.component-catalog__caption h3')?.textContent === name)!;
 
 describe('Built-in components', () => {
+  // A test that fails between its fake and real timers must not leave the fake ones to the next.
+  afterEach(() => { vi.useRealTimers(); });
+
   it('lists every block a page shows, from the shared catalog', () => {
     const listed = builtinComponents(NOW).map((item) => item.type);
     const shown = PAGE_BLOCK_TYPES.filter((type) => PAGE_BLOCK_CATALOG[type].category !== 'references');
@@ -36,8 +40,12 @@ describe('Built-in components', () => {
     const card = cardOf('Checklist');
     const checkbox = within(card).getByRole('checkbox', { name: 'Verify the installer' });
     expect(checkbox.getAttribute('aria-checked')).toBe('false');
+    vi.useFakeTimers();
     fireEvent.click(checkbox);
-    // A ticked item folds under the done row; opening it shows the item ticked.
+    // A ticked item keeps its place for a moment, then folds under the done row; opening it shows the item ticked.
+    expect(within(card).getByRole('checkbox', { name: 'Verify the installer' }).getAttribute('aria-checked')).toBe('true');
+    act(() => { vi.advanceTimersByTime(TICKED_HOLD_MS); });
+    vi.useRealTimers();
     expect(within(card).queryByRole('checkbox', { name: 'Verify the installer' })).toBeNull();
     fireEvent.click(within(card).getByRole('button', { name: 'Show 2 done' }));
     expect(within(card).getByRole('checkbox', { name: 'Verify the installer' }).getAttribute('aria-checked')).toBe('true');
@@ -64,7 +72,10 @@ describe('Built-in components', () => {
     // Keep unrelated previews from contributing work to this grid interaction test.
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Responsive grid' } });
     const card = cardOf('Responsive grid');
+    vi.useFakeTimers();
     fireEvent.click(within(card).getByRole('checkbox', { name: 'Review the next step' }));
+    act(() => { vi.advanceTimersByTime(TICKED_HOLD_MS); });
+    vi.useRealTimers();
     expect(within(card).queryByRole('checkbox')).toBeNull();
     fireEvent.click(within(card).getByRole('button', { name: 'Show 1 done' }));
     expect(within(card).getByRole('checkbox', { name: 'Review the next step' }).getAttribute('aria-checked')).toBe('true');

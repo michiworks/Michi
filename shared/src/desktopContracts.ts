@@ -37,10 +37,6 @@ export interface SaveMarkdownResult {
   path?: string;
 }
 
-/** macOS NSVisualEffectView materials Michi exposes, lightest → densest frost. */
-export const VIBRANCY_MATERIALS = ['under-window', 'sidebar', 'menu', 'hud'] as const;
-export type VibrancyMaterial = typeof VIBRANCY_MATERIALS[number];
-
 /** URL query params Electron main gives a window; its preload reads them once. */
 export type DesktopBootstrapParam =
   | 'michiWindowId' | 'michiPackaged' | 'michiVibrancy' | 'michiGlass'
@@ -209,8 +205,6 @@ export interface DesktopBridge {
   onAttentionNotificationClick(handler: (key: string) => void): () => void;
   /** Sync native chrome and Browser panes to the active palette. Absent in older builds / web. */
   setDarkMaterial(dark: boolean, backgroundColor?: string): void;
-  /** Switch the sidebar's native vibrancy material (desktop see-through density). Absent in older builds / web. */
-  setVibrancy(material: VibrancyMaterial): void;
   /** Turn native vibrancy on or off in every window, live, and keep the choice
    *  for the next launch. No-op without hasVibrancy. Absent in older builds / web. */
   setWindowGlass(enabled: boolean): void;
@@ -301,7 +295,6 @@ export interface DesktopCommandContract {
   'app:openExternal': [url: string];
   'app:showNotification': [title: string, body: string, target?: DesktopNotificationTarget];
   'app:setDarkMaterial': [dark: boolean, backgroundColor?: string];
-  'app:setVibrancy': [material: VibrancyMaterial];
   'app:setWindowGlass': [enabled: boolean];
   'app:relaunch': [];
   'terminal:write': [surfaceId: string, data: string];

@@ -10,8 +10,9 @@ import MarkdownContent from '../MarkdownContent';
 import SelectionActions from '../SelectionActions';
 import { formatQuotedMessage, QuoteSource } from '../../lib/quoteFormat';
 import { computeTextSelector, rangeToOffsets, type TextSelector } from '../../lib/textSelector';
-import { RetryIcon, ExternalLinkIcon } from './icons';
+import { ChevronDownIcon, RetryIcon, ExternalLinkIcon } from './icons';
 import PanePath from './PanePath';
+import { Button } from '../ui/controls';
 import { usePrefs } from '../../state/prefs';
 import { DARK_PALETTES } from './tokens';
 import { usePaneViewState } from './PaneViewState';
@@ -63,7 +64,7 @@ const fileProseVars: React.CSSProperties = {
   '--tw-prose-bold': 'var(--term-fg)',
   '--tw-prose-code': 'var(--term-fg)',
   '--tw-prose-quotes': 'var(--term-mid)',
-  '--tw-prose-links': 'var(--term-accent)',
+  '--tw-prose-links': 'var(--term-accent-text)',
   '--tw-prose-counters': 'var(--term-mid)',
   '--tw-prose-bullets': 'var(--term-mid)',
 } as React.CSSProperties;
@@ -79,7 +80,7 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
   useChatStore();
   const nodeStore = useContext(ChatNodeStoreContext)!;
   const project = projects.find((candidate) => candidate.id === item.projectId);
-  const shellStyle = usePaneShellStyle(item.id);
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
   const { prefs } = usePrefs();
   const isDark = DARK_PALETTES.has(prefs.terminalPalette);
   const [state, setState] = useState<LoadState>({ phase: 'loading' });
@@ -223,7 +224,7 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
               <option value="">Choose a thread</option>
               {options.map(({node}) => <option key={node.nodeId} value={node.nodeId}>{node.title || 'Untitled thread'}</option>)}
             </select>
-            <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m4 6 4 4 4-4" /></svg>
+            <ChevronDownIcon size="sm" />
           </span>
         </label>
         {previousVersion && <span role="status">File changed since this selection.</span>}
@@ -379,20 +380,23 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
           </span>
         ) : null}
         {item.diskState === 'changed' ? (
-          <button type="button" onClick={() => setReloadKey((value) => value + 1)} style={{ border: '1px solid var(--term-accent)', background: 'transparent', color: 'var(--term-accent)', padding: '2px 7px', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', cursor: 'pointer', whiteSpace: 'nowrap' }}>● Changed on disk · refresh</button>
+          <Button size="sm" onClick={() => setReloadKey((value) => value + 1)} style={{ whiteSpace: 'nowrap' }}>
+            <span aria-hidden style={{ color: 'var(--term-accent)' }}>●</span> Changed on disk · refresh
+          </Button>
         ) : null}
         {item.diskState === 'removed' ? <span style={{ color: 'var(--term-danger-text)', fontSize: 'var(--fs-xs)' }}>⚠ Deleted on disk</span> : null}
         {isMarkdown ? (
           <button
             type="button"
             className={`t-text-btn${item.viewMode === 'source' ? ' is-active' : ''}`}
+            aria-pressed={item.viewMode === 'source'}
             onClick={() => updatePaneItem(item.id, { viewMode: item.viewMode === 'rendered' ? 'source' : 'rendered' })}
           >
-            {item.viewMode === 'rendered' ? 'source' : 'preview'}
+            Source
           </button>
         ) : null}
-        <button type="button" className="t-icon-btn" onClick={() => setReloadKey((value) => value + 1)} aria-label="Reload file" title="Reload file"><RetryIcon size={14} /></button>
-        {absolutePath ? <button type="button" className="t-icon-btn" onClick={openExternal} aria-label="Open externally" title="Open externally"><ExternalLinkIcon size={14} /></button> : null}
+        <button type="button" className="t-icon-btn" onClick={() => setReloadKey((value) => value + 1)} aria-label="Reload file" title="Reload file"><RetryIcon /></button>
+        {absolutePath ? <button type="button" className="t-icon-btn" onClick={openExternal} aria-label="Open externally" title="Open externally"><ExternalLinkIcon /></button> : null}
       </div>
       <div ref={contentScrollRef} className="term-scrollbar" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '18px 22px 28px', color: 'var(--term-fg)' }}>
         <SelectionActions
@@ -427,6 +431,7 @@ export default function FilePane({ item }: { item: FilePaneItem }) {
           <span>{new Date(state.modifiedAt).toLocaleTimeString()}</span>
         </div>
       ) : null}
+      {recede}
     </div>
   );
 }

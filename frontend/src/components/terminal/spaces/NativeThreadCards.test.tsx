@@ -47,8 +47,11 @@ describe('thread cards on a native page', () => {
     const { rerender } = render(<NativeThreadCards block={{ nodeIds: ['n1'] }} items={null} onOpen={vi.fn()} />);
     expect(screen.getByRole('status').textContent).toBe('Reading these conversations…');
     expect(screen.getByRole('heading', { name: 'Threads 1' })).toBeTruthy();
-    rerender(<NativeThreadCards block={{ nodeIds: ['n1'] }} items={null} failed onOpen={vi.fn()} />);
+    const retry = vi.fn();
+    rerender(<NativeThreadCards block={{ nodeIds: ['n1'] }} items={null} failed onRetry={retry} onOpen={vi.fn()} />);
     expect(screen.getByRole('alert').textContent).toBe('These conversations could not be read.');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(retry).toHaveBeenCalledOnce();
   });
 
   it('leads each card with where its conversation stands', () => {

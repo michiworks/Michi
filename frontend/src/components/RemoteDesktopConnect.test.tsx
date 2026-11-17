@@ -68,6 +68,17 @@ it('browses directories then selects the canonical remote path', async () => {
   expect(select).toHaveBeenCalledWith('/home/u/project');
 });
 
+it('hands focus to the opened folder\'s list, not to the page, when the pressed folder unmounts', async () => {
+  mocks.browse.mockResolvedValueOnce({ path: '/home/u', parent: '/home', entries: [{ name: 'project', path: '/home/u/project' }] })
+    .mockResolvedValueOnce({ path: '/home/u/project', parent: '/home/u', entries: [{ name: 'src', path: '/home/u/project/src' }] });
+  render(<RemoteFolderPicker connectionId="remote-c" onSelect={vi.fn()} />);
+  const folder = await screen.findByRole('button', { name: 'project /' });
+  folder.focus();
+  fireEvent.click(folder);
+  await screen.findByRole('button', { name: 'src /' });
+  await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '↑ Parent folder' })));
+});
+
 it('does not allow selecting a stale directory after a failed navigation', async () => {
   mocks.browse.mockResolvedValueOnce({ path: '/home/u', parent: '/home', entries: [] }).mockRejectedValueOnce(new Error('Folder not found'));
   render(<RemoteFolderPicker connectionId="remote-c" onSelect={vi.fn()} />);

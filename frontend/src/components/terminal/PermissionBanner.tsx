@@ -52,7 +52,6 @@ export default function PermissionBanner({ permission, onRespond, readOnly = fal
         display: 'flex',
         flexDirection: 'column',
         gap: 10,
-        outline: 'none',
         flexShrink: 0,
       }}
     >

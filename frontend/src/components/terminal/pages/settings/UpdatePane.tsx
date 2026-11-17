@@ -6,6 +6,7 @@ import {
   SelfUpdateRequestError, checkSelfUpdate, fetchSelfUpdate, startSelfUpdate,
 } from '../../../../services/api/selfUpdate';
 import { SettingsRow, SettingsSection } from './SettingsSection';
+import { useFocusAfterChange } from './useFocusAfterChange';
 import './selfUpdate.css';
 
 const short = (revision: string | null | undefined) => revision ? revision.slice(0, 7) : 'unknown';
@@ -137,15 +138,18 @@ export function UpdatePane({ reload = () => window.location.reload() }: { reload
   const current = status?.current;
   const running = job?.phase === 'running';
   const busy = checking || starting || running;
+  const offering = check?.state === 'available' && !running && job?.phase !== 'succeeded';
+  const updateRef = useRef<HTMLButtonElement>(null);
+  // Once the update starts its offer gives way to its progress, and focus to the page's heading.
+  useFocusAfterChange(offering, (now) => now ? updateRef.current : null);
   return <>
     <SettingsSection title="Michi on this machine" className="self-update">
       {!status && !error && <p className="settings-section__status" role="status">Loading…</p>}
       {status && <SettingsRow
         label="Running"
         description={<span className="self-update__build">{current?.version} · <code>{short(current?.revision)}</code>{current?.dirty ? ' · local changes' : ''}</span>}
-        control={status.supported && <Button size="sm" disabled={busy} onClick={() => { void runCheck(); }}>
-          {checking ? 'Checking…' : 'Check for updates'}
-        </Button>}>
+        control={status.supported && <Button size="sm" disabled={starting || running} busy={checking} busyLabel="Checking…"
+          onClick={() => { void runCheck(); }}>Check for updates</Button>}>
         {!status.supported && <p className="settings-row__note">{status.reason}</p>}
         {status.supported && !check && !job && <p className="settings-row__note">Updates follow the {status.branch} branch.</p>}
         {check?.state === 'current' && !running && <p className="settings-row__note" role="status">
@@ -155,7 +159,7 @@ export function UpdatePane({ reload = () => window.location.reload() }: { reload
       {error && <p className="settings-section__error" role="alert">{error}</p>}
     </SettingsSection>
 
-    {check?.state === 'available' && !running && job?.phase !== 'succeeded' && (
+    {offering && (
       <SettingsSection title="Update available" className="self-update"
         aside={`${check.total} new ${check.total === 1 ? 'commit' : 'commits'}`}>
         <ol className="self-update__commits" aria-label={`New on ${check.branch}`}>
@@ -166,7 +170,7 @@ export function UpdatePane({ reload = () => window.location.reload() }: { reload
         {check.total > check.commits.length && <p className="settings-row__note">And {check.total - check.commits.length} more.</p>}
         {check.blocked ? <p className="settings-row__note" role="alert">{check.blocked}</p> : (
           <div className="self-update__actions">
-            <Button variant="primary" disabled={busy} onClick={() => { void update(); }}>{starting ? 'Starting…' : 'Update now'}</Button>
+            <Button ref={updateRef} variant="primary" disabled={checking} busy={starting} busyLabel="Starting…" onClick={() => { void update(); }}>Update now</Button>
           </div>
         )}
       </SettingsSection>

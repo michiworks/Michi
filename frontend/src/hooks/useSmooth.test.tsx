@@ -1,4 +1,6 @@
+import React from 'react';
 import { renderHook, act } from '@testing-library/react';
+import { createPaneShownStore, PaneShownContext } from './paneShown';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { nextTypewriterCps, smoothingProfileForRuntime, useSmooth } from './useSmooth';
 
@@ -179,6 +181,96 @@ describe('useSmooth', () => {
         delete (document as any).hidden;
       }
     }
+  });
+
+  it.each([
+    ['the OS setting', () => {
+      vi.stubGlobal('matchMedia', (query: string) => ({
+        matches: query === '(prefers-reduced-motion: reduce)',
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }));
+    }],
+    ['Settings › Reduce motion', () => { document.documentElement.dataset.reduceMotion = 'on'; }],
+  ])('shows each chunk as it arrives under %s, and paces again once it is off', (_trigger, reduce) => {
+    const { result, rerender } = renderHook(
+      ({ text, streaming }) => useSmooth(text, streaming),
+      { initialProps: { text: '', streaming: true } },
+    );
+    try {
+      reduce();
+      act(() => rerender({ text: 'first chunk', streaming: true }));
+      expect(result.current.displayed).toBe('first chunk');
+      act(() => rerender({ text: 'first chunk, second chunk', streaming: true }));
+      expect(result.current.displayed).toBe('first chunk, second chunk');
+      expect(result.current.isSmoothing).toBe(false);
+      expect(frames).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+      delete document.documentElement.dataset.reduceMotion;
+    }
+
+    act(() => rerender({ text: 'first chunk, second chunk, then paced', streaming: true }));
+    expect(result.current.displayed).toBe('first chunk, second chunk');
+    expect(frames.length).toBeGreaterThan(0);
+  });
+
+  function inPane() {
+    const pane = createPaneShownStore();
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <PaneShownContext.Provider value={pane}>{children}</PaneShownContext.Provider>
+    );
+    return { pane, wrapper };
+  }
+
+  it('shows each chunk as it comes while its pane is hidden in place, and paces again once it shows', () => {
+    const { pane, wrapper } = inPane();
+    const { result, rerender } = renderHook(
+      ({ text, streaming }) => useSmooth(text, streaming),
+      { initialProps: { text: '', streaming: true }, wrapper },
+    );
+    act(() => pane.setHidden(true));
+    act(() => rerender({ text: 'hidden output', streaming: true }));
+    expect(result.current.displayed).toBe('hidden output');
+    // A window coming back does not restart pacing in a pane still hidden.
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    act(() => rerender({ text: 'hidden output, more', streaming: true }));
+    expect(result.current.displayed).toBe('hidden output, more');
+    expect(frames).toHaveLength(0);
+
+    act(() => pane.setHidden(false));
+    act(() => rerender({ text: 'hidden output, more, shown', streaming: true }));
+    expect(result.current.displayed).toBe('hidden output, more, shown');
+    act(() => rerender({ text: 'hidden output, more, shown, then paced again', streaming: true }));
+    expect(result.current.displayed).toBe('hidden output, more, shown');
+    expect(frames.length).toBeGreaterThan(0);
+  });
+
+  it('stops pacing without a render while its pane is frozen off the strip, and shows its source once back', () => {
+    const source = 'abcdefghijklmnopqrstuvwxyz';
+    const { pane, wrapper } = inPane();
+    let renders = 0;
+    const { result, rerender } = renderHook(
+      ({ text, streaming }) => { renders += 1; return useSmooth(text, streaming); },
+      { initialProps: { text: '', streaming: true }, wrapper },
+    );
+    act(() => rerender({ text: source, streaming: true }));
+    runNextFrame(60);
+    const shown = result.current.displayed;
+    expect(shown.length).toBeLessThan(source.length);
+
+    const before = renders;
+    act(() => pane.setFrozen(true));
+    expect(renders).toBe(before);
+    expect(window.cancelAnimationFrame).toHaveBeenCalled();
+    // The stream ending meanwhile starts no frame.
+    const requested = frames.length;
+    act(() => rerender({ text: source, streaming: false }));
+    expect(frames).toHaveLength(requested);
+
+    act(() => pane.setFrozen(false));
+    expect(result.current.displayed).toBe(source);
   });
 
   it('snaps instead of replaying slowly after a long frame stall', () => {

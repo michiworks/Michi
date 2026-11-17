@@ -45,6 +45,11 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
   const digestEnabled = useDigestEnabled();
   const tab: Tab = selectedTab === 'digests' && !digestEnabled ? 'chats' : selectedTab;
   const [filter, setFilter] = React.useState('');
+  const searchRef = React.useRef<HTMLInputElement>(null);
+  const clearFilter = React.useCallback(() => {
+    setFilter('');
+    searchRef.current?.focus();
+  }, []);
   const [selectedContextId, setSelectedContextId] = React.useState<string | null>(null);
   const [importing, setImporting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState<UploadProgressViewState | null>(null);
@@ -272,6 +277,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
           counts={tabCounts}
           filter={filter}
           onFilterChange={setFilter}
+          searchRef={searchRef}
           compact={phone}
           showDigests={digestEnabled}
         />
@@ -280,6 +286,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
             workspace={project}
             nodes={nodes}
             filter={filter}
+            onClearFilter={clearFilter}
             manageMode={manageMode}
             onOpen={handleOpenNode}
             menuActions={{
@@ -311,6 +318,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
             <ContextList
               artifacts={project.artifacts ?? []}
               filter={filter}
+              onClearFilter={clearFilter}
               selectedContextId={selectedContextId}
               onSelect={setSelectedContextId}
               onAdd={handleAddContext}
@@ -330,6 +338,7 @@ export default function WorkspaceManage({ workspaceId, onNav }: Props) {
           <DigestList
             digests={digests}
             filter={filter}
+            onClearFilter={clearFilter}
             onOpen={handleOpenNode}
             onRebuild={(id) => { void store.refreshDigest(id); }}
             onExport={(id) =>

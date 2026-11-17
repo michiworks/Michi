@@ -181,7 +181,7 @@ describe('ModelPane Kiro sidecar title setting', () => {
     render(<ModelPane activeProjectId={null} />);
     expect(screen.getByText('Key saved')).toBeTruthy();
     expect(screen.queryByLabelText('Google AI API key')).toBeNull();
-    expect(screen.getByRole('link', { name: 'Open Google AI key console' }).getAttribute('href')).toBe('https://aistudio.google.com/apikey');
+    expect(screen.getByRole('link', { name: 'Open Google AI key console ↗' }).getAttribute('href')).toBe('https://aistudio.google.com/apikey');
 
     fireEvent.click(screen.getByRole('button', { name: 'Verify' }));
     await waitFor(() => expect(verifyProviderKey).toHaveBeenCalledExactlyOnceWith('google', { key: undefined, model: 'gemini-4-argon' }));
@@ -194,6 +194,8 @@ describe('ModelPane Kiro sidecar title setting', () => {
     expect(screen.queryByRole('button', { name: 'Replace…' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByLabelText('Google AI API key')).toBeNull();
+    // Replace… takes the field's place, and focus with it.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Replace…' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Replace…' }));
     fireEvent.change(screen.getByLabelText('Google AI API key'), { target: { value: 'new-key' } });
@@ -201,6 +203,7 @@ describe('ModelPane Kiro sidecar title setting', () => {
     await waitFor(() => expect(saveProviderKey).toHaveBeenCalledExactlyOnceWith('google', 'new-key'));
     await waitFor(() => expect(screen.queryByLabelText('Google AI API key')).toBeNull());
     expect(refreshAgentStatus).toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Replace…' }));
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
     await waitFor(() => expect(clearProviderKey).toHaveBeenCalledExactlyOnceWith('google'));

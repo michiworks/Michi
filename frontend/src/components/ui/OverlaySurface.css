@@ -7,3 +7,12 @@
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+
+/* Tooltips are hoverable (WCAG 1.4.13): this transparent ring spans the gap
+   to the anchor (--tip-gap, set by Tooltip from its offset; 1px more for the
+   tip's border), so the anchor, the gap and the tip are one hover area. */
+.ui-tooltip::before {
+  content: '';
+  position: absolute;
+  inset: calc(-1px - var(--tip-gap));
+}

@@ -1,7 +1,7 @@
 import React from 'react';
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from 'motion/react';
 import type { BlockSource, MichiPageBlock, PageBlock, PageEditOp, SpaceSummaryDto } from 'michi-shared';
-import { DUR, EASE, TRANSITION } from '../../../motion/tokens';
+import { DUR, TRANSITION } from '../../../motion/tokens';
 import { PAGE_COMPONENT_LIMITS, isComponentRecord, validatePageComponentProps } from 'michi-shared';
 import type { JsonSchema, PageComponent } from 'michi-shared';
 import { createWorkspaceDatabase, listWorkspaceDatabases, patchPage } from '../../../services/api/pages';
@@ -25,7 +25,8 @@ import SpaceOutline from './SpaceOutline';
 import './spaces.css';
 import { DocumentShell } from '../content/page/DocumentShell';
 import { MichiMenu } from '../content/page/MichiMenu';
-import { MoreHorizontal, Sparkles, Settings2 } from 'lucide-react';
+import { MoreIcon, SettingsIcon } from '../icons';
+import { CompanionGlyph } from '../companion/CompanionGlyph';
 import { useSpaces } from '../../../state/pages/useSpaces';
 import { formatMichiAgo } from '../content/michiFormat';
 // A Space page is laid out like the workspace homes: their column, header and block styles.
@@ -47,6 +48,7 @@ import type { OpenNativePageRoute } from './SpacesPage';
 import { NewChatSheetSlot, PageProgressCards } from './conversation/SpaceConversationSlot';
 import { openNewChatSheet } from '../../../state/spaceConversations/store';
 import { useLayoutRulesMenu } from './layoutRules/LayoutRulesMenu';
+import { usePageArrival } from './usePageArrival';
 
 export type SpaceRoute = { type: 'spaces' } | { type: 'space'; pageId: string; workspaceId: string; backendConnectionId: string };
 
@@ -137,8 +139,6 @@ function blockSourceCount(blocks: readonly PageBlock[]): number {
   return new Set(blocks.flatMap((block) => block.sources?.map((source) => source.nodeId) ?? [])).size;
 }
 
-/** The page fades in from its skeleton. */
-const PAGE_IN_MS = 120;
 /** The page column of a page's shell. */
 const docColumn = (shell: HTMLElement | null) => shell?.querySelector<HTMLElement>(':scope > .area-settings__doc') ?? null;
 type PanelCustom = { still: boolean; column: () => Element | null };
@@ -200,6 +200,21 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
   // The Spaces sidebar carries the page tree; the outline (Move, headings) opens as a panel from the page menu.
   const [panel, setPanel] = React.useState<'pages' | 'maintenance' | 'components' | 'activity' | 'settings' | null>(null);
   const [menuAnchor, setMenuAnchor] = React.useState<HTMLElement | null>(null);
+  // A closing panel gives focus to the header control panels open from, once
+  // the page shows it again: the gear for settings, the ⋯ for the rest (ST-10).
+  const settingsButtonRef = React.useRef<HTMLButtonElement>(null);
+  const actionsButtonRef = React.useRef<HTMLButtonElement>(null);
+  const panelReturn = React.useRef<React.RefObject<HTMLButtonElement | null> | null>(null);
+  const closePanel = () => {
+    if (!panel) return;
+    panelReturn.current = panel === 'settings' ? settingsButtonRef : actionsButtonRef;
+    setPanel(null);
+  };
+  React.useLayoutEffect(() => {
+    if (panel || !panelReturn.current) return;
+    panelReturn.current.current?.focus({ preventScroll: true });
+    panelReturn.current = null;
+  }, [panel]);
   const layoutRules = useLayoutRulesMenu({ pageId: route.pageId, backendConnectionId: route.backendConnectionId, readOnly });
   const [componentInsertAfter, setComponentInsertAfter] = React.useState<string | null | undefined>(undefined);
 
@@ -244,7 +259,7 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
         block: { type: 'component', componentId: component.id, pinnedVersion: version, props, height },
       }]);
       setComponentInsertAfter(undefined);
-      setPanel(null);
+      closePanel();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : 'Could not insert the component.');
     }
@@ -400,22 +415,15 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
   }), [page?.title, route.backendConnectionId, route.pageId, route.workspaceId, workspaceName]);
   const startConversation = React.useCallback((text: string, workspaceId: string) => { openNewChatSheet({ text, workspaceId }); }, []);
 
-  // A page that was loading (its skeleton on screen) fades in; one already read is simply there.
+  // A page that was loading (its skeleton on screen) arrives as Home does; one already read is simply there.
   const skeleton = pageState.status === 'loading' && !page;
-  const hasPage = Boolean(page);
+  const arriving = usePageArrival(skeleton, route.pageId);
   const shellRef = React.useRef<HTMLElement>(null);
   const pageColumn = React.useCallback(() => docColumn(shellRef.current), []);
-  const sawSkeleton = React.useRef(false);
-  React.useLayoutEffect(() => {
-    if (skeleton) { sawSkeleton.current = true; return; }
-    if (!hasPage || !sawSkeleton.current) return;
-    sawSkeleton.current = false;
-    const column = docColumn(shellRef.current);
-    if (typeof column?.animate === 'function') column.animate([{ opacity: 0 }, { opacity: 1 }], { duration: PAGE_IN_MS, easing: `cubic-bezier(${EASE.out.join(',')})` });
-  }, [skeleton, hasPage]);
 
   const shell = { layout: 'column' as const, className: 'space-doc spaces-home spaces-space', columnClassName: 'spaces-home__doc', scrollerRef: shellRef };
-  if (skeleton) return <DocumentShell label="Page" {...shell} busy><div className="michi-doc-skeleton" aria-hidden="true"><span style={{ width: 120, height: 10 }} /><span style={{ width: '46%', height: 24 }} /><span style={{ width: '62%' }} /><span style={{ width: '100%', height: 64 }} /></div><p className="space-doc__status" role="status">Loading page…</p></DocumentShell>;
+  const skeletonBars = <div className="michi-doc-skeleton" aria-hidden="true"><span style={{ width: 120, height: 10 }} /><span style={{ width: '46%', height: 24 }} /><span style={{ width: '62%' }} /><span style={{ width: '100%', height: 64 }} /></div>;
+  if (skeleton) return <DocumentShell label="Page" {...shell} busy>{skeletonBars}<p className="space-doc__status" role="status">Loading page…</p></DocumentShell>;
   if (pageState.status === 'error' && !page) return <DocumentShell label="Page" {...shell}><p className="michi-doc-unknown michi-doc-retry" role="alert">{pageState.error || 'This page could not be loaded.'} <button type="button" className="michi-doc-link-btn" onClick={pageState.refresh}>Retry</button> <button type="button" className="michi-doc-link-btn" onClick={onBack}>All Pages</button></p></DocumentShell>;
   if (!page) return <DocumentShell label="Page" {...shell}><p className="michi-doc-unknown" role="alert">This page is unavailable. It may have been deleted or disconnected from its backend. <button type="button" className="michi-doc-link-btn" onClick={onBack}>All Pages</button></p></DocumentShell>;
 
@@ -430,11 +438,11 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
     updatedAt: page.updatedAt,
     state: pageState.stale ? 'connection unavailable · edits paused' : busy ? 'saving…' : null,
   });
-  const panelHeader = (title: string) => <header className="space-panel__head"><span className="michi-doc-caption">{title}</span><button type="button" className="michi-doc-link-btn" onClick={() => setPanel(null)}>Close</button></header>;
+  const panelHeader = (title: string) => <header className="space-panel__head"><span className="michi-doc-caption">{title}</span><button type="button" className="michi-doc-link-btn" onClick={closePanel}>Close</button></header>;
 
   if (panel === 'settings' && !readOnly) return <DocumentShell label={`${page.title} settings`} {...shell}>
     <SpaceSettings key={page.id} page={page} connectionId={route.backendConnectionId} spaceId={rootId ?? page.id} spaceTitle={root?.title ?? page.title}
-      onBack={() => setPanel(null)} onComponents={() => setPanel('components')} onRename={async (title) => {
+      onBack={closePanel} onComponents={() => setPanel('components')} onRename={async (title) => {
         await patchPage(page.id, { title, revision: page.revision }, identity);
         pageState.refresh(); refreshTree(); notifyPageChanged({ ...identity, pageId: page.id });
       }} />
@@ -443,7 +451,12 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
   return <DocumentShell
     label={page.title || 'Untitled page'}
     {...shell}
-    after={menuAnchor && <MichiMenu
+    data={arriving ? { 'data-arriving': '' } : undefined}
+    after={<>
+    {/* The skeleton fades out under the page as it arrives, in a copy of the column laid over it. */}
+    {arriving && <div className="area-settings__doc spaces-home__doc spaces-arrival-ghost" aria-hidden="true" inert>{skeletonBars}<p className="space-doc__status">Loading page…</p></div>}
+    <AnimatePresence>{menuAnchor && <MichiMenu
+      key="page-actions"
       anchor={menuAnchor}
       label="Page actions"
       width={232}
@@ -463,7 +476,8 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
         { id: 'trash', label: isRoot ? 'Move page to trash' : 'Move to trash', danger: true, disabled: readOnly, onSelect: () => { const summary = pageTree.find((item) => item.id === page.id); if (summary) void trash(summary); } },
       ]}
       onClose={(restore) => { const anchor = menuAnchor; setMenuAnchor(null); if (restore) anchor.focus({ preventScroll: true }); }}
-    />}
+    />}</AnimatePresence>
+    </>}
   >
     {pageActions.dialog}
     <NewChatSheetSlot scope={conversationScope} />
@@ -473,10 +487,10 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
       <div className="spaces-home__title-row michi-doc-title-row">
         <h1 className="spaces-home__title">{page.title || 'Untitled page'}</h1>
         <span className="spaces-home-spacer" />
-        {!readOnly && <button type="button" className="michi-doc-title__open" aria-label="Page settings" onClick={() => setPanel('settings')}><Settings2 size={16} strokeWidth={1.6} /></button>}
-        <button type="button" className="michi-doc-title__open space-doc__menu" aria-label="Page actions" aria-haspopup="menu" aria-expanded={Boolean(menuAnchor)} onClick={(event) => setMenuAnchor(menuAnchor ? null : event.currentTarget)}><MoreHorizontal size={16} strokeWidth={1.6} /></button>
+        {!readOnly && <button ref={settingsButtonRef} type="button" className="michi-doc-title__open" aria-label="Page settings" onClick={() => setPanel('settings')}><SettingsIcon size="lg" /></button>}
+        <button ref={actionsButtonRef} type="button" className="michi-doc-title__open space-doc__menu" aria-label="Page actions" aria-haspopup="menu" aria-expanded={Boolean(menuAnchor)} onClick={(event) => setMenuAnchor(menuAnchor ? null : event.currentTarget)}><MoreIcon size="lg" /></button>
       </div>
-      <p className="michi-doc-meta space-doc__source"><Sparkles size={12} strokeWidth={1.7} aria-hidden="true" /><span>{meta}</span></p>
+      <p className="michi-doc-meta space-doc__source"><CompanionGlyph size={12} /><span>{meta}</span></p>
     </header>
     {(pageState.error || actionError) && <p className="space-doc__notice" role="alert">{actionError || pageState.error} <button type="button" className="michi-doc-link-btn" onClick={() => { setActionError(null); pageState.refresh(); }}>Retry</button></p>}
     {pageState.stale && <p className="space-doc__notice" role="status">This page is showing its last saved version. Reconnect and retry before editing.</p>}
@@ -500,12 +514,12 @@ function SpaceView({ route, onBack, onOpenPage, onOpenSource, changesPanel }: {
       onTrash={(target) => void trash(target)}
     /></section></PanelReveal>}
     {panel === 'maintenance' && !readOnly && <PanelReveal column={pageColumn} key="maintenance"><section className="space-panel" aria-label="Conversation maintenance">{panelHeader('Conversation maintenance')}<MaintenanceStatus backendConnectionId={route.backendConnectionId} workspaceId={route.workspaceId} spaceId={rootId ?? page.id} spaceTitle={root?.title ?? page.title} pendingProposals={page.pendingProposals} /></section></PanelReveal>}
-    {panel === 'components' && !readOnly && <PanelReveal column={pageColumn} key="components"><section className="space-panel space-panel--components" aria-label="Components"><ComponentLibrary workspaceId={route.workspaceId} connectionId={route.backendConnectionId} onClose={() => setPanel(null)} onInsertBlock={async (block) => {
+    {panel === 'components' && !readOnly && <PanelReveal column={pageColumn} key="components"><section className="space-panel space-panel--components" aria-label="Components"><ComponentLibrary workspaceId={route.workspaceId} connectionId={route.backendConnectionId} onClose={closePanel} onInsertBlock={async (block) => {
       const result = await applyEdits([{ op: 'insert', block, after: componentInsertAfter === undefined ? page.blocks.at(-1)?.id ?? null : componentInsertAfter }], page.revision);
       if (result !== 'ok') throw new Error('Could not add this component. Refresh the page and try again.');
-      setPanel(null);
+      closePanel();
     }} onInsert={(component, version) => insertComponent(component, version)} onOpenSource={openExactSource} /></section></PanelReveal>}
-    {panel === 'activity' && <PanelReveal column={pageColumn} key="activity"><section className="space-panel" aria-label="Activity">{panelHeader('Activity')}<PageChanges changes={changes} {...changeHandlers} onRevertBatch={(batchId) => pageState.revertBatch(batchId)} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} hasMore={pageState.hasMoreChanges} onLoadMore={pageState.loadMoreChanges} /></section></PanelReveal>}
+    {panel === 'activity' && <PanelReveal column={pageColumn} key="activity"><section className="space-panel" aria-label="Activity">{panelHeader('Activity')}<PageChanges changes={changes} {...changeHandlers} onRevertBatch={(batchId) => pageState.revertBatch(batchId)} onOpenSource={openChangeSource} loading={pageState.status === 'loading'} readOnly={readOnly} error={pageState.error} hasMore={pageState.hasMoreChanges} onLoadMore={pageState.loadMoreChanges} /></section></PanelReveal>}
     </AnimatePresence>
     <NativePageDocument page={page} onEdit={applyEdits} onOpenPage={changePage} onOpenSource={(source) => openExactSource({ kind: 'chat', ...source })} sourceLabel={(source) => sourceLabel({ kind: 'chat', ...source })} onAskAssistant={targeting.onAskAssistant} onSelectionChange={targeting.onSelectionChange} selectedBlockIds={targeting.selectedBlockIds} selectOnClick={targeting.selectOnClick} renderDatabaseRef={renderDatabaseRef} renderComponent={renderComponent} renderThreads={renderThreads} renderTaskView={renderTaskView} onOpenConversation={openConversation} onStartConversation={readOnly ? undefined : startConversation} renderDecorations={(block) => page ? <><PageChangeTargets quiet changes={changes} target={{ kind: 'block', pageId: page.id, blockId: block.id }} sourceLabel={sourceLabel} {...changeHandlers} onOpenSource={openChangeSource} loading={readOnly} error={pageState.error} /></> : null} addEntries={addEntries} slotAddEntries={slotAddEntries} readOnly={readOnly} />
   </DocumentShell>;

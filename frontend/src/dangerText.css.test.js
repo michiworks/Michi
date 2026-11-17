@@ -10,7 +10,6 @@ import { expect, it } from 'vitest';
 // fails, and so does one that is gone.
 const KNOWN = {
   // × and ⚠ marks beside error words.
-  'components/terminal/AgentBlockVariants.tsx': 1,
   'components/terminal/PaneCaption.tsx': 1,
   'components/terminal/PaneMessageList.tsx': 1,
   'components/terminal/backgroundWork/workCardParts.tsx': 1,

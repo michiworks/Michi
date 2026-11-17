@@ -8,9 +8,9 @@ import { CompanionToday } from './CompanionToday';
 
 /** Today as the panel shows it: from the real store, which marks what it shows seen. */
 function Today() {
-  const { snapshot, catchUp, arrivals } = useCompanion();
+  const { snapshot, arrivals } = useCompanion();
   return snapshot
-    ? <CompanionToday snapshot={snapshot} catchUp={catchUp} arrivals={arrivals} onOpenItem={() => {}} onAsk={() => {}} onAction={() => {}} onOpenSettings={() => {}} />
+    ? <CompanionToday snapshot={snapshot} arrivals={arrivals} onOpenItem={() => {}} onAsk={() => {}} onOpenSettings={() => {}} />
     : null;
 }
 

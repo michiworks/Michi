@@ -5,7 +5,7 @@ import { normalizeBrowserUrl } from '../../state/paneItems';
 import { useChatActions } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { getElectron, type BrowserSurfaceState } from '../../lib/electronBridge';
-import { ChevronLeftIcon, ChevronRightIcon, RetryIcon, StopIcon, ExternalLinkIcon } from './icons';
+import { ChevronLeftIcon, ChevronRightIcon, RetryIcon, CloseIcon, ExternalLinkIcon } from './icons';
 
 const EMPTY_STATE: BrowserSurfaceState = {
   surfaceId: '', url: '', title: '', loading: false, canGoBack: false, canGoForward: false,
@@ -16,7 +16,7 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
   const closePaneRef = useRef(closePane);
   closePaneRef.current = closePane;
   // Never dimmed: the native page cannot share the unfocused dim.
-  const shellStyle = usePaneShellStyle(item.id, { dim: false });
+  const { style: shellStyle } = usePaneShellStyle(item.id, { dim: false });
   const viewportRef = useRef<HTMLDivElement>(null);
   // Don't make the native surface visible until creation has completed.
   // Early set-bounds IPC messages (from the drift loop) that arrive while the
@@ -203,12 +203,14 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
   };
 
   const desktopAvailable = !!electron?.browserCreate;
+  // Outside the desktop app this can only be a pane restored from a saved layout, with nothing to show.
+  useEffect(() => { if (!desktopAvailable) closePaneRef.current(item.id); }, [desktopAvailable, item.id]);
   return (
     <div data-pane-id={item.id} data-pane-kind="browser" className="terminal-pane" onMouseDown={() => focusPane(item.id)} style={shellStyle}>
       <div style={{ height: 36, padding: '0 8px', display: 'flex', alignItems: 'center', gap: 4, borderBottom: '1px solid var(--term-line)', flexShrink: 0 }}>
-        <button type="button" className="t-icon-btn" disabled={!state.canGoBack} onClick={() => electron?.browserBack?.(item.surfaceId)} aria-label="Back"><ChevronLeftIcon size={14} /></button>
-        <button type="button" className="t-icon-btn" disabled={!state.canGoForward} onClick={() => electron?.browserForward?.(item.surfaceId)} aria-label="Forward"><ChevronRightIcon size={14} /></button>
-        <button type="button" className="t-icon-btn" onClick={() => state.loading ? electron?.browserStop?.(item.surfaceId) : electron?.browserReload?.(item.surfaceId)} aria-label={state.loading ? 'Stop' : 'Reload'}>{state.loading ? <StopIcon size={14} /> : <RetryIcon size={14} />}</button>
+        <button type="button" className="t-icon-btn" disabled={!state.canGoBack} onClick={() => electron?.browserBack?.(item.surfaceId)} aria-label="Back"><ChevronLeftIcon /></button>
+        <button type="button" className="t-icon-btn" disabled={!state.canGoForward} onClick={() => electron?.browserForward?.(item.surfaceId)} aria-label="Forward"><ChevronRightIcon /></button>
+        <button type="button" className="t-icon-btn" onClick={() => state.loading ? electron?.browserStop?.(item.surfaceId) : electron?.browserReload?.(item.surfaceId)} aria-label={state.loading ? 'Stop' : 'Reload'}>{state.loading ? <CloseIcon /> : <RetryIcon />}</button>
         <form onSubmit={navigate} style={{ flex: 1, minWidth: 0 }}>
           <input
             value={address}
@@ -220,10 +222,9 @@ export default function BrowserPane({ item, active = true }: { item: BrowserPane
             style={{ height: 25, padding: '0 9px', fontSize: 'var(--fs-sm)' }}
           />
         </form>
-        <button type="button" className="t-icon-btn" onClick={() => { if (state.url) openExternalUrl(state.url); }} aria-label="Open in system browser"><ExternalLinkIcon size={14} /></button>
+        <button type="button" className="t-icon-btn" onClick={() => { if (state.url) openExternalUrl(state.url); }} aria-label="Open in system browser"><ExternalLinkIcon /></button>
       </div>
       <div ref={viewportRef} style={{ marginLeft: desktopAvailable ? 8 : 0, flex: 1, minHeight: 0, position: 'relative', background: 'var(--term-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        {!desktopAvailable ? <div style={{ maxWidth: 280, padding: 20, textAlign: 'center', color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', lineHeight: 1.6 }}>Native browser surfaces are available in the Michi desktop app. Web deployments cannot bypass site iframe policies.</div> : null}
         {state.error ? <div style={{ position: 'absolute', inset: 0, padding: 20, background: 'var(--term-bg)', color: 'var(--term-danger-text)', fontSize: 'var(--fs-sm)', zIndex: 1 }}>⚠ {state.error}</div> : null}
       </div>
     </div>

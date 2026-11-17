@@ -23,10 +23,17 @@ export function ForgotBlock({ block }: BlockProps) {
           const detail = str(it.detail).trim();
           return (
             <li key={i} className="michi-doc-forgot__item" data-state={shipped ? 'shipped' : 'unfinished'}>
-              {/* The words beside it say the state; the glyph only shows it. */}
+              {/* The glyph only shows the state; the words beside it say it, and for what shipped they give the day instead. */}
               <span className="michi-doc-forgot__glyph" aria-hidden="true"><ThreadStateDot kind={shipped ? 'done' : 'stalled'} size={10} /></span>
               <span className="michi-doc-forgot__title">{str(it.title)}</span>
-              <span className="michi-doc-forgot__meta">{shipped ? `shipped${when ? ` ${when.text}` : ''}` : 'half done'}</span>
+              <span className={shipped && !when ? 'michi-doc-forgot__meta sr-only' : 'michi-doc-forgot__meta'}>
+                {shipped ? (
+                  <>
+                    <span className="sr-only">shipped </span>
+                    {when && (when.dateTime ? <time dateTime={when.dateTime}>{when.text}</time> : when.text)}
+                  </>
+                ) : 'half done'}
+              </span>
               {detail && <span className="michi-doc-forgot__detail">{detail}</span>}
             </li>
           );

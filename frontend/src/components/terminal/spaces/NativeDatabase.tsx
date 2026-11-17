@@ -18,6 +18,7 @@ import { pageDatabaseForMichiView, pageDatabaseOps } from '../content/db/nativeD
 import { VIEW_TYPE_LABEL } from '../content/db/dbLabels';
 import { pickView } from '../content/db/dbPrefs';
 import type { DbEditOptions } from '../content/db/views/viewTypes';
+import type { MichiNoticeTone } from '../content/page/editorTypes';
 import { ChangeCard, type AcceptedPageEdit } from './ChangeCard';
 import { workspaceConversations } from './taskConversations';
 import { useTaskUpkeep } from './useTaskUpkeep';
@@ -71,7 +72,8 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
     databaseId,
   });
   const [selectedView, setSelectedView] = useState<string | null>(viewId ?? null);
-  const [writeError, setWriteError] = useState<string | null>(null);
+  // A write that failed says so as an alert; a refused edit says why as plain information.
+  const [writeNotice, setWriteNotice] = useState<{ text: string; tone: MichiNoticeTone } | null>(null);
   const [failedDraft, setFailedDraft] = useState<{ ops: MichiDbEditOp[]; label: string } | null>(null);
   useEffect(() => { setSelectedView(viewId ?? null); }, [databaseId, viewId]);
   const displayDb = useMemo(() => database ? pageDatabaseForMichiView(database) : null, [database]);
@@ -103,7 +105,7 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
   // `undoing`: this write is an Undo's inverse; if it cannot be applied (its anchor row is gone), the Undo says so rather than keep a draft whose Retry can never work.
   const save = useCallback(async (ops: MichiDbEditOp[], label: string, options?: DbEditOptions, undoing = false): Promise<boolean> => {
     if (!database || ownerReadOnly || status !== 'ready' || stale || ops.length === 0) return false;
-    setWriteError(null);
+    setWriteNotice(null);
     try {
       const answer = await edit(pageDatabaseOps(ops, database));
       setFailedDraft(null);
@@ -135,7 +137,7 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
       const conflict = pageEditFailure(cause) === 'stale';
       if (!conflict) refresh();
       if (undoing) return false;
-      setWriteError(conflict ? 'This database just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save this database");
+      setWriteNotice({ text: conflict ? 'This database just changed, so it was refreshed. Try again.' : cause instanceof Error ? cause.message : "Couldn't save this database", tone: 'error' });
       setFailedDraft({ ops, label });
       return false;
     }
@@ -166,11 +168,11 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
     afterChange();
   }, [afterChange, connectionId, workspaceId]);
   const decide = useCallback(async (change: PageChangeDto, action: 'accept' | 'dismiss', edited?: AcceptedPageEdit) => {
-    setWriteError(null);
+    setWriteNotice(null);
     try {
       await changePageChange(change.id, action, { backendConnectionId: connectionId, workspaceId }, edited ? { editedContent: edited } : undefined);
     } catch (cause) {
-      setWriteError(cause instanceof Error ? cause.message : "Couldn't save that just now.");
+      setWriteNotice({ text: cause instanceof Error ? cause.message : "Couldn't save that just now.", tone: 'error' });
     }
     afterChange();
   }, [afterChange, connectionId, workspaceId]);
@@ -197,7 +199,14 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
   } : null), [tasks, markOf, suggestionsOf, seen, loadOrigin, decide, openSource]);
 
   if (!database || !displayDb) {
-    if (status === 'error') return <div data-native-database="" data-database-id={databaseId}><p className="michi-doc-unknown" role="alert">{error ?? "Couldn't load this database"}</p></div>;
+    if (status === 'error') {
+      return (
+        <div className="michi-doc-retry" data-native-database="" data-database-id={databaseId}>
+          <p className="michi-doc-unknown" role="alert">{error ?? "Couldn't load this database"}</p>
+          <button type="button" className="michi-db-btn" onClick={refresh}>Retry</button>
+        </div>
+      );
+    }
     return <div data-native-database="" data-database-id={databaseId}><p className="michi-doc-unknown" role="status">Reading the database…</p></div>;
   }
 
@@ -247,7 +256,7 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
   const body = (
     <div data-native-database="" data-database-id={databaseId} data-compact={compact || undefined} data-presentation={asPage ? 'page' : undefined} data-tasks={tasks || undefined}>
       {head(shownType)}
-      {writeError && <p className="michi-doc-unknown" role="alert">{writeError}</p>}
+      {writeNotice && <p className="michi-doc-unknown" role={writeNotice.tone === 'error' ? 'alert' : 'status'}>{writeNotice.text}</p>}
       {failedDraft && (
         <div className="michi-doc-unknown" role="group" aria-label="Unsent database edit">
           <span>{failedDraft.label} is still an unsaved draft.</span>
@@ -276,7 +285,7 @@ function NativeDatabase({ databaseId, workspaceId, connectionId, viewId, compact
         threadOf={() => undefined}
         now={Date.now()}
         services={{
-          notice: (message) => setWriteError(message),
+          notice: (text, tone = 'info') => setWriteNotice({ text, tone }),
           ...(onAskRow ? { askRow: onAskRow } : {}),
         }}
         onAddCustomView={onAskDraft ? () => onAskDraft(customViewDraft(database.title)) : undefined}

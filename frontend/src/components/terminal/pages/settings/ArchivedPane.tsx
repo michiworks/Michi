@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArchiveRestore, Eye, GitBranch, MessageSquare, Search, Trash2 } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { ArchiveIcon, ArchiveRestoreIcon, BranchIcon, ChatIcon, EyeIcon, SearchIcon, TrashIcon } from '../../icons';
 import { toast } from 'sonner';
 import { useChatStore, useChatNodesSnapshot } from '../../../../state/chatStore';
 import { collectUndo, recordUndo } from '../../../../state/undoStack';
@@ -8,6 +9,7 @@ import { withoutSystemWorkspaces } from '../../../../state/assistant/systemWorks
 import { nodeMessageCount } from '../../../../state/nodeMessageCount';
 import { initialOf, workspaceAccent } from '../../workspaceAccent';
 import { ActionMenu } from '../../../ui/ActionMenu';
+import { menuOpenKey } from '../../../ContextMenu';
 import { Button } from '../../../ui/controls';
 import { plural } from 'michi-shared';
 import { relativeDeletion } from '../trashModel';
@@ -17,6 +19,7 @@ import { buildArchiveEntries, groupArchiveEntries, type ArchiveEntry, type Archi
 import {
   ConversationPreview, findRowButton, HistoryDetail, HistoryEmpty, HistoryGroup, HistoryLoading, HistoryRow, HistorySearch, HistoryToolbar, SelectionBar,
 } from './HistoryList';
+import { useFocusAfterChange } from './useFocusAfterChange';
 
 const wsStyle = (id: string) => ({ '--ws-accent': workspaceAccent(id) }) as React.CSSProperties;
 const noun = (entry: ArchiveEntry) => entry.kind === 'tree' ? 'Thread' : 'Node';
@@ -57,6 +60,10 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
   const menuEntry = menu ? lookup.get(menu.key) : undefined;
   const shownSelected = matching.filter(entry => selected.has(entry.key));
   const selecting = phone ? phoneSelecting : shownSelected.length > 0;
+  // Select gives way to the selection bar, and its Cancel or Escape to Select or the search.
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const selectRef = useRef<HTMLButtonElement>(null);
+  useFocusAfterChange(selecting, (now) => now ? cancelRef.current : phone ? selectRef.current : search.current);
 
   useEffect(() => { if (detailKey && !lookup.has(detailKey)) setDetailKey(null); }, [detailKey, lookup]);
   useEffect(() => {
@@ -147,19 +154,19 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
     });
   };
 
-  const row = (entry: ArchiveEntry) => <HistoryRow key={entry.key} id={entry.key} icon={entry.kind === 'tree' ? MessageSquare : GitBranch} title={entry.title} query={query}
+  const row = (entry: ArchiveEntry) => <HistoryRow key={entry.key} id={entry.key} icon={entry.kind === 'tree' ? ChatIcon : BranchIcon} title={entry.title} query={query}
     meta={entry.kind === 'node'
       ? [entry.fromTitle ? `Node from “${entry.fromTitle}”` : 'Archived node', ...(phone ? [] : [plural(entry.messageCount, 'message')])]
       : [plural(entry.nodeCount, 'node'), ...(phone ? [] : [plural(entry.messageCount, 'message')])]}
     when={{ label: relativeDeletion(entry.archivedAt, now), dateTime: entry.archivedAt ? new Date(entry.archivedAt).toISOString() : undefined,
       title: entry.archivedAt ? `Archived ${new Date(entry.archivedAt).toLocaleString()}` : undefined }}
     selected={selected.has(entry.key)} selecting={selecting} busy={false} menuOpen={menu?.key === entry.key}
-    primary={{ label: 'Unarchive', icon: ArchiveRestore }}
+    primary={{ label: 'Unarchive', icon: ArchiveRestoreIcon }}
     onOpen={() => openDetail(entry)} onToggle={() => toggle(entry.key)} onPrimary={() => unarchive([entry])}
     onMenu={anchor => setMenu(current => current?.key === entry.key ? null : { key: entry.key, anchor })} />;
 
   if (detail) return <div className="settings-history" ref={root}>
-    <HistoryDetail key={detail.key} backLabel="All archived" onBack={closeDetail} icon={detail.kind === 'tree' ? MessageSquare : GitBranch} kind={noun(detail)} title={detail.title}
+    <HistoryDetail key={detail.key} backLabel="All archived" onBack={closeDetail} icon={detail.kind === 'tree' ? ChatIcon : BranchIcon} kind={noun(detail)} title={detail.title}
       note={`Returns to ${detail.project.name}`}
       details={[
         { label: 'Workspace', value: <span className="settings-history__ws" style={wsStyle(detail.project.id)}>{detail.project.name}</span> },
@@ -168,8 +175,8 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
         { label: 'Contains', value: `${plural(detail.nodeCount, 'node')} · ${plural(detail.messageCount, 'message')}` },
       ]}
       actions={<>
-        <Button variant="primary" onClick={() => unarchive([detail])}><ArchiveRestore size={15} aria-hidden="true" />Unarchive</Button>
-        <Button onClick={() => moveToTrash([detail])}><Trash2 size={15} aria-hidden="true" />Move to Trash</Button>
+        <Button variant="primary" onClick={() => unarchive([detail])}><ArchiveRestoreIcon aria-hidden="true" />Unarchive</Button>
+        <Button onClick={() => moveToTrash([detail])}><TrashIcon aria-hidden="true" />Move to Trash</Button>
       </>}>
       {detail.root && <ConversationPreview key={detail.root.nodeId} node={detail.root}
         messageCount={nodeMessageCount(detail.root)} />}
@@ -178,10 +185,10 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
 
   let list: React.ReactNode;
   if (!hydrated) list = <HistoryLoading label="Loading archived threads" />;
-  else if (!entries.length) list = <HistoryEmpty icon={Archive} title="Nothing archived">
+  else if (!entries.length) list = <HistoryEmpty icon={ArchiveIcon} title="Nothing archived">
     Archive a thread from its menu in the sidebar to keep it out of the way without deleting it. Archived threads never expire.
   </HistoryEmpty>;
-  else if (!matching.length) list = <HistoryEmpty icon={Search} title="No matching threads"
+  else if (!matching.length) list = <HistoryEmpty icon={SearchIcon} title="No matching threads"
     action={<Button size="sm" onClick={() => { setQuery(''); setWorkspaceId(null); search.current?.focus(); }}>Show all threads</Button>}>
     {`Nothing archived matches "${query.trim()}".`}
   </HistoryEmpty>;
@@ -193,10 +200,10 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
   return <div className="settings-history" ref={root} aria-busy={!hydrated}>
     <p className="settings-history__lede">Threads you archived are out of the sidebar but keep everything, and they never expire. Unarchive one to put it back in its workspace.</p>
     {hydrated && entries.length > 0 && <HistoryToolbar selecting={selecting} onClearSelection={clearSelection}>
-      {selecting ? <SelectionBar count={shownSelected.length} total={matching.length} onCancel={clearSelection}
+      {selecting ? <SelectionBar count={shownSelected.length} total={matching.length} onCancel={clearSelection} cancelRef={cancelRef}
         onToggleAll={() => setSelected(shownSelected.length === matching.length ? new Set() : new Set(matching.map(entry => entry.key)))}>
-        <Button disabled={!shownSelected.length} onClick={() => unarchive(shownSelected)}><ArchiveRestore size={13} aria-hidden="true" />Unarchive</Button>
-        <Button disabled={!shownSelected.length} onClick={() => moveToTrash(shownSelected)}><Trash2 size={13} aria-hidden="true" />Move to Trash</Button>
+        <Button disabled={!shownSelected.length} onClick={() => unarchive(shownSelected)}><ArchiveRestoreIcon aria-hidden="true" />Unarchive</Button>
+        <Button disabled={!shownSelected.length} onClick={() => moveToTrash(shownSelected)}><TrashIcon aria-hidden="true" />Move to Trash</Button>
       </SelectionBar> : <>
         <HistorySearch inputRef={search} value={query} onChange={value => { setQuery(value); setMenu(null); }} label="Search archived threads" placeholder="Search archived threads" />
         {archivedIn.length > 1 && <select className="ui-select" aria-label="Workspace" value={shownWorkspace ?? ''} onChange={event => setWorkspaceId(event.target.value || null)}>
@@ -208,14 +215,14 @@ export function ArchivedPane({ onNav }: { onNav?: (page: PageId) => void }) {
           <option value="oldest">Oldest first</option>
           <option value="name">Name</option>
         </select>}
-        {phone && <Button onClick={() => setPhoneSelecting(true)}>Select</Button>}
+        {phone && <Button ref={selectRef} onClick={() => setPhoneSelecting(true)}>Select</Button>}
       </>}
     </HistoryToolbar>}
     <div data-history-selecting={selecting || undefined}>{list}</div>
-    {menu && menuEntry && <ActionMenu anchor={menu.anchor} onClose={() => setMenu(null)} label="Archived actions" items={[
-      { id: 'preview', label: 'Preview', icon: <Eye size={14} aria-hidden="true" />, onSelect: () => openDetail(menuEntry) },
-      { id: 'unarchive', label: 'Unarchive', icon: <ArchiveRestore size={14} aria-hidden="true" />, onSelect: () => unarchive([menuEntry]) },
-      { id: 'trash', label: 'Move to Trash', icon: <Trash2 size={14} aria-hidden="true" />, dividerBefore: true, onSelect: () => moveToTrash([menuEntry]) },
-    ]} />}
+    <AnimatePresence>{menu && menuEntry && <ActionMenu key={menuOpenKey(menu)} anchor={menu.anchor} onClose={() => setMenu(null)} label="Archived actions" items={[
+      { id: 'preview', label: 'Preview', icon: <EyeIcon aria-hidden="true" />, onSelect: () => openDetail(menuEntry) },
+      { id: 'unarchive', label: 'Unarchive', icon: <ArchiveRestoreIcon aria-hidden="true" />, onSelect: () => unarchive([menuEntry]) },
+      { id: 'trash', label: 'Move to Trash', icon: <TrashIcon aria-hidden="true" />, dividerBefore: true, onSelect: () => moveToTrash([menuEntry]) },
+    ]} />}</AnimatePresence>
   </div>;
 }

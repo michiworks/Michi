@@ -74,7 +74,7 @@ import {
   whenBackendConnectionConfirmed,
 } from '../config/backendConnectionState';
 import type { TreeMessagePage } from '../services/api';
-import { fetchRemoteTreeFirstPage, type TreeMessageRequests } from './treeMessageRequests';
+import { fetchTreeFirstPage, opensOnFirstPage, type TreeMessageRequests } from './treeMessageRequests';
 import {
   defaultRemoteSnapshotCache,
   type CachedRemoteConnection,
@@ -92,6 +92,7 @@ import {
   workspaceBackendApiBase,
   type BackendConnectionSummary,
 } from '../config/backendConnections';
+import { isPhoneLayout } from '../hooks/usePhoneLayout';
 
 // Note: the inbound load path for `Project.aiGlobalContext` lives in
 // `chatHydration.ts` (which actually maps backend workspace rows to Project
@@ -591,11 +592,13 @@ export function serializeMessageRowsForNode(
     // Mirror every assistant metadata field the backend projection writes
     // (turnPersistence.recipes durableMessageMetadata): a write-back that
     // omits one silently erases it from the row. A cleared plan (`[]`) counts.
+    // turnEnd rides along but never forces a write: a row written null keeps
+    // the backend's metadata whole (COALESCE), its usage included.
     const metadata = m.role === 'assistant'
       ? (Array.isArray(m.plan) || persisted.steeringReports?.length || persisted.subagents?.length
-          ? { plan: m.plan, steeringReports: persisted.steeringReports, subagents: persisted.subagents } : null)
+          ? { plan: m.plan, steeringReports: persisted.steeringReports, subagents: persisted.subagents, ...(m.turnEnd ? { turnEnd: m.turnEnd } : {}) } : null)
       : (m.steered || m.scheduledJobId || m.quotedText || m.attachments?.length || m.comments?.length
-          || m.companionTurn || m.companionRefs?.length
+          || m.companionTurn || m.companionRefs?.length || m.blockAnswer
           ? {
               ...(m.steered ? { steered: true } : {}),
               ...(m.scheduledJobId ? { scheduledJobId: m.scheduledJobId } : {}),
@@ -607,6 +610,7 @@ export function serializeMessageRowsForNode(
               // the stored row keeps them, so a write-back must not drop them.
               ...(m.companionTurn ? { companionTurn: m.companionTurn } : {}),
               ...(m.companionRefs?.length ? { companionRefs: m.companionRefs } : {}),
+              ...(m.blockAnswer ? { blockAnswer: m.blockAnswer } : {}),
             }
           : null);
     return [{
@@ -801,7 +805,7 @@ function hasReply(node: ChatNodeState): boolean {
  * `knownViewedAt` (the view mark the backend holds per node), a node viewed
  * since gets a patch carrying only `viewed_at`, after any upsert that creates
  * it, so a view never replays this window's pane or graph fields. A node with
- * no reply yet gets none. With `knownSeenCompletion` too, the mark also carries
+ * no reply yet gets none, unless its last turn failed. With `knownSeenCompletion` too, the mark also carries
  * a seen completion count newer than the backend's (`seen_completion_seq`),
  * only for nodes whose backend sent completion facts.
  */
@@ -867,7 +871,11 @@ export function buildExplicitWorkspaceCommands(
     for (const nodeId of delta.nodeIds) {
       const node = nodes[nodeId];
       const viewedAt = node?.viewedAt;
-      if (viewedAt === undefined || !hasReply(node)) continue;
+      // A failed turn is worth a view mark even with no reply to show for it:
+      // the sidebar's Failed mark (sidebarSelectors' nodeAttention) reads this
+      // against the failure's own time, and without it the mark would come
+      // back on every reload of a conversation the user has already opened.
+      if (viewedAt === undefined || !(hasReply(node) || node.status === 'error')) continue;
       const viewAdvanced = viewedAt > (knownViewedAt.get(nodeId) ?? 0);
       const seen = node.completionSeq !== undefined ? node.seenCompletionSeq : undefined;
       const seenAdvanced = seen !== undefined && knownSeenCompletion !== undefined
@@ -1540,6 +1548,12 @@ interface UseWorkspacePersistenceArgs {
   nodes: Record<string, ChatNodeState>;
   /** Monotonic structural channel version; high-frequency stream events keep it stable. */
   structureVersion: number;
+  /**
+   * The ref behind `structureVersion`: an install advances it like every other
+   * structural write, so structural selectors read the installed nodes.
+   * Optional for tests that mount the hook directly.
+   */
+  structureVersionRef?: MutableRefObject<number>;
   hydrated: boolean;
   nodesRef: MutableRefObject<Record<string, ChatNodeState>>;
   setProjects: Dispatch<SetStateAction<Project[]>>;
@@ -1570,6 +1584,7 @@ export function useWorkspacePersistence({
   activeProjectId,
   nodes,
   structureVersion,
+  structureVersionRef,
   hydrated,
   nodesRef,
   setProjects,
@@ -2788,7 +2803,7 @@ export function useWorkspacePersistence({
       const controller = new AbortController();
       const read: BootRead = {
         connectionId: bootConnectionId, workspaceId: preferredAtBoot, treeId, controller,
-        promise: fetchRemoteTreeFirstPage(preferredAtBoot, treeId, bootConnectionId, controller.signal),
+        promise: fetchTreeFirstPage(preferredAtBoot, treeId, bootConnectionId, controller.signal),
         page: null, done: false, claimed: false,
       };
       read.promise.then((page) => {
@@ -2869,6 +2884,7 @@ export function useWorkspacePersistence({
     });
     const installNodes = (next: Record<string, ChatNodeState>) => {
       nodesRef.current = next;
+      if (structureVersionRef) structureVersionRef.current += 1;
       setNodes(next);
     };
     const finishHydration = (hydrateSource: string) => {
@@ -3496,8 +3512,8 @@ export function useWorkspacePersistence({
                   nodes = backendState.nodes;
                 } else {
                   const rows = await Promise.race([
-                    remoteActive
-                      ? fetchRemoteTreeFirstPage(activeProject.id, activeProject.activeTreeId, activeConnection)
+                    opensOnFirstPage(activeProject, activeProject.activeTreeId, nodes, isPhoneLayout())
+                      ? fetchTreeFirstPage(activeProject.id, activeProject.activeTreeId, remoteActive ? activeConnection : activeProject.backendConnectionId)
                       : fetchTreeMessageSnapshot(activeProject.id, activeProject.activeTreeId, activeProject.backendConnectionId),
                     budget,
                   ]);
@@ -3578,7 +3594,7 @@ export function useWorkspacePersistence({
       window.removeEventListener(BACKEND_CONNECTION_UNAVAILABLE, onRemoteUnavailable);
       window.removeEventListener('michi:backend-connections-changed', onConnectionsChanged);
     };
-  }, [nodesRef, setActiveProjectId, setHydrated, setNodes, setProjects, userId]);
+  }, [nodesRef, setActiveProjectId, setHydrated, setNodes, setProjects, structureVersionRef, userId]);
 
   // This user's thread per remote workspace: the next boot reads it first.
   const activeProjectNow = projects.find((project) => project.id === activeProjectId);

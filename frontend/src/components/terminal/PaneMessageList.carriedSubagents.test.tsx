@@ -1,7 +1,7 @@
 import { render, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatNodeState, SubagentInfo } from '../../state/chatTypes';
-import { AgentBlockStyleOverride, DEFAULT_PREFS } from '../../state/prefs';
+import { DEFAULT_PREFS } from '../../state/prefs';
 import { PaneMessageList } from './PaneMessageList';
 
 vi.mock('../MarkdownContent', () => ({
@@ -29,18 +29,16 @@ const frame = (messageId: string) => document.querySelector(`.terminal-message-f
 
 function inlineRoster(state: ChatNodeState, messageId: string) {
   render(
-    <AgentBlockStyleOverride.Provider value="card">
-      <PaneMessageList
-        node={state}
-        prefs={DEFAULT_PREFS}
-        contentStyle={{}}
-        streaming
-        onRetryTurn={() => {}}
-        onEditUserMessage={() => {}}
-        onContinueFollowUp={() => {}}
-        onBranchFollowUp={() => {}}
-      />
-    </AgentBlockStyleOverride.Provider>,
+    <PaneMessageList
+      node={state}
+      prefs={DEFAULT_PREFS}
+      contentStyle={{}}
+      streaming
+      onRetryTurn={() => {}}
+      onEditUserMessage={() => {}}
+      onContinueFollowUp={() => {}}
+      onBranchFollowUp={() => {}}
+    />,
   );
   return within(frame(messageId)).queryByTestId('message-subagents');
 }
@@ -61,30 +59,50 @@ describe('PaneMessageList inline subagents', () => {
     expect(within(frame('a1')).queryByTestId('message-subagents')).toBeNull();
   });
 
+  /** Claude Agent calls, each launched by its own chip in the launch turn. */
+  const agent = (sessionId: string, patch: Partial<SubagentInfo> = {}): SubagentInfo => ({
+    sessionId, sessionName: sessionId, agentName: 'Explore', initialQuery: `Check ${sessionId}`, description: `Check ${sessionId}`,
+    status: 'terminated', background: true, group: '', dependsOn: [], parentToolCallId: `t-${sessionId}`, ...patch,
+  });
+  const done = (sessionId: string) => agent(sessionId, { outcome: 'completed', result: `${sessionId} is in dev` });
+  const launch = (ids: string[], patch: Partial<SubagentInfo> = {}): ChatNodeState['messages'][number] => ({
+    id: 'a1', role: 'assistant', text: 'The agents are reading them.', subagents: ids.map((id) => agent(id, patch)),
+    toolCalls: ids.map((id) => ({ id: `t-${id}`, title: 'Agent', kind: 'tool', status: 'completed' })),
+  });
+  const conversation = (messages: ChatNodeState['messages']): ChatNodeState => ({
+    nodeId: 'bg-node', kind: 'chat', chatId: null, projectId: 'bg-ws', status: 'idle', messagesLoaded: true, followUps: [],
+    messages: [{ id: 'u1', role: 'user', text: 'Check the worktrees.', toolCalls: [] }, ...messages],
+  });
+
   it('shows background agents reporting one turn at a time as one roster under the newest report', () => {
-    const agent = (sessionId: string, patch: Partial<SubagentInfo> = {}): SubagentInfo => ({
-      sessionId, sessionName: sessionId, agentName: 'Explore', initialQuery: `Check ${sessionId}`, description: `Check ${sessionId}`,
-      status: 'terminated', background: true, group: '', dependsOn: [], parentToolCallId: `t-${sessionId}`, ...patch,
-    });
-    const done = (sessionId: string) => agent(sessionId, { outcome: 'completed', result: `${sessionId} is in dev` });
-    const ids = ['w', 'x', 'y', 'z'];
-    const state: ChatNodeState = {
-      nodeId: 'bg-node', kind: 'chat', chatId: null, projectId: 'bg-ws', status: 'idle', messagesLoaded: true, followUps: [],
-      messages: [
-        { id: 'u1', role: 'user', text: 'Check the worktrees.', toolCalls: [] },
-        {
-          id: 'a1', role: 'assistant', text: 'Four agents are reading them.', subagents: ids.map((id) => agent(id)),
-          toolCalls: ids.map((id) => ({ id: `t-${id}`, title: 'Agent', kind: 'tool', status: 'completed' })),
-        },
-        { id: 'a2', role: 'assistant', text: 'w is summarized.', toolCalls: [], subagents: [done('w'), agent('x'), agent('y'), agent('z')] },
-        { id: 'a3', role: 'assistant', text: 'x reported.', toolCalls: [], subagents: [done('x'), agent('y'), agent('z')] },
-        { id: 'a4', role: 'assistant', text: 'y reported.', toolCalls: [], subagents: [done('y'), agent('z')] },
-      ],
-    };
+    const state = conversation([
+      launch(['w', 'x', 'y', 'z']),
+      { id: 'a2', role: 'assistant', text: 'w is summarized.', toolCalls: [], subagents: [done('w'), agent('x'), agent('y'), agent('z')] },
+      { id: 'a3', role: 'assistant', text: 'x reported.', toolCalls: [], subagents: [done('x'), agent('y'), agent('z')] },
+      { id: 'a4', role: 'assistant', text: 'y reported.', toolCalls: [], subagents: [done('y'), agent('z')] },
+    ]);
     const roster = inlineRoster(state, 'a4');
     expect(document.querySelectorAll('[data-testid="message-subagents"]')).toHaveLength(1);
     // Each agent counted once, from its newest copy: three reported, one still runs.
     expect(roster?.textContent).toContain('1 working');
     expect(roster?.textContent).toContain('3 done');
+  });
+
+  it("counts every background agent when a later turn's roster carries only the ones that reported in it", () => {
+    // Claude's tracker sends one agent per update: bucket 3's completion turn holds 4 of the 8.
+    const ids = ['1', '2', '3', '4', '5', '6', '7', '8'];
+    const state = conversation([
+      launch(ids),
+      { id: 'a2', role: 'assistant', text: 'Bucket 3 is done.', toolCalls: [], subagents: [done('3'), agent('8'), agent('5'), agent('2')] },
+    ]);
+    const roster = inlineRoster(state, 'a2');
+    expect(roster?.textContent).toContain('7 working');
+    expect(roster?.textContent).toContain('1 done');
+    expect(within(frame('a1')).queryByTestId('message-subagents')).toBeNull();
+  });
+
+  it('shows no roster for foreground agents their chips show', () => {
+    const state = conversation([launch(['w', 'x'], { background: undefined, outcome: 'completed' })]);
+    expect(inlineRoster(state, 'a1')).toBeNull();
   });
 });

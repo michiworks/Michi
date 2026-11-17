@@ -111,7 +111,7 @@ describe('native Markdown item sources', () => {
 
 describe('native Markdown headings in Contents', () => {
   afterEach(() => { vi.useRealTimers(); });
-  const flashed = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>('[data-flash]')];
+  const flashed = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>('[data-reveal-flash]')];
   const contentsEntry = (name: string, index = 0) =>
     within(screen.getByRole('navigation', { name: 'Contents' })).getAllByRole('button', { name })[index]!;
 

@@ -5,21 +5,22 @@
    ============================================================ */
 
 .landing-root {
-  /* Inherits the globals defined in src/index.css — landing always renders
-     on the parchment palette pre-auth, but staying token-driven means a
-     post-auth re-render under a different theme picks up the new colors. */
-  --landing-bg: var(--app-bg);
-  --landing-bg-soft: var(--app-bg-muted);
-  --landing-surface: var(--surface);
-  --landing-surface-hover: var(--surface-hover);
-  --landing-fg: var(--fg);
-  --landing-fg-muted: var(--fg-muted);
-  --landing-fg-subtle: var(--fg-subtle);
-  --landing-line: var(--line);
-  --landing-line-strong: var(--line-strong);
+  /* LandingPage sets the default palette's --term-* on this element, so the
+     set reads them here. The legacy aliases (--fg, --surface …) would not
+     do: index.css resolves them on :root, where no palette is set before
+     the shell mounts. */
+  --landing-bg: var(--term-bg);
+  --landing-bg-soft: var(--term-page-bg);
+  --landing-surface: var(--term-surface);
+  --landing-surface-hover: var(--term-alt);
+  --landing-fg: var(--term-fg);
+  --landing-fg-muted: var(--term-mid);
+  --landing-fg-subtle: var(--term-muted);
+  --landing-line: var(--term-line);
+  --landing-line-strong: var(--term-line-s);
 
   /* Mock-only accent shades (deep + tint) not in the global token map. */
-  --landing-accent: var(--accent);
+  --landing-accent: var(--term-accent);
   --landing-accent-deep: #983e0a;
   --landing-accent-soft: #f4dccf;
   --landing-accent-tint: #fef3db;
@@ -167,7 +168,7 @@
   transform: translateY(-1px);
   box-shadow: 0 2px 0 rgba(0, 0, 0, .06), 0 10px 22px -8px rgba(28, 25, 23, .45);
 }
-.landing-signin-btn:disabled { opacity: 0.65; cursor: progress; }
+.landing-signin-btn:disabled { opacity: 0.5; cursor: progress; }
 .landing-signin-btn__arrow {
   width: 16px;
   height: 1px;
@@ -198,14 +199,14 @@
 .landing-note__dot {
   width: 4px;
   height: 4px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--landing-fg-subtle);
 }
 
 .landing-error {
   font-family: var(--landing-ui);
   font-size: var(--fs-lg);
-  color: var(--danger);
+  color: var(--term-danger-text);
   margin: 0;
 }
 
@@ -425,6 +426,11 @@
 .landing-hero > .landing-cta-row      { animation-delay: 220ms; }
 .landing-hero > .landing-error        { animation-delay: 220ms; }
 
+/* Reduced motion. Under either trigger the sign-in button and the cards still
+   recolour on hover, but never lift. */
 @media (prefers-reduced-motion: reduce) {
   .landing-hero > * { animation: none; }
+  .landing-signin-btn:hover:not(:disabled),
+  .landing-nc:hover { transform: none; }
 }
+:root[data-reduce-motion='on'] :is(.landing-signin-btn:hover:not(:disabled), .landing-nc:hover) { transform: none; }

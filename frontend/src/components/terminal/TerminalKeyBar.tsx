@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import type { TerminalKeyName } from './terminalKeys';
+import { strokeFor } from './icons';
 
 export type TerminalBarKey = TerminalKeyName | 'Ctrl' | 'Hide' | `text:${string}`;
 
@@ -20,7 +21,7 @@ const KEYS: Array<{ key: TerminalBarKey; label: ReactNode; aria?: string; word?:
 ];
 
 const HIDE_ICON = (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeFor(20, 24)} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
     <rect x="3" y="3.5" width="18" height="11" rx="2" /><path d="M7 7.5h.01M10.5 7.5h.01M14 7.5h.01M17 7.5h.01M8 11h8" /><path d="m9 18 3 2.5 3-2.5" />
   </svg>
 );

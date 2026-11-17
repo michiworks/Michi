@@ -3,7 +3,7 @@ import { splitPageMarkdown } from 'michi-shared';
 import { parseSegmentId, segmentId, splitMarkdown } from './vendor-blocks/shared/markdown-segments';
 
 // Contents (the Desk outline) names Markdown headings with the vendored splitter, and Michi draws the
-// `<block>~<n>` shells with the shared one. A Desk sync that changes either must keep them in step.
+// `<block>~<n>` shells with the shared one. A change to either must keep them in step.
 const CORPUS = [
   'intro\n\n```ts\nconst a=1;\n\n\nconst b=2;\n```\n\nafter',
   '~~~\na\n\n```\nb\n~~~~\nc',
@@ -25,7 +25,7 @@ const CORPUS = [
 ];
 
 describe('Markdown segment parity', () => {
-  it.each(CORPUS)('splits the same way in shared and in the Desk mirror: %j', (text) => {
+  it.each(CORPUS)('splits the same way in shared and in the block renderers: %j', (text) => {
     expect(splitMarkdown(text)).toEqual(splitPageMarkdown(text));
   });
 

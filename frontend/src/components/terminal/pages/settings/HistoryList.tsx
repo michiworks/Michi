@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight, Clock3, Ellipsis, LockKeyhole, Search, X, type LucideIcon } from 'lucide-react';
+import { ChevronLeftIcon, ChevronRightIcon, ClockIcon, CloseIcon, LockIcon, MoreIcon, SearchIcon, type IconComponent } from '../../icons';
 import { Button } from '../../../ui/controls';
 import { fetchTreeMessagePage, fetchWorkspaceStructure } from '../../../../services/api';
 import { buildMessagesByNode } from '../../../../state/chatHydration';
@@ -31,14 +31,14 @@ export function HistorySearch({ value, onChange, label, placeholder, inputRef }:
   inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   return <label className="ui-search settings-history__search">
-    <Search size={14} aria-hidden="true" />
+    <SearchIcon aria-hidden="true" />
     <input ref={inputRef} type="search" aria-label={label} placeholder={placeholder} value={value}
       onChange={event => onChange(event.target.value)}
       onKeyDown={event => {
         // Escape clears a query first; with none, it reaches Settings.
         if (event.key === 'Escape' && value && !isImeComposing(event)) { event.preventDefault(); event.stopPropagation(); onChange(''); }
       }} />
-    {value && <button type="button" aria-label="Clear search" onClick={() => { onChange(''); inputRef.current?.focus(); }}><X size={13} aria-hidden="true" /></button>}
+    {value && <button type="button" aria-label="Clear search" onClick={() => { onChange(''); inputRef.current?.focus(); }}><CloseIcon aria-hidden="true" /></button>}
   </label>;
 }
 
@@ -56,12 +56,14 @@ export function HistoryFilter<T extends string>({ label, value, options, onChang
 }
 
 /** What the toolbar shows while rows are selected: how many, and what to do with them. */
-export function SelectionBar({ count, total, onToggleAll, onCancel, children }: {
+export function SelectionBar({ count, total, onToggleAll, onCancel, cancelRef, children }: {
   count: number;
   /** Rows the select-all box covers: those shown. */
   total: number;
   onToggleAll: () => void;
   onCancel: () => void;
+  /** Cancel, where focus goes when the bar takes the place of the control that opened it. */
+  cancelRef?: React.Ref<HTMLButtonElement>;
   children: React.ReactNode;
 }) {
   const box = useRef<HTMLInputElement>(null);
@@ -74,7 +76,7 @@ export function SelectionBar({ count, total, onToggleAll, onCancel, children }: 
     </label>
     <span className="settings-history__spacer" />
     {children}
-    <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+    <Button ref={cancelRef} variant="ghost" onClick={onCancel}>Cancel</Button>
   </>;
 }
 
@@ -109,7 +111,7 @@ export function HistoryGroup({ title, badge, count, footer, children }: {
 export interface HistoryRowProps {
   /** The entry's key; rows are found by it to keep focus after a change. */
   id: string;
-  icon: LucideIcon;
+  icon: IconComponent;
   title: string;
   query: string;
   meta: ReadonlyArray<React.ReactNode>;
@@ -122,7 +124,7 @@ export interface HistoryRowProps {
   selecting?: boolean;
   busy?: boolean;
   menuOpen?: boolean;
-  primary?: { label: string; icon: LucideIcon };
+  primary?: { label: string; icon: IconComponent };
   onToggle?: () => void;
   onPrimary?: () => void;
   onMenu?: (anchor: HTMLButtonElement) => void;
@@ -134,10 +136,14 @@ export function HistoryRow({ id, icon: Icon, title, query, meta, when, onOpen, s
   const statusId = useId();
   const Primary = primary?.icon;
   return <li className="settings-history__row" data-history-key={id} data-selected={selected || undefined}>
-    <span className="settings-history__lead">
-      <span className="settings-history__kind" aria-hidden="true"><Icon size={15} strokeWidth={1.75} /></span>
-      {onToggle && <input type="checkbox" className="settings-history__check" checked={selected} disabled={busy} onChange={onToggle} aria-label={`Select ${title}`} />}
-    </span>
+    {onToggle ? (
+      <label className="settings-history__lead">
+        <span className="settings-history__kind" aria-hidden="true"><Icon /></span>
+        <input type="checkbox" className="settings-history__check" checked={selected} disabled={busy} onChange={onToggle} aria-label={`Select ${title}`} />
+      </label>
+    ) : (
+      <span className="settings-history__lead"><span className="settings-history__kind" aria-hidden="true"><Icon /></span></span>
+    )}
     {/* On a phone with Select on, a tap anywhere on the row selects it. */}
     <button type="button" className="settings-history__open" data-history-open={id} aria-label={title} aria-describedby={when?.status ? `${metaId} ${statusId}` : metaId}
       onClick={phone && selecting && onToggle ? onToggle : onOpen} aria-pressed={phone && selecting && onToggle ? selected : undefined}>
@@ -150,21 +156,21 @@ export function HistoryRow({ id, icon: Icon, title, query, meta, when, onOpen, s
       {when && (when.status
         ? <span id={statusId} className="settings-history__when" title={when.title}>{when.label}</span>
         : <time className="settings-history__when" data-soon={when.soon || undefined} dateTime={when.dateTime} title={when.title}>
-          {when.soon && <Clock3 size={12} aria-hidden="true" />}{when.label}
+          {when.soon && <ClockIcon size="sm" aria-hidden="true" />}{when.label}
         </time>)}
       {!phone && primary && Primary && <span className="settings-history__actions">
-        <Button size="sm" disabled={busy} aria-label={`${primary.label} ${title}`} onClick={onPrimary}><Primary size={13} aria-hidden="true" />{primary.label}</Button>
+        <Button size="sm" disabled={busy} aria-label={`${primary.label} ${title}`} onClick={onPrimary}><Primary aria-hidden="true" />{primary.label}</Button>
         {onMenu && <button type="button" className="settings-history__more" aria-label={`More actions for ${title}`} aria-haspopup="menu" aria-expanded={menuOpen} disabled={busy}
-          onClick={event => onMenu(event.currentTarget)}><Ellipsis size={15} aria-hidden="true" /></button>}
+          onClick={event => onMenu(event.currentTarget)}><MoreIcon aria-hidden="true" /></button>}
       </span>}
-      {phone && !selecting && <ChevronRight className="settings-history__chevron" size={16} aria-hidden="true" />}
+      {phone && !selecting && <ChevronRightIcon className="settings-history__chevron" size="lg" aria-hidden="true" />}
     </span>
   </li>;
 }
 
-export function HistoryEmpty({ icon: Icon, title, children, action }: { icon: LucideIcon; title: string; children: React.ReactNode; action?: React.ReactNode }) {
+export function HistoryEmpty({ icon: Icon, title, children, action }: { icon: IconComponent; title: string; children: React.ReactNode; action?: React.ReactNode }) {
   return <div className="settings-history__empty">
-    <Icon size={26} strokeWidth={1.5} aria-hidden="true" />
+    <Icon size={30} aria-hidden="true" />
     <h3>{title}</h3>
     <p>{children}</p>
     {action}
@@ -183,9 +189,10 @@ export function HistoryLoading({ label }: { label: string }) {
 export function HistoryDetail({ backLabel, onBack, icon: Icon, kind, title, details, actions, note, readOnly = true, pageTitle = false, lead, children }: {
   backLabel: string;
   onBack: () => void;
-  icon: LucideIcon;
+  icon: IconComponent;
   kind: string;
   title: string;
+  /** Without any, the page has no Details section. */
   details: ReadonlyArray<{ label: string; value: React.ReactNode; soon?: boolean }>;
   actions?: React.ReactNode;
   note?: string;
@@ -204,30 +211,30 @@ export function HistoryDetail({ backLabel, onBack, icon: Icon, kind, title, deta
   useEffect(() => { heading.current?.focus({ preventScroll: true }); }, []);
   return <div className="settings-history__detail"
     onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.stopPropagation(); onBack(); } }}>
-    {!phone && <button type="button" className="settings-history__back" onClick={onBack}><ChevronLeft size={15} aria-hidden="true" />{backLabel}</button>}
+    {!phone && <button type="button" className="settings-history__back" onClick={onBack}><ChevronLeftIcon aria-hidden="true" />{backLabel}</button>}
     {pageTitle
       ? <h1 ref={heading} tabIndex={-1} className="terminal-settings-heading">{title}</h1>
       : <h2 ref={heading} tabIndex={-1} className="settings-history__detail-title">{title}</h2>}
-    <p className="settings-history__detail-kind"><Icon size={14} aria-hidden="true" />{kind}
-      {readOnly && <span className="settings-history__lock"><LockKeyhole size={11} aria-hidden="true" />Read only</span>}</p>
+    <p className="settings-history__detail-kind"><Icon aria-hidden="true" />{kind}
+      {readOnly && <span className="settings-history__lock"><LockIcon size="sm" aria-hidden="true" />Read only</span>}</p>
     {lead}
-    <section className="settings-section" aria-label="Details">
+    {details.length > 0 && <section className="settings-section" aria-label="Details">
       <div className="settings-section__head"><h3 className="settings-section__title">Details</h3></div>
       <dl className="settings-section__body settings-history__details">
         {details.map(row => <div key={row.label} className="settings-row"><dt>{row.label}</dt><dd data-soon={row.soon || undefined}>{row.value}</dd></div>)}
       </dl>
-    </section>
+    </section>}
     {children}
     {actions && <div className="settings-history__detail-actions">{actions}{note && <p>{note}</p>}</div>}
   </div>;
 }
 
 /** A titled list of what an item contains: its nodes, pages or threads. */
-export function HistoryContents({ title, items }: { title: string; items: ReadonlyArray<{ id: string; icon: LucideIcon; label: React.ReactNode; note?: string }> }) {
+export function HistoryContents({ title, items }: { title: string; items: ReadonlyArray<{ id: string; icon: IconComponent; label: React.ReactNode; note?: string }> }) {
   return <section className="settings-section">
     <div className="settings-section__head"><h3 className="settings-section__title">{title}</h3><span className="settings-section__aside">{items.length}</span></div>
     <ul className="settings-section__body settings-history__contents">
-      {items.map(({ id, icon: Icon, label, note }) => <li key={id} className="settings-row"><Icon size={14} aria-hidden="true" /><span>{label}</span>{note ? <small>{note}</small> : <span />}</li>)}
+      {items.map(({ id, icon: Icon, label, note }) => <li key={id} className="settings-row"><Icon aria-hidden="true" /><span>{label}</span>{note ? <small>{note}</small> : <span />}</li>)}
     </ul>
   </section>;
 }

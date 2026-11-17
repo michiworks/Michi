@@ -64,6 +64,21 @@ describe('PaneChooser', () => {
     expect(review.style.background).not.toBe('var(--term-alt)');
   });
 
+  it('keeps focus on the choice that is opening while every row is busy and takes no clicks', async () => {
+    state.actions.activateLauncherPane.mockImplementation(() => new Promise(() => {}));
+    render(<PaneChooser item={launcher} />);
+    await act(async () => {});
+    const review = screen.getByRole('button', { name: 'Review' });
+    review.focus();
+    fireEvent.click(review);
+    const files = screen.getByRole('button', { name: 'Files' });
+    expect(review.getAttribute('aria-disabled')).toBe('true');
+    expect(files.getAttribute('aria-disabled')).toBe('true');
+    expect(document.activeElement).toBe(review);
+    fireEvent.click(files);
+    expect(state.actions.activateLauncherPane).toHaveBeenCalledTimes(1);
+  });
+
   it('marks each choice with its digit and picks it by that key', async () => {
     render(<PaneChooser item={launcher} />);
     await act(async () => {});

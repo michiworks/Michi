@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion, useIsPresent } from 'motion/react';
-import { Sparkles } from 'lucide-react';
 import { pageBlockName, pageBlockText, parsePageBlockInput, splitPageMarkdown } from 'michi-shared';
 import type { PageBlockInput, PageChangeDto, PageDatabaseColumn, PageDatabaseRow, PageDatabaseView } from 'michi-shared';
 import MarkdownContent from '../../MarkdownContent';
@@ -9,10 +8,19 @@ import { INHERIT_PROSE_STYLE, UNTRUSTED_MARKDOWN } from '../../markdownProse';
 import { timelineWhen } from '../content/page/michiPageModel';
 import { SourceTrace, type ExactPageSource } from './SourceTrace';
 import { changeOrigin, readLabel, type ChangeOrigin } from '../../../state/pages/changeOrigin';
-import { EASE } from '../../../motion/tokens';
+import { DUR, EASE } from '../../../motion/tokens';
+import { AgentIcon, ICON_PX } from '../icons';
+import { CompanionGlyph } from '../companion/CompanionGlyph';
 import { useCompanionName } from '../../../state/companion/companionName';
 import { pagesUpkeepTitle } from '../scheduled/metaAgent/metaAgentCopy';
 import './pageChanges.css';
+
+/** Who made the change: Michi's mark for its Pages upkeep, the agent's for a conversation's. */
+function ChangeAuthorMark({ change, size }: { change: PageChangeDto; size?: 'sm' }) {
+  return change.source.kind === 'maintenance'
+    ? <CompanionGlyph size={ICON_PX[size ?? 'md']} />
+    : <AgentIcon size={size} aria-hidden="true" />;
+}
 
 export type AcceptedPageEdit =
   | { kind: 'block'; block: PageBlockInput }
@@ -98,7 +106,7 @@ function useSettledFirst() {
   return mounted;
 }
 
-const LEAD_FADE = { duration: 0.12, ease: EASE.out };
+const LEAD_FADE = { duration: DUR.brief, ease: EASE.out };
 
 export function isPageChangeRevertible(change: PageChangeDto): boolean {
   return change.applicationState === 'applied' && (change.proposalState === null || change.proposalState === 'accepted') && change.source.kind !== 'user';
@@ -372,7 +380,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
     if (change.proposalState === 'pending' && showTarget && change.op !== 'schema') {
       return (
         <div className="page-change-line" data-state="pending" data-chosen={chosen ?? undefined}>
-          <Sparkles size={12} strokeWidth={1.7} aria-hidden="true" />
+          <ChangeAuthorMark change={change} size="sm" />
           <span className="page-change-line__lead">Waiting for you: {removes(change) ? 'remove' : 'rewrite'} {targetName(change)}</span>
           {from}
           <span aria-hidden="true">·</span>
@@ -387,7 +395,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
       return (
         <article className="page-change-prop" data-state="pending" data-chosen={chosen ?? undefined} aria-label={operationLabel(change)}>
           <header className="page-change-prop__head">
-            <Sparkles size={13} strokeWidth={1.7} aria-hidden="true" />
+            <ChangeAuthorMark change={change} />
             <strong>{change.op === 'schema' ? 'Suggested database configuration' : removes(change) ? 'Suggested removal' : change.op === 'move' ? 'Suggested move' : change.target.kind === 'row' ? 'Suggested field update' : 'Suggested rewrite'}</strong>
             <span>{change.op === 'schema' ? '· Review changes to existing columns or views' : '· You edited this, so it asks first'}</span>
           </header>
@@ -418,7 +426,7 @@ export function ChangeCard({ change, onAccept, onDismiss, onReopen, onRevert, on
     const lead = state === 'dismissed' ? `Suggestion dismissed${what}` : state === 'reverted' ? `Undone${what}` : state === 'accepted' ? `You accepted this rewrite${what}` : `${change.op === 'insert' ? 'Agent added' : removes(change) ? 'Agent removed' : 'Agent updated'}${what.replace(' a new block', '').replace(' a new row', ' a row')}`;
     return (
       <div className="page-change-line" data-state={state} data-quiet={quiet || undefined}>
-        {!quiet && <Sparkles size={12} strokeWidth={1.7} aria-hidden="true" />}
+        {!quiet && <ChangeAuthorMark change={change} size="sm" />}
         {(!quiet || state === 'dismissed' || state === 'reverted') && (
           <motion.span key={state} className="page-change-line__lead" initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1 }} transition={LEAD_FADE}>{lead}</motion.span>
         )}

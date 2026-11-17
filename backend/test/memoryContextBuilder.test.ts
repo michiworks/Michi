@@ -391,8 +391,8 @@ describe('related to this message', () => {
     const line = related.find((candidate) => candidate.startsWith(`- [${refOf(trip)}] 用户下周三去大阪出差`));
     assert.ok(line?.includes('The user wrote there: "下周三去大阪出差，住梅田的 Hotel Hankyu'), built.text ?? '');
     assert.equal(related.filter((candidate) => candidate.includes('1208')).length, 1, 'the turn is not an excerpt as well');
-    assert.ok(built.items.some((item) => item.section === 'related' && item.kind === 'conversation' && item.turnId === turnId
-      && item.shown?.includes('Hotel Hankyu')), 'the quoted turn is an item: the session holds it, and reply sources may cite it');
+    assert.ok(built.items.some((item) => item.section === 'related' && item.kind === 'conversation' && item.turnId === turnId),
+      'the quoted turn is an item: the session holds it');
     assert.equal((turnPack(holder, { query: '大阪出差的酒店' }).text ?? '').includes('Hotel Hankyu'), false, 'held');
   });
 

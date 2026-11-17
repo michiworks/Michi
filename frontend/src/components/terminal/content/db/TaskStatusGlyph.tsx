@@ -1,10 +1,10 @@
 import React, { useRef } from 'react';
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from 'motion/react';
-import { EASE, SPRING, TRANSITION } from '../../../../motion/tokens';
+import { DUR, EASE, SPRING, TRANSITION } from '../../../../motion/tokens';
 
 const STAGE: React.CSSProperties = { display: 'inline-grid' };
 const LAYER: React.CSSProperties = { gridArea: '1 / 1', display: 'inline-flex' };
-const DRAW = { duration: 0.22, ease: EASE.out };
+const DRAW = { duration: DUR.move, ease: EASE.out };
 const GLYPH: Variants = {
   enter: { scale: 0.6, opacity: 0 },
   shown: { scale: 1, opacity: 1 },

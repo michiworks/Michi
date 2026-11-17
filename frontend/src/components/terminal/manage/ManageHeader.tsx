@@ -1,5 +1,6 @@
 import React from 'react';
 import { WorkspaceLocation } from '../../WorkspaceLocation';
+import { FolderIcon } from '../icons';
 
 interface Props {
   name: string;
@@ -86,7 +87,7 @@ export default function ManageHeader({
         {cwd && (
           // A long path wraps instead of pushing the page sideways.
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0, maxWidth: '100%', overflowWrap: 'anywhere' }}>
-            <FolderGlyph />
+            <FolderIcon style={{ flexShrink: 0 }} />
             <span style={{ minWidth: 0 }}>{cwd}</span>
           </span>
         )}
@@ -98,23 +99,5 @@ export default function ManageHeader({
         <span>active {relative(lastActiveAt)}</span>
       </div>
     </header>
-  );
-}
-
-function FolderGlyph() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      aria-hidden
-      style={{ flexShrink: 0 }}
-    >
-      <path d="M2 4.5C2 3.7 2.7 3 3.5 3h2.7L7.5 4.5h5c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-9C2.7 13.5 2 12.8 2 12V4.5z" />
-    </svg>
   );
 }

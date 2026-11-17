@@ -55,10 +55,9 @@ async function motionCount(page: Page) {
       .filter(animation => animation.effect?.getKeyframes().some(frame => 'transform' in frame || 'clipPath' in frame || 'opacity' in frame)).length);
 }
 
-async function setMode(page: Page, mode: Mode, motion?: string) {
+async function setMode(page: Page, mode: Mode) {
   await openSettings(page);
   await page.getByRole('combobox', { name: 'Pane width mode' }).selectOption(mode);
-  if (motion) await page.getByRole('combobox', { name: 'Pane animation', exact: true }).selectOption(motion);
   await page.getByRole('slider', { name: 'Default pane width' }).evaluate((input: HTMLInputElement) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '800');
     input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -97,7 +96,7 @@ test.describe('pane width modes', () => {
       await page.locator(COMPOSER_EDITOR).first().fill('Compare pane layout behavior');
       await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
       await expect(page.locator('.terminal-dashboard')).toBeVisible();
-      await setMode(page, mode, 'soft-fade');
+      await setMode(page, mode);
       await assertWidths(page, mode, 1);
 
       // Text takes its final width once; WAAPI owns the pane reveal clock.
@@ -443,7 +442,7 @@ test.describe('pane width modes', () => {
     expect(Math.abs(interrupted.final - interrupted.stoppedAt), JSON.stringify(interrupted)).toBeLessThan(2);
   });
 
-  for (const [label, suffix, entryX, entryY] of [['Phosphor Bloom', '', 0, 4], ['Fission', 'Fission', -12, 0], ['Thread Pull', 'ThreadPull', 16, 0]] as const) {
+  for (const [label, suffix, entryX, entryY] of [['Phosphor Bloom', '', 0, 4]] as const) {
     test(`${label}: faster entrance and matching retained exit`, async ({ page }, info) => {
       await installLayoutApi(page);
       await bootWithWorkspace(page);
@@ -451,9 +450,6 @@ test.describe('pane width modes', () => {
       await page.getByRole('button', { name: /Send \(Enter\)/ }).click();
       await expect(page.locator('.terminal-dashboard')).toBeVisible();
       await setMode(page, 'adaptive');
-      await openSettings(page);
-      await page.getByRole('combobox', { name: 'Pane animation', exact: true }).selectOption({ label });
-      await leaveSettings(page);
       const entrance = await page.evaluate(async () => {
         (document.querySelector('[aria-label="New pane"]') as HTMLButtonElement).click();
         await new Promise(requestAnimationFrame);
@@ -481,12 +477,7 @@ test.describe('pane width modes', () => {
       ] }]);
       expect(entrance.samples.every(s => s.scaleX === 1 && s.opacity === 1
         && Math.abs(s.width - entrance.samples.at(-1)!.width) < 1)).toBe(true);
-      if (label === 'Fission') {
-        expect(entrance.samples.some(s => s.x < 0)).toBe(true);
-        expect(entrance.samples.every(s => s.x <= 0.0001)).toBe(true);
-      }
-      if (label === 'Thread Pull') expect(entrance.samples.some(s => s.x > 0)).toBe(true);
-      if (label === 'Phosphor Bloom') expect(entrance.samples.some(s => s.y > 0)).toBe(true);
+      expect(entrance.samples.some(s => s.y > 0)).toBe(true);
       await assertWidths(page, 'adaptive', 2);
       await page.screenshot({ path: info.outputPath(`${suffix || 'Phosphor'}-open.png`) });
       const exitingId = await panes(page).last().getAttribute('data-node-id');

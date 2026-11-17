@@ -31,7 +31,7 @@ const pages = vi.hoisted(() => ({ openSpacesPage: vi.fn(async (_target: unknown)
 vi.mock('../../../services/api/persistence', () => persistence);
 vi.mock('../../../state/metaChat/spacesPages', () => pages);
 vi.mock('../../../state/chatStore', () => ({
-  useChatNode: (id: string) => React.useSyncExternalStore(store.subscribe, () => store.nodes[id]),
+  useStructuralSelector: (selector: (nodes: typeof store.nodes) => unknown) => selector(React.useSyncExternalStore(store.subscribe, () => store.nodes)),
   // The real reader sees an install at once, before any re-render.
   useChatNodeReader: () => (id: string) => store.nodes[id],
   useChatProjects: () => ({ projects: React.useSyncExternalStore(store.subscribe, () => store.projects), activeProjectId: 'w1' }),

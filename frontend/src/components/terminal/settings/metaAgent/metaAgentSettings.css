@@ -20,7 +20,7 @@
   gap: 10px;
   padding: 12px 14px;
   border: 1px solid color-mix(in srgb, var(--term-danger) 30%, var(--term-surface));
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius);
   background: transparent;
   color: var(--term-fg);
   font-size: var(--fs-lg);

@@ -58,7 +58,9 @@ export function killProcessTree(
   signal: NodeJS.Signals | number = "SIGTERM",
   deps: ProcessTreeDeps = {},
 ): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
+  // kill(-1) signals every process the user may signal, and this process's
+  // own group or its parent's would take Michi down with the tree.
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid || pid === process.ppid) return;
   const platform = deps.platform ?? process.platform;
   const run = deps.execFileSync ?? execFileSync;
   const kill = deps.kill ?? ((target, sig) => process.kill(target, sig));

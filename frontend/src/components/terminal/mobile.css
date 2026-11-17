@@ -4,42 +4,39 @@
 .workspace-toolbar .workspace-toolbar__trigger { display: none; }
 .mention-editor-placeholder { display: none; }
 .mobile-pane-trigger { position: relative; min-width: 44px !important; min-height: 44px !important; }
+/* Its list open, the switcher stays pressed (ST-06). */
+.mobile-pane-trigger[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
 /* The landing ring; pulseBranchTarget animates it. */
-.mobile-pane-trigger::after { content: ''; position: absolute; inset: 4px; border: 2px solid var(--term-accent); border-radius: 50%; opacity: 0; pointer-events: none; }
+.mobile-pane-trigger::after { content: ''; position: absolute; inset: 4px; border: 2px solid var(--term-accent); border-radius: var(--ui-radius-pill); opacity: 0; pointer-events: none; }
 /* A branch it holds is working: the icon's short middle line turns accent and
    breathes (Michi's running glyph), after the landing ring, until the work is
    done. A corner dot would read as an unread badge. */
-.mobile-pane-trigger__live { transition: stroke var(--t-exit) ease-in; }
-.mobile-pane-trigger[data-working='true'] .mobile-pane-trigger__live { stroke: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out 300ms infinite; transition: stroke var(--t-enter) ease-out 300ms; }
+.mobile-pane-trigger__live { --live-delay: 300ms; transition: stroke var(--t-exit) ease-in; }
+.mobile-pane-trigger[data-working='true'] .mobile-pane-trigger__live { stroke: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out var(--live-delay) infinite; transition: stroke var(--t-enter) ease-out var(--live-delay); }
 /* Left-aligned after the left cluster; both clusters are in flow on a
    phone, so the title gets exactly the space between them. */
 .mobile-pane-title { min-width: 0; flex: 1; align-self: center; margin-right: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; font-size: var(--pt-title, var(--fs-md)); font-weight: 600; letter-spacing: var(--ls-tight); color: var(--term-fg); }
 .mobile-pane-list { padding: 7px; overflow: auto; overscroll-behavior: contain; }
 .mobile-pane-item { display: flex; align-items: center; border-radius: var(--ui-radius); }
 .mobile-pane-item[data-current] { background: var(--term-accent-f); }
-.mobile-pane-item:not([data-current]):hover { background: var(--term-hover-bg, var(--term-alt)); }
+@media (hover: hover) { .mobile-pane-item:not([data-current]):hover { background: var(--term-hover-bg, var(--term-alt)); } }
+.mobile-pane-item:not([data-current]):active { background: var(--term-hover-bg, var(--term-alt)); }
 .mobile-pane-row { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px 10px calc(12px + var(--pane-depth) * 22px); border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-fg); font: inherit; font-size: var(--fs-md); text-align: left; cursor: pointer; }
 .mobile-pane-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mobile-pane-row[aria-current] { color: var(--term-accent); font-weight: 550; }
+.mobile-pane-row[aria-current] { color: var(--term-accent-text); }
 .mobile-pane-close { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px; padding: 0; border: 0; border-radius: var(--ui-radius); background: transparent; color: var(--term-muted); cursor: pointer; }
-.mobile-pane-close:hover { color: var(--term-fg); }
+@media (hover: hover) { .mobile-pane-close:hover { color: var(--term-fg); } }
 .mobile-pane-row:focus-visible, .mobile-pane-close:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
 /* Running breathes like every other running dot; a still dot would read as unread. */
-.mobile-pane-status { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out infinite; }
+.mobile-pane-status { width: 6px; height: 6px; flex: none; border-radius: var(--ui-radius-pill); background: var(--term-run); animation: termBreathe var(--t-loop) ease-in-out infinite; }
 .mobile-pane-status[data-status='error'] { background: var(--term-danger); animation: none; }
 @media (prefers-reduced-motion: reduce) { .mobile-pane-status, .mobile-pane-trigger__live { animation: none !important; transition: none !important; } }
 /* Placed and moved by branchMotion.ts; invisible until its animation starts. */
-.mobile-branch-flight { position: fixed; left: -16px; top: -16px; z-index: var(--z-toast); display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: var(--term-accent); color: var(--term-surface); box-shadow: var(--term-float-shadow); opacity: 0; pointer-events: none; }
+.mobile-branch-flight { position: fixed; left: -16px; top: -16px; z-index: var(--z-toast); display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: var(--ui-radius-pill); background: var(--term-accent); color: var(--term-surface); box-shadow: var(--term-float-shadow); opacity: 0; pointer-events: none; }
 
 @keyframes mobile-arrive {
   from { opacity: 0; transform: translateY(9px); }
   to { opacity: 1; transform: translateY(0); }
-}
-/* mobile-arrive in reverse, for a panel on its way out (ResponsiveToolbar
-   listens for its animationend by name). */
-@keyframes mobile-leave {
-  from { opacity: 1; transform: translateY(0); }
-  to { opacity: 0; transform: translateY(9px); }
 }
 
 @media (max-width: 700px), (pointer: coarse) and (max-height: 500px) {
@@ -64,26 +61,46 @@
      back and can't open menus over it. */
   .terminal-topbar[data-drawer-open] .terminal-topbar-right { opacity: .4; pointer-events: none; }
   .terminal-topbar[data-drawer-open] .t-sidebar-toggle { color: var(--term-fg) !important; }
-  /* One glyph size, stroke and colour across the bar; ≥ 40×44 targets. */
-  .terminal-topbar-controls > button { color: var(--term-mid) !important; }
+  /* One glyph size and colour across the bar, its glyphs solid (Topbar.tsx);
+     ≥ 40×44 targets. The right-hand buttons (Start a task, temporary chat,
+     Companion) are 40px squares, so an on state reads as a chip inside the
+     44px bar. */
+  .terminal-topbar-controls > button,
+  .terminal-topbar :is(.topbar-start-task, .topbar-temporary-chat, .companion-topbar-btn):not(.is-on) { color: var(--term-mid) !important; }
+  .terminal-topbar :is(.topbar-start-task, .topbar-temporary-chat, .companion-topbar-btn) { min-width: 40px !important; height: 40px !important; }
   .terminal-topbar-controls > button svg,
+  .terminal-topbar :is(.topbar-start-task, .topbar-temporary-chat, .companion-topbar-btn) svg,
   .workspace-toolbar .workspace-toolbar__trigger svg { width: var(--pt-icon); height: var(--pt-icon); }
-  .terminal-topbar svg :is(path, line, rect, circle, polyline) { vector-effect: non-scaling-stroke; }
+  /* The Companion's badge and new-dot keep their desktop place on the glyph's corner. */
+  .terminal-topbar .companion-topbar-btn { --glyph-inset: calc((40px - var(--pt-icon)) / 2); }
+  .terminal-topbar .companion-topbar-btn__badge { top: calc(var(--glyph-inset) - 6px); right: calc(var(--glyph-inset) - 8px); }
+  .terminal-topbar .companion-topbar-btn__new { top: calc(var(--glyph-inset) - 3px); right: calc(var(--glyph-inset) - 3px); }
+  /* The bar sizes its glyphs in CSS, so strokes are drawn in screen px: at icons.tsx's STROKE_PX. */
+  .terminal-topbar svg :is(path, line, rect, circle, ellipse, polyline, polygon) { vector-effect: non-scaling-stroke; stroke-width: var(--icon-stroke); }
+  /* The sidebar toggle and + sit in 40px boxes, glyphs centred, and the title starts at the +'s box:
+     glyph to glyph was twice glyph to title. Moving the + left by half the toggle's side margin (its
+     frame spans 13 of its 16 units) makes both gaps equal; the boxes and the title stay where they are. */
+  .terminal-topbar .topbar-new-chat svg { translate: calc((40px - var(--pt-icon) * 13 / 16) / -4) 0; }
   .terminal-topbar .workspace-toolbar__trigger { color: var(--term-mid); }
   .mobile-pane-trigger { color: var(--term-mid); }
   .mobile-pane-trigger svg { width: var(--pt-switch); height: var(--pt-switch); }
-  [data-testid='topbar-background-work'] { --bgw-height: 44px; --bgw-min-width: 40px; --bgw-count-size: var(--fs-md); --bgw-glyph-size: var(--fs-sm); }
+  [data-testid='topbar-background-work'] { --bgw-height: 44px; --bgw-min-width: 40px; --bgw-count-size: var(--fs-md); }
 /* The composer, the workflow cards (chat and drawer, multi-model ones
-   included) and the chat's fold of finished runs, the drawer's subagent card
-   and the user bubble share one corner radius: square on desktop, rounded on
-   the phone. The bubble rounds only its left corners, so its accent right
-   rule stays straight (index.css). */
+   included) and the chat's fold of finished runs, the drawer's subagent card,
+   the shell notice and its tab, the branch anchors list, the interrupted-task
+   list and the user bubble share one corner radius: square on desktop,
+   rounded on the phone. The bubble rounds only its left corners, so its
+   accent right rule stays straight (index.css). */
 .terminal-composer,
 .workflow-run-card,
 .mm-card,
 .workflow-fold,
 .background-workflow-card,
 .background-subagent-card,
+.shell-notice,
+.shell-notice-tab,
+.t-branch-anchors-list,
+.interrupted-notice-list,
 .terminal-message-user { --term-composer-radius: calc(var(--ui-radius) * 2); }
 .terminal-composer {
   --workspace-shadow-ink: color-mix(in srgb, var(--term-bg) 20%, black);
@@ -102,9 +119,8 @@
 .terminal-composer__prompt { opacity: .65; }
 .terminal-composer:focus-within .terminal-composer__prompt { opacity: 1; }
 .terminal-composer .t-action-btn {
-  transition: background var(--t-soft) var(--t-ease), transform var(--t-soft) var(--t-ease), opacity var(--t-soft) var(--t-ease);
+  transition: background var(--t-soft) var(--t-ease), opacity var(--t-soft) var(--t-ease);
 }
-.terminal-composer .t-action-btn:active:not(:disabled) { transform: scale(.96); }
 .mention-editor-placeholder { display: none; position: absolute; inset: 0; pointer-events: none; color: var(--term-muted); font-size: var(--composer-body-size, var(--message-body-size)); line-height: var(--message-body-leading); }
 .mention-editor-host[data-empty='true'] > .mention-editor-placeholder { display: block; }
   .workspace-toolbar { display: flex; align-items: center; position: relative; -webkit-app-region: no-drag; }
@@ -124,9 +140,15 @@
     border-radius: var(--ui-radius-lg);
     background: var(--term-surface);
     box-shadow: var(--term-float-shadow);
+    transition: opacity var(--t-enter) var(--t-ease), transform var(--t-enter) var(--t-ease);
   }
-  .workspace-toolbar[data-open] .workspace-toolbar__actions { animation: mobile-arrive var(--t-enter) var(--t-ease) both; }
-  .workspace-toolbar[data-leaving] .workspace-toolbar__actions { animation: mobile-leave var(--t-exit) var(--t-ease) both; pointer-events: none; }
+  /* It rises in from 9px below and sinks back there on its way out, from
+     wherever it got to, so a toggle mid-way reverses (TR-04). ResponsiveToolbar
+     hides it once its opacity transition ends. */
+  @starting-style {
+    .workspace-toolbar[data-open] .workspace-toolbar__actions { opacity: 0; transform: translateY(9px); }
+  }
+  .workspace-toolbar[data-leaving] .workspace-toolbar__actions { opacity: 0; transform: translateY(9px); transition-duration: var(--t-exit); pointer-events: none; }
   .workspace-toolbar__actions > button { width: 100% !important; height: 40px !important; justify-content: flex-start; gap: 12px; padding: 0 12px !important; font-size: var(--fs-xl); color: var(--term-mid) !important; }
   .workspace-toolbar__actions > button::after { content: attr(aria-label); font-size: var(--fs-md); font-family: var(--ui-font); }
 
@@ -177,11 +199,9 @@
   .terminal-composer .t-action-btn { --composer-send-inset: 4px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .workspace-toolbar:is([data-open], [data-leaving]) .workspace-toolbar__actions, .michi-home__hero { animation: none; }
-  .terminal-composer .t-action-btn:active:not(:disabled) { transform: none; }
+  .michi-home__hero { animation: none; }
 }
-html[data-reduce-motion='on'] :is(.workspace-toolbar:is([data-open], [data-leaving]) .workspace-toolbar__actions, .michi-home__hero) { animation: none; }
-html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disabled) { transform: none; }
+html[data-reduce-motion='on'] .michi-home__hero { animation: none; }
 
 /* Keep the full runtime toolbar, including permission/agent controls, inside
    the pane. Its model label yields space before the fixed action buttons. */
@@ -325,7 +345,7 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
   font-family: var(--font-mono);
   font-size: var(--fs-2xs);
   line-height: 1;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
 }
 
 /* Phone text size (Settings → Appearance → Text size: 小 / 中 / 大).
@@ -379,7 +399,7 @@ html[data-reduce-motion='on'] .terminal-composer .t-action-btn:active:not(:disab
      sidebar density); every row is a full touch target. */
   .terminal-shell[data-sidebar-layout='overlay'] .terminal-sidebar-content {
     --sb-fs: var(--pt-row); --sb-ts-fs: var(--pt-sub);
-    --sb-caret-fs: var(--fs-xl); --sb-caret-w: 12px; --sb-caret-color: var(--term-mid);
+    --sb-caret-fs: var(--fs-xl); --sb-caret-color: var(--term-mid);
   }
 }
 @media (max-width: 700px) and (pointer: coarse), (pointer: coarse) and (max-height: 500px) {

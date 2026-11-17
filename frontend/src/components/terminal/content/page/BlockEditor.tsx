@@ -1,7 +1,6 @@
 import React, { useLayoutEffect, useRef, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
 import { Button } from '../../../ui/controls';
-import { PlusIcon, TrashIcon } from '../../icons';
+import { PlusIcon, TrashIcon, WarningIcon } from '../../icons';
 import { MICHI_CHECKLIST_MAX_ITEMS, MICHI_HEADING_MAX, MICHI_TEXT_MAX, type ChecklistDraftItem } from './pageEdits';
 import { isImeComposing } from '../../../../lib/ime';
 import { kbd } from '../../../../lib/platform';
@@ -73,7 +72,7 @@ export function PageChangedNote({ busy, onReapply, onCopy, text = 'The page chan
 }) {
   return (
     <div className="michi-doc-editor__changed" role="status">
-      <TriangleAlert size={13} strokeWidth={1.8} aria-hidden="true" />
+      <WarningIcon aria-hidden="true" />
       <span className="michi-doc-editor__changed-text">{text}</span>
       <span className="michi-doc-editor__spacer" />
       <Button size="sm" onClick={(event) => onReapply(byKeyboard(event))} disabled={busy}>Reapply</Button>
@@ -101,7 +100,7 @@ export function BlockRewrittenNote({ busy, theirs, canReplace, onAddBelow, onRep
   return (
     <div className="michi-doc-editor__changed michi-doc-editor__rewritten" role="status">
       <div className="michi-doc-editor__rewritten-head">
-        <TriangleAlert size={13} strokeWidth={1.8} aria-hidden="true" />
+        <WarningIcon aria-hidden="true" />
         <span className="michi-doc-editor__changed-text">This block changed while you were editing. It now says:</span>
       </div>
       <blockquote className="michi-doc-editor__theirs" aria-label="What the block says now">{theirs}</blockquote>
@@ -352,14 +351,14 @@ export function ChecklistEditor({
               }}
             />
             <button type="button" className="michi-doc-editor__remove" aria-label={`Remove item ${i + 1}`} onClick={() => remove(i)}>
-              <TrashIcon size={12} />
+              <TrashIcon size="sm" />
             </button>
           </li>
         ))}
       </ul>
       <div className="michi-doc-editor__add-row">
         <button type="button" className="michi-doc-editor__add" disabled={full} onClick={() => addAfter(items.length - 1)}>
-          <PlusIcon size={12} /> Add item
+          <PlusIcon size="sm" /> Add item
         </button>
         {full && <span className="michi-doc-editor__count michi-doc-mono">{MICHI_CHECKLIST_MAX_ITEMS} items at most</span>}
       </div>

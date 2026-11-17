@@ -138,7 +138,7 @@ describe('streamMessage cancellation recovery', () => {
     expect(h.onCancelRecovery).not.toHaveBeenCalled();
     replay.emit(done());
     await flush();
-    expect(h.onCancelRecovery.mock.calls).toEqual([[{ state: 'settled' }]]);
+    expect(h.onCancelRecovery.mock.calls).toEqual([[{ state: 'settled', stopReason: 'cancelled' }]]);
   });
 
   it('pins the monitor to the original turn and delivers only its actual failure once', async () => {
@@ -207,7 +207,7 @@ describe('streamMessage cancellation recovery', () => {
     expect(h.onCancelRecovery).not.toHaveBeenCalled();
     replay.emit(done());
     await flush();
-    expect(h.onCancelRecovery).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(h.onCancelRecovery).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
   });
 
   it('cancels foreground replay immediately and uses a separate status-only observer', async () => {
@@ -267,7 +267,7 @@ describe('streamMessage cancellation recovery', () => {
     expectCursor(fetchMock.mock.calls[cancelIndex + 1][0]);
     monitor.emit(done());
     await flush();
-    expect(h.onCancelRecovery).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(h.onCancelRecovery).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
   });
 
   it('starting the next stream detaches observation without changing either turn identity', async () => {
@@ -329,7 +329,7 @@ describe('cancelChatAndObserve deadlines and turn identity', () => {
     replay.emit(done());
     await flush();
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(onStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(onStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -454,7 +454,7 @@ describe('cancelChatAndObserve deadlines and turn identity', () => {
     await flush();
     firstReplay.emit(done(), failure('old buffered error'));
     await flush();
-    expect(firstStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(firstStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     expect(firstReplay.cancelled).toHaveBeenCalledTimes(1);
     expect(second).toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(4);
@@ -495,7 +495,7 @@ describe('cancelChatAndObserve deadlines and turn identity', () => {
   });
 
   it.each([
-    { event: done(), status: { state: 'settled' } },
+    { event: done(), status: { state: 'settled', stopReason: 'cancelled' } },
     { event: failure(), status: { state: 'error', detail: 'Native recovery failed' } },
   ])('a 410 retry can finish when actual $event.event arrives', async ({ event, status }) => {
     const replay = sse();
@@ -641,7 +641,7 @@ describe('cancelChatAndObserve deadlines and turn identity', () => {
     await flush();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(first.onStatus).not.toHaveBeenCalled();
-    expect(second.onStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled' });
+    expect(second.onStatus).toHaveBeenCalledExactlyOnceWith({ state: 'settled', stopReason: 'cancelled' });
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 

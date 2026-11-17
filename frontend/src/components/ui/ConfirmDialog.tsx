@@ -68,7 +68,7 @@ export function ConfirmDialogHost() {
       open={!!pending}
       onClose={() => close(false)}
       title={pending?.title ?? 'Confirm'}
-      accent={pending?.danger === false ? 'var(--term-accent)' : 'var(--term-danger)'}
+      accent={pending?.danger === false ? 'var(--term-accent-text)' : 'var(--term-danger-text)'}
       width={420}
       captureEscape
     >

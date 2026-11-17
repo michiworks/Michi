@@ -54,8 +54,8 @@
   white-space: nowrap;
 }
 .workflow-run-card__icon {
+  flex-shrink: 0;
   color: var(--term-mauve);
-  letter-spacing: 0;
 }
 
 /* The name wraps (two lines at most) instead of cutting to one on a phone. */
@@ -98,7 +98,7 @@
 .workflow-run-card__segment {
   flex: 1;
   height: 4px;
-  border-radius: 2px;
+  border-radius: var(--ui-radius-sm);
   transition: background-color var(--t-enter) ease-out, opacity var(--t-enter) ease-out;
 }
 .workflow-run-card__count {
@@ -174,7 +174,7 @@
   background: transparent;
   color: var(--term-muted);
   font: inherit;
-  font-size: 15px;
+  font-size: var(--fs-xl);
   line-height: 1;
   cursor: pointer;
   transition: transform var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
@@ -214,6 +214,7 @@
 .workflow-fold__check {
   margin-right: 6px;
   color: var(--term-digest);
+  vertical-align: text-bottom;
 }
 .workflow-fold__count {
   font-family: var(--font-mono);
@@ -293,7 +294,7 @@ button.workflow-fold__row:active {
 .workflow-fold__open {
   flex-shrink: 0;
   color: var(--term-muted);
-  font-size: 15px;
+  font-size: var(--fs-xl);
   line-height: 1;
   transition: transform var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
 }
@@ -325,4 +326,80 @@ button.workflow-fold__row:active {
   .workflow-fold,
   .workflow-fold__chevron svg,
   .workflow-fold__open { transition: none; }
+}
+
+/* Workflow controls keep their resting look here, not in style={{…}}, so hover can light them. */
+
+/* The run pane's Pause, Resume and Stop (WorkflowActions): quiet text, Stop a step louder. */
+.workflow-action {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--term-muted);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
+}
+.workflow-action[data-action='stop'] {
+  color: var(--term-mid);
+}
+@media (hover: hover) {
+  .workflow-action:hover:not(:disabled) {
+    color: var(--term-fg);
+  }
+}
+/* While a command is in flight they are disabled; the one pressed keeps its "…" label at full strength. */
+.workflow-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.workflow-action[aria-busy='true'] {
+  opacity: 1;
+  cursor: progress;
+}
+
+/* An approval's answers (WorkflowApprovals): allow first and firm, reject quiet. */
+.workflow-approval-option {
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--term-line);
+  background: var(--term-surface);
+  color: var(--term-fg);
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
+}
+/* The resting-band tint, not --term-alt, which marks hover and selection. */
+.workflow-approval-option[data-variant='primary'] {
+  background: color-mix(in srgb, var(--term-fg) 4%, transparent);
+  font-weight: 600;
+}
+.workflow-approval-option[data-variant='reject'] {
+  color: var(--term-mid);
+}
+@media (hover: hover) {
+  .workflow-approval-option:hover:not(:disabled) {
+    color: var(--term-fg);
+  }
+}
+.workflow-approval-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The run pane's quiet toggles: a step's task and result, the script's show and hide. */
+.workflow-pane-toggle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--term-muted);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+.workflow-pane-toggle[data-error] {
+  color: var(--term-danger-text);
 }

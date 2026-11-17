@@ -6,6 +6,7 @@ import { estimateTokens } from 'michi-shared';
 import { answersMemoryDirectly, MEMORY_EXTRACTION_LIMITS } from './extractionRun';
 import { InvalidMemoryAnswer, stageMemoryAnswer } from './extractionTools';
 import { EXTRACTION_PAYLOAD_SCHEMA } from './extractionV2';
+import { TOPICS_PAYLOAD_SCHEMA } from './memoryTopics';
 import { PROFILE_PAYLOAD_SCHEMA } from './userProfile';
 
 /**
@@ -56,11 +57,12 @@ const CALL_TIMEOUT_MS = 180_000;
 
 type StructuredRuntime = AgentRuntime & Required<Pick<AgentRuntime, 'completeStructured'>>;
 
-/** The answer's schema for each kind of run: extraction's payload, the profile, or consolidation's decisions. */
+/** The answer's schema for each kind of run: extraction's payload, the profile, consolidation's decisions, or the topics. */
 const SCHEMAS: Record<ExtractionRunKind, Readonly<Record<string, unknown>>> = {
   extract: EXTRACTION_PAYLOAD_SCHEMA,
   profile: PROFILE_PAYLOAD_SCHEMA,
   consolidate: CONSOLIDATION_PAYLOAD_SCHEMA,
+  topics: TOPICS_PAYLOAD_SCHEMA,
 };
 
 function structured(runtime: AgentRuntime | undefined): StructuredRuntime | null {

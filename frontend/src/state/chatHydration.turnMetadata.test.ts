@@ -112,3 +112,15 @@ it('round-trips snapshot provenance in saved messages and composer drafts', () =
   const node = mapNodeRowScalars({ id: 'n', status: 'idle', composer_draft: { value: 'edit', mentions: [], quotedText: 'old', quoteSource: source } });
   expect(node.composerDraft?.quoteSource).toEqual(source);
 });
+
+describe('a stored answer to a reply\'s block', () => {
+  it('keeps which block it answered, and drops a malformed mark', () => {
+    const row = (metadata: unknown) => mapMessageRow({ id: 'u', node_id: 'n', role: 'user', content: 'Plan it', seq: 0, created_at: 1, metadata: JSON.stringify(metadata) });
+    expect(row({ blockAnswer: { messageId: 'a-1', blockId: 'cb-form', title: 'Trip' } }).blockAnswer)
+      .toEqual({ messageId: 'a-1', blockId: 'cb-form', title: 'Trip' });
+    expect(row({ blockAnswer: { messageId: 'a-1' } }).blockAnswer).toBeUndefined();
+    expect(row({ blockAnswer: 'cb-form' }).blockAnswer).toBeUndefined();
+    const assistant = mapMessageRow({ id: 'a', node_id: 'n', role: 'assistant', content: 'x', seq: 1, created_at: 1, metadata: JSON.stringify({ blockAnswer: { messageId: 'a-1', blockId: 'b', title: '' } }) });
+    expect(assistant.blockAnswer).toBeUndefined();
+  });
+});

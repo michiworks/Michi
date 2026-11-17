@@ -3,7 +3,7 @@ import { AnimatePresence } from 'motion/react';
 import ContextMenu, { menuOpenKey, type MenuSection } from '../ContextMenu';
 import { workspaceRemoteNote } from '../WorkspaceLocation';
 import { useBackendConnections } from '../../state/useBackendConnections';
-import { FolderIcon } from './icons';
+import { CheckIcon, FolderIcon, ICON_PX, strokeFor } from './icons';
 import { composerMenuBelowEdge, composerMenusOpenBelow } from './PaneComposerToolbarLeft';
 
 interface MinimalProject {
@@ -30,10 +30,10 @@ const CLEAR_LABEL = 'Chat without a workspace';
 function ClearGlyph() {
   const maskId = `home-ws-clear-${useId().replace(/:/g, '')}`;
   return (
-    <svg width={14} height={14} viewBox="0 0 16 16" aria-hidden="true">
+    <svg width={ICON_PX.md} height={ICON_PX.md} viewBox="0 0 16 16" aria-hidden="true">
       <mask id={maskId}>
         <circle cx="8" cy="8" r="7" fill="white" />
-        <path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="black" strokeWidth={1.6} strokeLinecap="round" />
+        <path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="black" strokeWidth={strokeFor(ICON_PX.md)} strokeLinecap="round" />
       </mask>
       <circle cx="8" cy="8" r="7" fill="currentColor" mask={`url(#${maskId})`} />
     </svg>
@@ -62,7 +62,7 @@ export function HomeWorkspaceChip({
               label: p.name,
               // Remote workspaces say which backend they live on; local ones need no note.
               sublabel: workspaceRemoteNote(p.backendConnectionId, connections),
-              glyph: active?.id === p.id ? '✓' : undefined,
+              glyph: active?.id === p.id ? <CheckIcon size="sm" /> : undefined,
               run: () => onSelect(p.id),
             })),
     },
@@ -102,6 +102,7 @@ export function HomeWorkspaceChip({
         title="Switch workspace"
         aria-haspopup="menu"
         aria-expanded={!!menu}
+        data-empty={active ? undefined : ''}
         onClick={(e) => {
           e.stopPropagation();
           const trigger = e.currentTarget;
@@ -109,13 +110,9 @@ export function HomeWorkspaceChip({
           const preferBelow = composerMenusOpenBelow(trigger);
           setMenu((open) => (open ? null : { x: r.left, y: composerMenuBelowEdge(trigger), anchorBottom: r.top - 6, preferBelow, trigger }));
         }}
-        style={{
-          color: active ? 'var(--term-fg)' : 'var(--term-muted)',
-          fontStyle: active ? undefined : 'italic',
-        }}
       >
         <span className="home-workspace-chip__folder" style={{ display: 'inline-flex', color: 'var(--term-faint)', flexShrink: 0 }}>
-          <FolderIcon size={12} />
+          <FolderIcon />
         </span>
         <span className="t-chip-label">{active?.name ?? 'no workspace'}</span>
       </button>

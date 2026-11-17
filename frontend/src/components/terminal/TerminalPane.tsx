@@ -5,12 +5,13 @@ import '@xterm/xterm/css/xterm.css';
 import type { TerminalPaneItem } from '../../state/paneItems';
 import { useChatActions } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { getElectron } from '../../lib/electronBridge';
 import { usePrefs } from '../../state/prefs';
 import { terminalTargetForPane } from '../../state/terminalTarget';
 import BackendTerminalPane from './BackendTerminalPane';
 import { terminalTheme } from './terminalTheme';
-import { createPaneTerminal } from './terminalXterm';
+import { createPaneTerminal, paneSmoothScrollDuration } from './terminalXterm';
 
 export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
   const target = terminalTargetForPane(item);
@@ -23,8 +24,9 @@ export default function TerminalPane({ item }: { item: TerminalPaneItem }) {
 function NativeTerminalPane({ item }: { item: TerminalPaneItem }) {
   const { focusPane } = useChatActions();
   const { prefs } = usePrefs();
+  const reducedMotion = useReducedMotion();
   const terminalRef = useRef<Terminal | null>(null);
-  const shellStyle = usePaneShellStyle(item.id);
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'connecting' | 'ready' | 'unavailable' | 'exited'>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
@@ -94,6 +96,10 @@ function NativeTerminalPane({ item }: { item: TerminalPaneItem }) {
     }
   }, [prefs.terminalPalette, prefs.terminalAccentOverrides, item.cwd, item.surfaceId]);
 
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.smoothScrollDuration = paneSmoothScrollDuration(reducedMotion);
+  }, [reducedMotion]);
+
   return (
     <div data-pane-id={item.id} data-pane-kind="terminal" className="terminal-pane" onMouseDown={() => focusPane(item.id)} style={shellStyle}>
       <div style={{ height: 32, padding: '0 10px', display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--term-line)', flexShrink: 0, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>
@@ -107,6 +113,7 @@ function NativeTerminalPane({ item }: { item: TerminalPaneItem }) {
           The terminal could not start.
         </div>
       ) : null}
+      {recede}
     </div>
   );
 }

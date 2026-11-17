@@ -32,15 +32,15 @@ it('keeps launcher behavior and closes after choosing a view', () => {
 describe('closing panel', () => {
   const actions = () => screen.getByRole('group', { hidden: true });
   const toolbar = () => actions().parentElement as HTMLElement;
-  // jsdom has no AnimationEvent, so fireEvent.animationEnd drops animationName.
-  const animationEnd = (target: Element, animationName: string) => {
-    const event = new Event('animationend', { bubbles: true });
-    Object.defineProperty(event, 'animationName', { value: animationName });
+  // jsdom has no TransitionEvent, so fireEvent.transitionEnd drops propertyName.
+  const transitionEnd = (target: Element, propertyName: string) => {
+    const event = new Event('transitionend', { bubbles: true });
+    Object.defineProperty(event, 'propertyName', { value: propertyName });
     fireEvent(target, event);
   };
   afterEach(() => { delete document.documentElement.dataset.reduceMotion; });
 
-  it('plays mobile-leave as an inert ghost, then hides', () => {
+  it('fades out as an inert ghost, then hides', () => {
     vi.useFakeTimers();
     try {
       render(<ResponsiveToolbar><button>Map</button></ResponsiveToolbar>);
@@ -52,16 +52,16 @@ describe('closing panel', () => {
       expect(toolbar().hasAttribute('data-leaving')).toBe(true);
       expect(actions().hasAttribute('inert')).toBe(true);
       expect(actions().getAttribute('aria-hidden')).toBe('true');
-      // Only its own animation ends the phase, not one bubbling from a child.
-      animationEnd(screen.getByRole('button', { name: 'Map', hidden: true }), 'mobile-leave');
+      // Only its own opacity transition ends the phase, not one bubbling from a child.
+      transitionEnd(screen.getByRole('button', { name: 'Map', hidden: true }), 'opacity');
       expect(toolbar().hasAttribute('data-leaving')).toBe(true);
-      animationEnd(actions(), 'mobile-arrive');
+      transitionEnd(actions(), 'transform');
       expect(toolbar().hasAttribute('data-leaving')).toBe(true);
-      animationEnd(actions(), 'mobile-leave');
+      transitionEnd(actions(), 'opacity');
       expect(toolbar().hasAttribute('data-leaving')).toBe(false);
       expect(actions().hasAttribute('inert')).toBe(false);
 
-      // Reopening mid-exit turns it around; a skipped animationend still ends it.
+      // Reopening mid-exit turns it around; a skipped transitionend still ends it.
       fireEvent.click(trigger);
       fireEvent.click(trigger);
       fireEvent.click(trigger);

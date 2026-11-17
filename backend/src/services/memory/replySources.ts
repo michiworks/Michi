@@ -5,26 +5,25 @@ import { stripSentinelsStreamingSafe } from '../messageSerialization';
 import { digitRuns } from './consolidation';
 import type { MemoryPack, MemoryPackItem } from './contextBuilder';
 import {
-  consolidationRows, conversationWorkspaceId, currentCorrection, memoryTransaction, readMemoryMode, storedMemories, type StoredMemory,
+  consolidationRows, conversationWorkspaceId, currentCorrection, markMemoriesUsed, memoryTransaction, readMemoryMode, storedMemories,
+  type StoredMemory,
 } from './memoryRepository';
-import { parseRef } from './memoryRefs';
 import { getConversationMemoryMode, getMemorySettings, type MemoryCaller } from './memoryService';
 import { COMMON_TERMS, segmentTerms } from './memoryTerms';
-import {
-  createRecallMemo, docTerms, forgetConversationTurn, queryAtoms, recallDocument, recallTurnMatch, turnUserWords, type RecallDocumentQuery,
-} from './recallIndex';
+import { createRecallMemo, docTerms, queryAtoms, recallTurnMatch } from './recallIndex';
 import { vouchedForRecall } from './typedText';
 
 /**
- * Reply sources (spec round 10 §T): which memories and past-conversation
- * turns a reply repeated, of what its conversation's session was given, so a
- * quiet line under the reply can say what it was based on. Michi tracks this
- * itself: no model marker, and no prompt or stream change.
+ * Reply sources (spec round 10 §T): which memories a reply repeated, of what
+ * its conversation's session was given, so a quiet line under the reply can
+ * say what it was based on. Michi tracks this itself: no model marker, and no
+ * prompt or stream change. Past-conversation excerpts are never sources: a
+ * reply shares their words far more often than it uses them.
  *
- *  - The ledger (in memory, per conversation, LRU): what the session's
- *    pinned sections showed last (noteDelivered, from memoryInjection's
- *    delivery), and per turn the related and recent items its pack carried
- *    and what memory_search returned in it (noteSearched).
+ *  - The ledger (in memory, per conversation, LRU): the memories the
+ *    session's pinned sections showed last (noteDelivered, from
+ *    memoryInjection's delivery), and per turn the related memories its pack
+ *    carried and what memory_search returned in it (noteSearched).
  *  - When a turn finalizes (attributeTurn, a ChatHub.onTurnFinalized
  *    listener after recall indexed it), the candidates are the pinned items
  *    and the items of this turn and the two before; one is used when recall's
@@ -32,18 +31,19 @@ import { vouchedForRecall } from './typedText';
  *    terms do not count toward how common they are), and the reply adds what
  *    matched: two pieces of evidence the user did not write (a matched part
  *    in the reply, a number of the item in it), or one that names the item
- *    (one of its keywords or keys, a number of three digits or more or with a
- *    decimal). A past-conversation item is matched by what the user typed in that
- *    turn (and its keys), not by what Michi replied there: the line lists
- *    what the user told. Lexical, so it may miss a paraphrase: the line says
+ *    (one of its keywords, a number of three digits or more or with a
+ *    decimal). Lexical, so it may miss a paraphrase: the line says
  *    it may not list everything. Nothing here reads meaning, and nothing is
  *    shown to a model. The checks of one turn share their index reads, and a
  *    candidate whose words the reply cannot add is never searched.
+ *  - A used memory's last_used_at (migration 0091) moves to now: what keeps
+ *    Michi's own workspace notes from going stale (validity.ts).
  *  - The rows (memory_turn_sources, migration 0078) hold ids only; triggers
- *    drop them when an item or a conversation goes, and the read path
- *    (replySourcesView) checks each again: a memory merged into another shows
- *    the one it went into, a corrected or removed one and a hidden or trashed
- *    conversation show nothing.
+ *    drop them when a memory or a conversation goes, and the read path
+ *    (replySourcesView) reads the memory rows (older rows may name
+ *    past-conversation turns) and checks each again: a memory merged into
+ *    another shows the one it went into, a corrected or removed one shows
+ *    nothing.
  *  - Only turns Michi indexes get rows: a person-typed, completed turn of a
  *    conversation that learns, V's included. Use only and Off chats,
  *    scheduled-job turns, check-ins, posts and cancelled or failed turns get
@@ -53,18 +53,15 @@ import { vouchedForRecall } from './typedText';
 /** Where an item came from: a memory_search in the turn, or a section of its memory pack. */
 export type ReplySourceSection = 'search' | MemoryPackItem['section'];
 
-type LedgerItem =
-  | { kind: 'memory'; id: string; section: ReplySourceSection }
-  | { kind: 'conversation'; docId: number; text: string | null; section: ReplySourceSection };
+/** A memory the session was given. */
+interface LedgerItem { id: string; section: ReplySourceSection }
 
 interface NodeLedger {
   ownerUserId: string;
-  /** What the session's latest pinned sections showed (memories). */
+  /** What the session's latest pinned sections showed. */
   pinned: LedgerItem[];
   /** What each turn's pack and searches gave it. */
   turns: Map<string, LedgerItem[]>;
-  /** Excerpt characters each turn holds. */
-  chars: Map<string, number>;
   /** The last finalized turns, oldest first (at most CARRIED_TURNS). */
   order: string[];
 }
@@ -72,11 +69,8 @@ interface NodeLedger {
 const LIMITS = Object.freeze({
   /** Conversations the ledger keeps (least recently used go). */
   nodes: 100,
-  /** Items one turn holds, and the excerpt text it holds (an item over it is kept without text and never matched). */
+  /** Items one turn holds. */
   turnItems: 30,
-  turnChars: 32_000,
-  /** A search result's text at most. */
-  searchTextChars: 4_000,
   /** Earlier finalized turns whose items still count. */
   carriedTurns: 2,
   /** Candidates checked per turn, and sources kept. */
@@ -88,8 +82,6 @@ const LIMITS = Object.freeze({
    * however large the workspace.
    */
   evaluatedDocs: 30_000,
-  /** A conversation source's text in a view. */
-  viewTextChars: 200,
 });
 
 const ledgers = new Map<string, NodeLedger>();
@@ -97,10 +89,6 @@ const ledgers = new Map<string, NodeLedger>();
 const SECTION_RANK: Record<ReplySourceSection, number> = {
   search: 0, related: 1, recent: 2, saved: 3, preferences: 4, profile: 5,
 };
-
-function keyOf(item: LedgerItem): string {
-  return item.kind === 'memory' ? `m:${item.id}` : `c:${item.docId}`;
-}
 
 /** The node's ledger, touched (LRU); a ledger of another owner starts over. */
 function ledgerOf(ownerUserId: string, nodeId: string, create: boolean): NodeLedger | null {
@@ -111,7 +99,7 @@ function ledgerOf(ownerUserId: string, nodeId: string, create: boolean): NodeLed
   }
   if (!ledger) {
     if (!create) return null;
-    ledger = { ownerUserId, pinned: [], turns: new Map(), chars: new Map(), order: [] };
+    ledger = { ownerUserId, pinned: [], turns: new Map(), order: [] };
   }
   ledgers.delete(nodeId);
   ledgers.set(nodeId, ledger);
@@ -121,43 +109,19 @@ function ledgerOf(ownerUserId: string, nodeId: string, create: boolean): NodeLed
 
 function addItems(ledger: NodeLedger, turnId: string, items: readonly LedgerItem[]): void {
   const list = ledger.turns.get(turnId) ?? [];
-  let chars = ledger.chars.get(turnId) ?? 0;
-  const held = new Set(list.map(keyOf));
+  const held = new Set(list.map((item) => item.id));
   for (const item of items) {
     if (list.length >= LIMITS.turnItems) break;
-    if (held.has(keyOf(item))) {
-      // One past turn shown twice (a long message's start and end under Recent, the part around a match under Related):
-      // what the user said in either counts.
-      const index = list.findIndex((entry) => keyOf(entry) === keyOf(item));
-      const entry = list[index];
-      if (entry?.kind === 'conversation' && entry.text && item.kind === 'conversation' && item.text && !entry.text.includes(userPart(item.text))) {
-        const text = `${userPart(entry.text)}\n${userPart(item.text)}`;
-        if (chars - entry.text.length + text.length <= LIMITS.turnChars) {
-          chars += text.length - entry.text.length;
-          list[index] = { ...entry, text };
-        }
-      }
-      continue;
-    }
-    held.add(keyOf(item));
-    if (item.kind === 'conversation' && item.text) {
-      if (chars + item.text.length > LIMITS.turnChars) {
-        list.push({ ...item, text: null });
-        continue;
-      }
-      chars += item.text.length;
-    }
+    if (held.has(item.id)) continue;
+    held.add(item.id);
     list.push(item);
   }
   ledger.turns.set(turnId, list);
-  ledger.chars.set(turnId, chars);
 }
 
-function packItem(item: MemoryPackItem): LedgerItem | null {
-  if (item.kind === 'memory') return { kind: 'memory', id: item.id, section: item.section };
-  const ref = parseRef(item.ref);
-  if (!ref || ref.kind !== 'conversation') return null;
-  return { kind: 'conversation', docId: ref.docId, text: item.shown ?? null, section: item.section };
+/** A pack's memories (its past-conversation lines are never sources). */
+function packMemories(items: readonly MemoryPackItem[]): LedgerItem[] {
+  return items.flatMap((item) => (item.kind === 'memory' ? [{ id: item.id, section: item.section }] : []));
 }
 
 const PINNED_SECTIONS = new Set<MemoryPackItem['section']>(['saved', 'preferences', 'profile']);
@@ -167,7 +131,7 @@ const PINNED_SECTIONS = new Set<MemoryPackItem['section']>(['saved', 'preference
  * delivery, and its retraction when the conversation is off): an off pack
  * drops the conversation; a new session's pack starts the carry over; a pack
  * that carries the pinned sections replaces what they showed; its related
- * and recent items join the turn's. Never throws.
+ * memories join the turn's. Never throws.
  */
 export function noteDelivered(input: {
   ownerUserId: string; nodeId: string | null | undefined; turnId: string | null | undefined;
@@ -183,32 +147,26 @@ export function noteDelivered(input: {
     const ledger = ledgerOf(ownerUserId, nodeId, true)!;
     if (pack.framed) {
       ledger.turns.clear();
-      ledger.chars.clear();
       ledger.order = [];
     }
     if (pack.signature !== null) {
-      ledger.pinned = pack.items.filter((item) => PINNED_SECTIONS.has(item.section)).flatMap((item) => packItem(item) ?? []);
+      ledger.pinned = packMemories(pack.items.filter((item) => PINNED_SECTIONS.has(item.section)));
     }
     if (input.turnId) {
-      addItems(ledger, input.turnId, pack.items.filter((item) => item.section === 'related' || item.section === 'recent').flatMap((item) => packItem(item) ?? []));
+      addItems(ledger, input.turnId, packMemories(pack.items.filter((item) => item.section === 'related')));
     }
   } catch (error) {
     log.warn('workspace', 'reply sources: a delivery was not noted', { error: error instanceof Error ? error.message : String(error) });
   }
 }
 
-/** What memory_search returned in the running turn: memories, and past-conversation excerpts with the text it showed. */
-export type SearchedItem = { kind: 'memory'; id: string } | { kind: 'conversation'; docId: number; text: string };
-
-/** memory_search (or a ref lookup) gave the running turn these items. Never throws. */
-export function noteSearched(input: { ownerUserId: string; nodeId: string | null | undefined; turnId: string | null | undefined; items: readonly SearchedItem[] }): void {
+/** memory_search (or a ref lookup) gave the running turn these memories. Never throws. */
+export function noteSearched(input: { ownerUserId: string; nodeId: string | null | undefined; turnId: string | null | undefined; memoryIds: readonly string[] }): void {
   try {
     const { ownerUserId, nodeId, turnId } = input;
-    if (!ownerUserId || !nodeId || !turnId || input.items.length === 0) return;
+    if (!ownerUserId || !nodeId || !turnId || input.memoryIds.length === 0) return;
     const ledger = ledgerOf(ownerUserId, nodeId, true)!;
-    addItems(ledger, turnId, input.items.map((item): LedgerItem => (item.kind === 'memory'
-      ? { kind: 'memory', id: item.id, section: 'search' }
-      : { kind: 'conversation', docId: item.docId, text: item.text.slice(0, LIMITS.searchTextChars), section: 'search' })));
+    addItems(ledger, turnId, input.memoryIds.map((id) => ({ id, section: 'search' })));
   } catch (error) {
     log.warn('workspace', 'reply sources: a search was not noted', { error: error instanceof Error ? error.message : String(error) });
   }
@@ -237,12 +195,12 @@ export interface AttributionTurn {
 export interface TurnAttribution {
   /** The turn's recall document. */
   docId: number;
-  /** What was considered, in priority order (the excerpt text it was given, for conversations). */
-  candidates: Array<{ kind: 'memory' | 'conversation'; id: string; section: ReplySourceSection; text?: string }>;
+  /** The memories considered, in priority order. */
+  candidates: LedgerItem[];
   /** Candidates recall's gate was asked about. */
   evaluated: number;
   /** What the reply was based on, as stored. */
-  used: Array<{ kind: 'memory' | 'conversation'; id: string; section: ReplySourceSection }>;
+  used: LedgerItem[];
 }
 
 interface TurnDoc {
@@ -259,8 +217,6 @@ interface TurnDoc {
 const TURN_DOC_SQL = `SELECT id, owner_user_id, workspace_id, title, snippet, keys, content, hidden FROM memory_recall_docs
   WHERE doc_kind = 'turn' AND ref_id = ?`;
 const WORKSPACE_DOCS_SQL = 'SELECT count(*) AS n FROM memory_recall_docs WHERE workspace_id = ?';
-const DOC_BY_ID_SQL = `SELECT id, owner_user_id, workspace_id, title, snippet, keys, content, hidden, ref_id FROM memory_recall_docs
-  WHERE id = ? AND doc_kind = 'turn'`;
 
 /** Calls of recall's gate made by attributeTurn (the prefilter saves them). */
 let gateCalls = 0;
@@ -354,19 +310,10 @@ function replyCouldAdd(query: string, atoms: ReadonlySet<string>, reply: ClauseT
   return false;
 }
 
-/** The user's words of an excerpt as a pack line or a search result shows it ("words → reply", or "words\n→ reply"). */
-function userPart(text: string): string {
-  const split = text.indexOf('\n→ ');
-  if (split >= 0) return text.slice(0, split);
-  const flatSplit = text.indexOf(' → ');
-  return flatSplit >= 0 ? text.slice(0, flatSplit) : text;
-}
-
 /** The turn's items go from the ledger (it got no sources). */
 function dropTurn(nodeId: string, turnId: string): void {
   const ledger = ledgers.get(nodeId);
   ledger?.turns.delete(turnId);
-  ledger?.chars.delete(turnId);
 }
 
 /**
@@ -377,16 +324,14 @@ function dropTurn(nodeId: string, turnId: string): void {
 function settleLedger(ledger: NodeLedger, turnId: string): void {
   ledger.order = [...ledger.order.filter((id) => id !== turnId), turnId].slice(-LIMITS.carriedTurns);
   for (const id of [...ledger.turns.keys()]) {
-    if (ledger.order.includes(id)) continue;
-    ledger.turns.delete(id);
-    ledger.chars.delete(id);
+    if (!ledger.order.includes(id)) ledger.turns.delete(id);
   }
 }
 
 /**
  * A turn finalized (ChatHub.onTurnFinalized, after recallIndex.indexTurn):
  * stores which of what its session was given its reply repeated, at most
- * LIMITS.sources (memories first), checking at most LIMITS.evaluated
+ * LIMITS.sources, checking at most LIMITS.evaluated
  * candidates in priority order (fewer in a large workspace: evaluatedDocs). Only a completed turn a person typed whose
  * recall document exists and is not hidden, of an owner whose memory is on,
  * gets rows; the rows exist when this returns. Returns what it considered
@@ -422,7 +367,7 @@ function attribute(turn: AttributionTurn): TurnAttribution | null {
   if (process.env.MICHI_CLOUD === '1' && turn.ownerUserId && turn.ownerUserId !== ownerUserId) return none();
   if ((readMemoryMode(ownerUserId) ?? 'auto') === 'off') return none();
   const ledger = ledgerOf(ownerUserId, turn.nodeId, false);
-  // Candidates: this turn's searches first, then the pack's related and recent items, then the pinned sections, the earlier turns' after this one's.
+  // Candidates: this turn's searches first, then the pack's related memories, then the pinned sections, the earlier turns' after this one's.
   const pools: LedgerItem[][] = ledger ? [
     ledger.turns.get(turn.turnId) ?? [],
     ...[...ledger.order].reverse().filter((id) => id !== turn.turnId).map((id) => ledger.turns.get(id) ?? []),
@@ -433,12 +378,11 @@ function attribute(turn: AttributionTurn): TurnAttribution | null {
   const seen = new Set<string>();
   const candidates: LedgerItem[] = [];
   for (const { item } of ordered) {
-    if (seen.has(keyOf(item))) continue;
-    seen.add(keyOf(item));
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
     candidates.push(item);
   }
-  const memories = new Map(storedMemories(ownerUserId, candidates.flatMap((item) => (item.kind === 'memory' ? [item.id] : [])))
-    .map((stored) => [stored.record.id, stored]));
+  const memories = new Map(storedMemories(ownerUserId, candidates.map((item) => item.id)).map((stored) => [stored.record.id, stored]));
   const reply = stripSentinelsStreamingSafe(turn.assistantText ?? '');
   const userWords = [turn.userText ?? '', ...(turn.steers ?? []).map((steer) => steer?.text ?? ''), turn.quotedText ?? ''].join('\n');
   const replyTerms = clauseTerms(reply);
@@ -449,32 +393,17 @@ function attribute(turn: AttributionTurn): TurnAttribution | null {
   const memo = createRecallMemo();
   const documents = doc.workspace_id ? (prepareCached(WORKSPACE_DOCS_SQL).get(doc.workspace_id) as { n: number }).n : 0;
   const checks = Math.max(1, Math.min(LIMITS.evaluated, Math.floor(LIMITS.evaluatedDocs / Math.max(1, documents))));
-  const considered: TurnAttribution['candidates'] = [];
-  const used: Array<{ item: LedgerItem; sourceTurnId: string | null }> = [];
+  const considered: LedgerItem[] = [];
+  const used: LedgerItem[] = [];
   let evaluated = 0;
   for (const item of candidates) {
     if (evaluated >= checks) break;
-    let query: string;
-    let keys: string[];
-    let sourceTurnId: string | null = null;
-    if (item.kind === 'memory') {
-      const stored = memories.get(item.id);
-      // What this turn itself saved or corrected is no source of its reply.
-      if (!memoryShowable(stored, ownerUserId, doc.workspace_id) || stored.record.source?.turnId === turn.turnId) continue;
-      query = memoryQuery(stored.record);
-      keys = stored.record.keywords ?? [];
-      sourceTurnId = stored.record.source?.turnId ?? null;
-      considered.push({ kind: 'memory', id: item.id, section: item.section });
-    } else {
-      if (!item.text) continue;
-      const excerpt = prepareCached(DOC_BY_ID_SQL).get(item.docId) as (TurnDoc & { ref_id: string }) | undefined;
-      if (!excerpt || excerpt.owner_user_id !== ownerUserId || excerpt.hidden === 1 || excerpt.ref_id === turn.turnId) continue;
-      // What the user told in that turn, not what Michi replied there.
-      query = [userPart(item.text), excerpt.keys].filter(Boolean).join('\n');
-      keys = excerpt.keys.split('\n').map((key) => key.trim()).filter(Boolean);
-      sourceTurnId = excerpt.ref_id;
-      considered.push({ kind: 'conversation', id: String(item.docId), section: item.section, text: item.text });
-    }
+    const stored = memories.get(item.id);
+    // What this turn itself saved or corrected is no source of its reply.
+    if (!memoryShowable(stored, ownerUserId, doc.workspace_id) || stored.record.source?.turnId === turn.turnId) continue;
+    const query = memoryQuery(stored.record);
+    const keys = stored.record.keywords ?? [];
+    considered.push(item);
     // Prefilter: a document holding none of the query's index terms cannot match it (no search needed).
     const atoms = queryAtoms(query);
     if (![...atoms].some((atom) => terms.has(atom))) continue;
@@ -485,39 +414,26 @@ function attribute(turn: AttributionTurn): TurnAttribution | null {
     // The reply's own turn does not make what it repeats look common (it holds every term it repeats).
     const matched = doc.workspace_id ? recallTurnMatch({ ownerUserId, workspaceId: doc.workspace_id, query, docId: doc.id, memo, excludeSelf: true }) : null;
     if (!matched || !replyAdds(matched, query, keys, replyTerms, userTerms)) continue;
-    used.push({ item, sourceTurnId });
+    used.push(item);
   }
-  // An excerpt of the turn a used memory came from says nothing the memory does not.
-  const memorySources = new Set(used.filter((entry) => entry.item.kind === 'memory').map((entry) => entry.sourceTurnId).filter(Boolean));
-  const kept = [
-    ...used.filter((entry) => entry.item.kind === 'memory'),
-    ...used.filter((entry) => entry.item.kind === 'conversation' && !memorySources.has(entry.sourceTurnId)),
-  ].slice(0, LIMITS.sources);
+  const kept = used.slice(0, LIMITS.sources);
   const now = Date.now();
   memoryTransaction(() => {
     prepareCached('DELETE FROM memory_turn_sources WHERE turn_id = ?').run(turn.turnId);
     const insert = prepareCached(`INSERT OR IGNORE INTO memory_turn_sources (turn_id, item_kind, item_id, owner_user_id, node_id, rank, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    kept.forEach(({ item }, rank) => {
-      insert.run(turn.turnId, item.kind, item.kind === 'memory' ? item.id : String(item.docId), ownerUserId, turn.nodeId, rank, now);
+    kept.forEach((item, rank) => {
+      insert.run(turn.turnId, 'memory', item.id, ownerUserId, turn.nodeId, rank, now);
     });
+    markMemoriesUsed(ownerUserId, kept.map((item) => item.id), now);
   });
   if (ledger) settleLedger(ledger, turn.turnId);
-  return {
-    docId: doc.id, candidates: considered, evaluated,
-    used: kept.map(({ item }) => ({ kind: item.kind, id: item.kind === 'memory' ? item.id : String(item.docId), section: item.section })),
-  };
+  return { docId: doc.id, candidates: considered, evaluated, used: kept };
 }
 
 // ── reading ──────────────────────────────────────────────────────────────────
 
-interface SourceRow { turn_id: string; item_kind: string; item_id: string; rank: number }
-
-function clip(text: string, max: number): string {
-  const flat = text.replace(/\s+/gu, ' ').trim();
-  const chars = [...flat];
-  return chars.length <= max ? flat : `${chars.slice(0, max - 1).join('').trimEnd()}…`;
-}
+interface SourceRow { turn_id: string; item_id: string; rank: number }
 
 /** The user message of a turn, for a source link that opens it. */
 function userMessageOf(turnId: string | null | undefined): string | null {
@@ -562,57 +478,24 @@ export function replySourcesView(caller: MemoryCaller, nodeId: string, messageId
   const turns = getDb().prepare(`SELECT turn_id, assistant_message_id FROM turns WHERE node_id = ? AND assistant_message_id IN (SELECT value FROM json_each(?))`)
     .all(nodeId, JSON.stringify([...new Set(messageIds)])) as Array<{ turn_id: string; assistant_message_id: string }>;
   if (turns.length === 0) return { messages: [] };
-  const rows = getDb().prepare(`SELECT turn_id, item_kind, item_id, rank FROM memory_turn_sources
-      WHERE owner_user_id = ? AND node_id = ? AND turn_id IN (SELECT value FROM json_each(?)) ORDER BY turn_id, rank`)
+  const rows = getDb().prepare(`SELECT turn_id, item_id, rank FROM memory_turn_sources
+      WHERE owner_user_id = ? AND node_id = ? AND item_kind = 'memory' AND turn_id IN (SELECT value FROM json_each(?)) ORDER BY turn_id, rank`)
     .all(ownerUserId, nodeId, JSON.stringify(turns.map((row) => row.turn_id))) as unknown as SourceRow[];
-  const memories = new Map(storedMemories(ownerUserId, [...new Set(rows.filter((row) => row.item_kind === 'memory').map((row) => row.item_id))])
-    .map((stored) => [stored.record.id, stored]));
-  const scope = (docId: number): RecallDocumentQuery => ({
-    ownerUserId, docId, workspaceIds: 'all', includeUserScope: false, kinds: ['turn'], currentWorkspaceId: workspaceId,
-  });
+  const memories = new Map(storedMemories(ownerUserId, [...new Set(rows.map((row) => row.item_id))]).map((stored) => [stored.record.id, stored]));
   const messages: ReplyMemorySourcesResponse['messages'] = [];
   for (const { turn_id: turnId, assistant_message_id: messageId } of turns) {
     const sources: ReplyMemorySource[] = [];
     const shown = new Set<string>();
     for (const row of rows) {
       if (row.turn_id !== turnId) continue;
-      if (row.item_kind === 'memory') {
-        const stored = shownMemory(ownerUserId, memories.get(row.item_id));
-        if (!stored || shown.has(stored.record.id) || !memoryShowable(stored, ownerUserId, workspaceId)) continue;
-        shown.add(stored.record.id);
-        sources.push(memorySource(stored));
-      } else if (row.item_kind === 'conversation') {
-        const docId = Number(row.item_id);
-        const hit = Number.isSafeInteger(docId) ? recallDocument(scope(docId)) : null;
-        if (!hit || hit.kind !== 'turn' || !hit.nodeId || shown.has(`c:${docId}`)) continue;
-        shown.add(`c:${docId}`);
-        sources.push({
-          kind: 'conversation', docId, text: clip(turnUserWords(hit.snippet), LIMITS.viewTextChars), at: hit.at,
-          from: { nodeId: hit.nodeId, messageId: userMessageOf(hit.turnId), title: hit.title },
-        });
-      }
+      const stored = shownMemory(ownerUserId, memories.get(row.item_id));
+      if (!stored || shown.has(stored.record.id) || !memoryShowable(stored, ownerUserId, workspaceId)) continue;
+      shown.add(stored.record.id);
+      sources.push(memorySource(stored));
     }
     if (sources.length > 0) messages.push({ messageId, sources });
   }
   return { messages };
-}
-
-/**
- * The user asked Michi not to recall a past-conversation turn (the footer's
- * Don't recall, as ChatGPT's "Don't mention this again"): the turn is hidden
- * from recall and barred from extraction (recallIndex.forgetConversationTurn);
- * the conversation itself is unchanged. Already hidden is done; null when
- * the scope may read no such turn.
- */
-export function forgetRecalledTurn(scope: RecallDocumentQuery): { hidden: true } | null {
-  return forgetConversationTurn(scope) ? { hidden: true } : null;
-}
-
-/** The scope POST /api/memory-recall/hide reads a turn in: any of the owner's workspaces, the turn's own even with AI navigation off. */
-export function recalledTurnScope(ownerUserId: string, docId: number): RecallDocumentQuery {
-  const row = getDb().prepare("SELECT workspace_id FROM memory_recall_docs WHERE id = ? AND owner_user_id = ? AND doc_kind = 'turn'")
-    .get(docId, ownerUserId) as { workspace_id: string | null } | undefined;
-  return { ownerUserId, docId, workspaceIds: 'all', includeUserScope: false, kinds: ['turn'], currentWorkspaceId: row?.workspace_id ?? null };
 }
 
 /**

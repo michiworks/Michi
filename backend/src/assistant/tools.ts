@@ -42,7 +42,8 @@ import {
 import type { ScheduledJobToolName } from '../agents/scheduledJobToolNames';
 import { MEMORY_TOOL_LABELS, MEMORY_TOOL_NAMES, type MemoryToolName } from '../agents/memoryToolNames';
 import { memoryTool } from '../agents/memoryTools';
-import { keywordSearch } from '../routes/search';
+import type { SearchResult } from '../routes/search';
+import { runSearch, SearchLimitError } from '../services/searchReader';
 import { getDb } from '../services/db';
 import { getAiGlobalContext, listWorkspaces, parseFolders } from '../services/dbRepository';
 import {
@@ -488,8 +489,16 @@ export const ASSISTANT_TOOLS: readonly AssistantTool[] = [
       // search material, nor are deleted workspaces or ones the user keeps
       // from AI navigation: the query leaves them out (a search across
       // workspaces never includes system ones), and temporary chats are no one's.
-      const results = keywordSearch(input.query, workspace?.id, limit, ctx.ownerUserId ?? undefined,
-        { excludeDeletedWorkspaces: true, excludeNavigationDisabled: true, excludeTemporaryChats: true });
+      let results: SearchResult[];
+      try {
+        results = await runSearch({
+          kind: 'keyword', query: input.query, workspaceId: workspace?.id, limit, userId: ctx.ownerUserId ?? undefined,
+          options: { excludeDeletedWorkspaces: true, excludeNavigationDisabled: true, excludeTemporaryChats: true },
+        });
+      } catch (error) {
+        if (error instanceof SearchLimitError) return text(error.message, true);
+        throw error;
+      }
       if (results.length === 0) {
         return text(`No matches for "${input.query}" in ${workspace ? workspace.name : 'any workspace'}.`);
       }

@@ -13,13 +13,17 @@ export interface PageChangesProps {
   onRedo: (change: PageChangeDto) => void | Promise<void>;
   onRevertBatch: (batchId: string) => void | Promise<void>;
   onOpenSource: (source: ExactPageSource) => void | boolean | Promise<void | boolean>;
+  /** The page is being read: with no changes yet, Activity says so. */
   loading: boolean;
+  /** The page cannot be changed here (archived, out of date or not read yet): the actions are off. */
+  readOnly?: boolean;
   error: string | null;
   hasMore?: boolean;
   onLoadMore?: () => void | Promise<void>;
 }
 
-export function PageChanges({ changes, onAccept, onDismiss, onReopen, onRevert, onRedo, onRevertBatch, onOpenSource, loading, error, hasMore = false, onLoadMore }: PageChangesProps) {
+export function PageChanges({ changes, onAccept, onDismiss, onReopen, onRevert, onRedo, onRevertBatch, onOpenSource, loading, readOnly = false, error, hasMore = false, onLoadMore }: PageChangesProps) {
+  const locked = loading || readOnly;
   const batches = useMemo(() => {
     const groups = new Map<string, PageChangeDto[]>();
     for (const change of changes) {
@@ -44,14 +48,14 @@ export function PageChanges({ changes, onAccept, onDismiss, onReopen, onRevert, 
         <section className="page-change-batch" key={batchId}>
           <header className="page-change-batch__header">
             <span>{applied > 0 ? `${applied} agent update${applied === 1 ? '' : 's'}` : items.some((item) => item.applicationState === 'applied' && item.source.kind === 'user') ? 'Your changes' : 'Suggested changes'}{waiting > 0 ? ` · ${waiting} waiting for you` : ''}</span>
-            {applied > 0 && <button type="button" disabled={loading} onClick={() => void onRevertBatch(batchId)}>Undo all ({applied})</button>}
+            {applied > 0 && <button type="button" disabled={locked} onClick={() => void onRevertBatch(batchId)}>Undo all ({applied})</button>}
           </header>
           {items.map((change) => (
-            <ChangeCard key={change.id} change={change} onAccept={onAccept} onDismiss={onDismiss} onReopen={onReopen} onRevert={onRevert} onRedo={onRedo} onOpenSource={onOpenSource} loading={loading} error={error} />
+            <ChangeCard key={change.id} change={change} onAccept={onAccept} onDismiss={onDismiss} onReopen={onReopen} onRevert={onRevert} onRedo={onRedo} onOpenSource={onOpenSource} loading={locked} error={error} />
           ))}
         </section>
       ))}
-      {hasMore && <button type="button" className="page-changes-load-more" disabled={loading} onClick={() => { void onLoadMore?.(); }}>Load older activity</button>}
+      {hasMore && <button type="button" className="page-changes-load-more" disabled={locked} onClick={() => { void onLoadMore?.(); }}>Load older activity</button>}
     </details>
   );
 }

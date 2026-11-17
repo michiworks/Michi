@@ -120,7 +120,7 @@ describe('Settings › <name>', () => {
     render(<CompanionSettings />);
     await flush();
     const titles = screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent);
-    expect(titles).toEqual(['Robin', 'Model', 'Watching', 'Updates', 'Instructions', 'Pages']);
+    expect(titles).toEqual(['Robin', 'Model', 'Watching', 'Instructions', 'Pages']);
     expect(document.querySelector('.settings-section__intro')).toBeNull();
     expect(document.body.textContent).not.toMatch(/meta agent/i);
     expect(document.body.textContent).not.toMatch(/\bCompanion\b/);
@@ -152,7 +152,6 @@ describe('Settings › <name>', () => {
     for (const gone of ['1 hour', 'Until tomorrow', 'Until I resume', 'Resume']) expect(screen.queryByRole('button', { name: gone }), gone).toBeNull();
     // Off: nothing is greyed out or folded away.
     expect(screen.getByRole('switch', { name: 'Michi conversations' })).toHaveProperty('disabled', false);
-    expect(screen.getByRole('switch', { name: 'Morning brief' })).toHaveProperty('disabled', false);
     expect(screen.getByRole('heading', { name: 'Instructions' })).toBeTruthy();
     fireEvent.click(power);
     expect(mocks.patch).toHaveBeenLastCalledWith({ paused: false });
@@ -175,6 +174,16 @@ describe('Settings › <name>', () => {
     expect(section('Robin').querySelector('.settings-section__aside')).toBeNull();
   });
 
+  it('turns Auto-continue your chats on with one row, off by default', () => {
+    mocks.patch.mockResolvedValue(base);
+    render(<CompanionSettings />);
+    const toggle = within(row('Auto-continue your chats')).getByRole('switch', { name: 'Auto-continue your chats' });
+    expect(toggle.getAttribute('aria-checked')).toBe('false');
+    expect(row('Auto-continue your chats').querySelector('.settings-row__desc')).toBeNull();
+    fireEvent.click(toggle);
+    expect(mocks.patch).toHaveBeenLastCalledWith({ autoContinueChats: true });
+  });
+
   it('turns one source off; a source shows its state only when it is not working, and Options opens its settings in place', () => {
     const source = (kind: CompanionSourceStatus['kind'], state: CompanionSourceStatus['state'], detail: string | null = null): CompanionSourceStatus => ({
       kind, state, detail, lastPolledAt: Date.now() - 60_000, nextPollAt: null,
@@ -187,33 +196,13 @@ describe('Settings › <name>', () => {
     expect(mocks.patch).toHaveBeenLastCalledWith({ sources: { michi: { enabled: !base.settings.sources.michi.enabled } } });
   });
 
-  it('chooses the morning brief’s days: Weekdays, Every day, or Custom with a button for each day', () => {
-    mocks.patch.mockResolvedValue(base);
+  it('has no schedule of its own any more: no morning brief, interval, quiet hours or workdays', () => {
     render(<CompanionSettings />);
-    const days = within(section('Updates')).getByRole('combobox', { name: 'Morning brief days' }) as HTMLSelectElement;
-    expect(days.value).toBe('weekdays');
-    expect(screen.queryByRole('group', { name: 'Morning brief days of the week' })).toBeNull();
-    fireEvent.change(days, { target: { value: 'every' } });
-    expect(mocks.patch).toHaveBeenLastCalledWith({ brief: { days: [0, 1, 2, 3, 4, 5, 6] } });
-    fireEvent.change(days, { target: { value: 'custom' } });
-    const week = screen.getByRole('group', { name: 'Morning brief days of the week' });
-    expect(within(week).getAllByRole('button').filter((day) => day.getAttribute('aria-pressed') === 'true').map((day) => day.textContent))
-      .toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']);
-    fireEvent.click(within(week).getByRole('button', { name: 'Sat' }));
-    expect(mocks.patch).toHaveBeenLastCalledWith({ brief: { days: [1, 2, 3, 4, 5, 6] } });
-    for (const gone of ['Check-in interval', 'Check every (minutes)', 'Quiet hours', 'Workdays']) {
+    for (const gone of ['Morning brief', 'Morning brief days', 'Check-in interval', 'Check every (minutes)', 'Quiet hours', 'Workdays']) {
       expect(screen.queryByLabelText(gone), gone).toBeNull();
     }
-  });
-
-  it('keeps at least one morning brief day', () => {
-    resetCompanionStoreForTests({ snapshot: named({ settings: { ...base.settings, brief: { ...base.settings.brief, days: [3] } } }) });
-    render(<CompanionSettings />);
-    expect((screen.getByRole('combobox', { name: 'Morning brief days' }) as HTMLSelectElement).value).toBe('custom');
-    const wednesday = within(screen.getByRole('group', { name: 'Morning brief days of the week' })).getByRole('button', { name: 'Wed' }) as HTMLButtonElement;
-    expect(wednesday.disabled).toBe(true);
-    fireEvent.click(wednesday);
-    expect(mocks.patch).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Updates' })).toBeNull();
+    expect(document.body.textContent).not.toMatch(/brief/i);
   });
 
   it('says when a setting could not be saved', async () => {
@@ -300,6 +289,19 @@ describe('Settings › <name>', () => {
     fireEvent.click(within(goals).getByRole('button', { name: 'Keep goal: Ship v2' }));
     expect(mocks.updateGoal).toHaveBeenCalledWith('g1', 'Ship v2');
     await waitFor(() => expect(within(row('Goals')).queryByText(/Written by Robin/)).toBeNull());
+  });
+
+  it('leaves Enter and Esc that end an IME composition to the goal field', () => {
+    resetCompanionStoreForTests({ snapshot: named({ goals: [{ id: 'g1', text: 'Ship v2', progress: null, progressAt: null, createdAt: 1, updatedAt: 1 }] }) });
+    render(<CompanionSettings />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit goals' }));
+    fireEvent.click(within(row('Goals')).getByRole('button', { name: 'Edit goal: Ship v2' }));
+    const field = screen.getByRole('textbox', { name: 'Goal' });
+    fireEvent.change(field, { target: { value: '发布 v2' } });
+    fireEvent.keyDown(field, { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(field, { key: 'Escape', isComposing: true });
+    expect(mocks.updateGoal).not.toHaveBeenCalled();
+    expect((screen.getByRole('textbox', { name: 'Goal' }) as HTMLInputElement).value).toBe('发布 v2');
   });
 
   it('shows Memory as Settings › Memory has it, learning from conversations off by default (Q28), with the way there', async () => {

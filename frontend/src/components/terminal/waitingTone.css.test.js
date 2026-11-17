@@ -18,7 +18,8 @@ it('draws waiting on you in --term-waiting, leaving the accent to selection', ()
     ".area-side__dot[data-tone='waiting']",
   ]);
   for (const { selector, body } of waiting) {
-    expect(body, selector).toContain('var(--term-waiting)');
+    // The "Waiting on you" words take the hue's text form; marks take the hue.
+    expect(body, selector).toContain(selector === '.michi-card__attention' ? 'var(--term-waiting-text)' : 'var(--term-waiting)');
     // The current card's 1px ring marks selection, which is the accent's.
     expect(body.replace('0 0 0 1px var(--term-accent)', ''), selector).not.toContain('--term-accent');
   }

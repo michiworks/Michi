@@ -57,7 +57,7 @@ export interface GlobalContextProvider {
               options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike;
   searchMessages(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
                  query: string, scope?: "current" | "all", limit?: number,
-                 options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike;
+                 options?: { includeScheduledRuns?: boolean }): GlobalContextResultLike | Promise<GlobalContextResultLike>;
   /** `readerNodeId`: the calling conversation, the one temporary chat it may read. */
   readNode(sessionWorkspaceId: string | null, ownerUserId: string | null | undefined,
            nodeId: string, opts?: {

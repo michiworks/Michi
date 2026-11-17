@@ -2,7 +2,7 @@ import type {
   AttentionTargetV1, BackgroundServiceStatus, BrowserSurfaceState, CompanionChangedEvent,
   CompanionTarget as SharedCompanionTarget, CompanionTrayDto, DesktopCommandContract, DesktopEventContract, DesktopInvokeContract,
   DesktopBootstrapParam, DesktopInvokeArgs, DesktopInvokeResult, DesktopResidency, DesktopResidencyPatch, MichiBackendHealth,
-  ScheduledRunTarget, TerminalSurfaceSnapshot, VibrancyMaterial,
+  ScheduledRunTarget, TerminalSurfaceSnapshot,
 } from 'michi-shared';
 import { app, BrowserWindow, Menu, Tray, WebContentsView, ipcMain, dialog, shell, nativeImage, nativeTheme, powerSaveBlocker, powerMonitor, Notification as ElectronNotification } from 'electron';
 import type { NativeImage } from 'electron';
@@ -24,6 +24,7 @@ import {
 } from './startupTrace';
 import { checkForUpdate, getUpdateState, downloadUpdate, installUpdate, initAutoUpdate, stopAutoUpdate } from './autoUpdate';
 import { forwardedShellChord, isClosePaneShortcut } from './paneShortcuts';
+import { textContextMenuTemplate } from './textContextMenu';
 import { listWorkspaceDirectory, resolveAllowedDirectory } from './workspaceFiles';
 import { applyBrowserTheme, normalizeBrowserTheme, type BrowserTheme } from './browserTheme';
 import { toSurfaceBounds } from './browserBounds';
@@ -172,8 +173,8 @@ function windowGlassFile(): string {
   return path.join(app.getPath('userData'), 'window-glass.json');
 }
 let windowGlass = VIBRANCY_ENABLED && readWindowGlass(windowGlassFile());
-// The material the renderer last chose (Settings), kept while glass is off.
-let vibrancyMaterial: VibrancyMaterial = 'under-window';
+// The one NSVisualEffectView material: the lightest, most see-through frost.
+const VIBRANCY_MATERIAL = 'under-window';
 
 // Minimal skeleton HTML shown immediately while the backend starts. Matches
 // the app's warm light / dark background so the transition to the real UI is
@@ -903,10 +904,12 @@ async function stopBackend(): Promise<void> {
   const child = backendChild;
   backendChild = null;
   await new Promise<void>((resolve) => {
+    // Past the backend's own 5 s shutdown watchdog (server.ts shutdownAndExit),
+    // so a SIGKILL does not cut its runtime teardown and database close short.
     const t = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* */ }
       resolve();
-    }, 3000);
+    }, 7000);
     child.once('exit', () => {
       clearTimeout(t);
       resolve();
@@ -1694,7 +1697,7 @@ async function createWindow(openRun?: ScheduledRunTarget, openCompanion?: Compan
     // setup — the front window "glows" glassy, background ones recede.
     ...(windowGlass
       ? {
-          vibrancy: vibrancyMaterial,
+          vibrancy: VIBRANCY_MATERIAL,
           visualEffectState: 'followWindow' as const,
           backgroundColor: '#00000000',
         }
@@ -1826,6 +1829,11 @@ async function createWindow(openRun?: ScheduledRunTarget, openCompanion?: Compan
     if (isStartupTraceLine(message)) {
       process.stdout.write(`${message}\n`);
     }
+  });
+
+  win.webContents.on('context-menu', (_event, params) => {
+    const template = textContextMenuTemplate(params, () => win.webContents.showDefinitionForSelection());
+    if (template) Menu.buildFromTemplate(template).popup({ window: win });
   });
 
   // Keep web navigation out of the app window. The renderer resolves the
@@ -2136,29 +2144,12 @@ onDesktopCommand('app:setDarkMaterial', (_ev, dark: boolean, backgroundColor?: s
   }
 });
 
-// Runtime-switch the sidebar's NSVisualEffectView material so users can pick how
-// see-through / dense the desktop-vibrancy sidebar reads. macOS materials range
-// from 'under-window' (lightest, our default) to denser frosts ('sidebar',
-// 'menu', 'hud'). Applies to every open window. No-op unless vibrancy is on
-// (off macOS / MICHI_NO_VIBRANCY) or on an invalid material string. With window
-// glass off it is only remembered for when glass comes back.
-// A copy of shared VIBRANCY_MATERIALS (main cannot load shared at runtime); tsc holds it to the type.
-const VIBRANCY_MATERIALS = { 'under-window': true, sidebar: true, menu: true, hud: true } satisfies Record<VibrancyMaterial, true>;
-onDesktopCommand('app:setVibrancy', (_ev, material) => {
-  if (!VIBRANCY_ENABLED || typeof material !== 'string' || !Object.hasOwn(VIBRANCY_MATERIALS, material)) return;
-  vibrancyMaterial = material;
-  if (!windowGlass) return;
-  for (const w of windows) {
-    if (!w.isDestroyed()) w.setVibrancy(vibrancyMaterial);
-  }
-});
-
 // Settings → Appearance → Window glass. Off removes the material and gives the
 // window an opaque base in the palette's background; on brings both back.
 function applyWindowGlass(win: BrowserWindow): void {
   if (windowGlass) {
     win.setBackgroundColor('#00000000');
-    win.setVibrancy(vibrancyMaterial);
+    win.setVibrancy(VIBRANCY_MATERIAL);
   } else {
     win.setVibrancy(null);
     win.setBackgroundColor(currentBrowserTheme.backgroundColor);

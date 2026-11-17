@@ -31,7 +31,7 @@
   margin: -1px;
 }
 .ask-viewport[data-animate="true"] {
-  transition: height var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: height var(--t-decay) cubic-bezier(0.32, 0.72, 0, 1);
 }
 .ask-track {
   position: relative;
@@ -42,7 +42,7 @@
   will-change: transform;
 }
 .ask-track[data-animate="true"] {
-  transition: transform var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--t-decay) cubic-bezier(0.32, 0.72, 0, 1);
 }
 .ask-question {
   display: flex;
@@ -53,7 +53,7 @@
 }
 .ask-question[data-active="true"] { opacity: 1; }
 .ask-track[data-animate="true"] .ask-question {
-  transition: opacity var(--t-decay) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity var(--t-decay) linear;
 }
 .ask-question:not([data-active="true"]) { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
@@ -83,7 +83,7 @@
   width: 6px;
   height: 6px;
   margin-top: calc(0.7em - 3px);
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-accent);
 }
 .ask-card-qtitle,
@@ -192,7 +192,7 @@
 }
 .ask-clamp-toggle:hover { color: var(--term-fg); }
 .ask-clamp-toggle:focus-visible {
-  outline: 1px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 /* A note line has no label: as a grid item of its own, it takes the row. */
@@ -223,7 +223,7 @@
   font-family: inherit;
   font-size: var(--fs-md);
   line-height: 1.4;
-  transition: background-color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background-color var(--t-soft) var(--t-ease);
 }
 .ask-card-opt:hover:not(.selected):not(:disabled) {
   background: var(--term-hover-bg, var(--term-alt));
@@ -231,10 +231,11 @@
 .ask-card-opt.selected {
   background: color-mix(in srgb, var(--term-accent) 8%, transparent);
 }
-.ask-card-opt:active:not(:disabled) { transform: scale(0.995); }
-.ask-card-opt:disabled { cursor: default; }
+.ask-card-opt:not(.selected):not(:disabled):active {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+.ask-card-opt:disabled { cursor: not-allowed; }
 .ask-card-opt-other { align-items: center; cursor: text; }
-.ask-card-opt-other:active { transform: none; }
 .ask-card-opt-other input {
   flex: 1;
   min-width: 0;
@@ -252,12 +253,12 @@
   height: 12px;
   margin-top: calc(0.7em - 6px);
   box-sizing: border-box;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   border: 1.5px solid var(--term-faint);
   transition:
-    border-color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1),
-    background var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+    border-color var(--t-soft) var(--t-ease),
+    background var(--t-soft) var(--t-ease),
+    box-shadow var(--t-soft) var(--t-ease);
 }
 .ask-card-opt-other .ask-card-indicator { margin-top: 0; }
 .ask-card-indicator.checkbox { border-radius: var(--ui-radius-sm); }
@@ -274,7 +275,6 @@
   gap: 1px;
   min-width: 0;
 }
-.ask-card-opt.selected .ask-card-opt-label { font-weight: 500; }
 .ask-card-opt-desc {
   display: block;
   color: var(--term-muted);
@@ -304,9 +304,10 @@
   font-size: var(--fs-md);
   font-family: inherit;
   padding: 4px 8px;
-  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: color var(--t-soft) var(--t-ease);
 }
-.ask-card-skip:hover { color: var(--term-fg); }
+.ask-card-skip:not([aria-disabled='true']):hover { color: var(--term-fg); }
+.ask-card-skip[aria-busy='true'] { cursor: progress; }
 .ask-card-count {
   margin-right: 2px;
   font-size: var(--fs-sm);
@@ -327,23 +328,30 @@
   font-size: var(--fs-xl);
   padding: 0;
   font-family: inherit;
-  transition: color var(--t-soft) cubic-bezier(0.22, 1, 0.36, 1);
+  transition: color var(--t-soft) var(--t-ease);
 }
 .ask-nav-arrow:hover:not(:disabled) { color: var(--term-fg); background: var(--term-hover-bg, var(--term-alt)); }
-.ask-nav-arrow:active:not(:disabled) { transform: scale(0.95); }
-.ask-nav-arrow:disabled { opacity: 0.28; cursor: default; }
+.ask-nav-arrow:not(:disabled):active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
+  color: var(--term-fg);
+}
+.ask-nav-arrow:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Fill, hover and disabled come from .ui-btn--primary (the Send recipe). */
 .ask-card .ask-card-submit {
   margin-left: 4px;
   padding: 4px 12px;
   font-size: var(--fs-md);
 }
-.ask-card .ask-card-submit:active:not(:disabled) { transform: scale(0.98); }
-.ask-card-opt:focus-visible,
+/* Options are rows of a list: an inset ring, which the viewport's 1px clip
+   cannot cut. The buttons and the Other field take the standalone offset. */
+.ask-card-opt:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
 .ask-card-skip:focus-visible,
 .ask-nav-arrow:focus-visible,
 .ask-card-opt-other input:focus-visible {
-  outline: 1px solid var(--term-accent);
+  outline: var(--focus-ring);
   outline-offset: 1px;
 }
 
@@ -383,3 +391,21 @@
 .ask-card-ghost [data-ask-ghost-text]::before {
   content: attr(data-ask-ghost-text);
 }
+
+/* ── A question's form field (AskFieldControl): one control in place of the
+   options, under the question text. Mantine's compact size, with the card's
+   type size; a slider spans the card. ── */
+.ask-card-field {
+  margin-left: 14px;
+  max-width: 420px;
+  border-radius: var(--ui-radius);
+}
+.ask-card-field .mantine-Input-input,
+.ask-card-field .mantine-PillsInput-input,
+.ask-card-field .mantine-Checkbox-label {
+  font-size: var(--fs-md);
+}
+.ask-card-field .mantine-InputWrapper-description { font-size: var(--fs-sm); color: var(--term-muted); }
+.ask-card-field .michi-field-slider-value { font-size: var(--fs-md); }
+/* Until the control has loaded: its height, so the card does not jump. */
+.ask-card-field-pending { height: 30px; }

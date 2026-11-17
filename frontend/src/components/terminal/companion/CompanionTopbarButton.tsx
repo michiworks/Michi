@@ -1,7 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect } from 'react';
 import { companionBadgeCount } from 'michi-shared';
 import { kbd } from '../../../lib/platform';
-import { Tooltip } from '../../ui/Popover';
+import { HoverTip } from '../../ui/Popover';
+import { TOPBAR_TIP_DELAY_MS } from '../TopbarIconButton';
 import { companionIsOff, loadCompanionAssistant, useCompanion, useCompanionAssistant } from '../../../state/companion/companionStore';
 import { closeCompanionPanel, openCompanionPanel, useCompanionPanel } from '../../../state/companion/companionPanel';
 import { useCompanionName } from '../../../state/companion/companionName';
@@ -24,25 +25,20 @@ export function CompanionTopbarButton() {
   const assistant = useCompanionAssistant();
   const panel = useCompanionPanel();
   const name = useCompanionName();
-  const ref = useRef<HTMLButtonElement>(null);
-  const [hover, setHover] = useState(false);
   useEffect(() => { void loadCompanionAssistant(); }, []);
   if (!assistant.info || companionIsOff(companion)) return null;
   const count = companionBadgeCount(snapshot);
   const fresh = !panel.openedBefore;
   const label = count > 0 ? `${name}, ${count} new` : fresh ? `${name}, new` : name;
   return (
-    <>
+    <HoverTip label={panel.open ? `Close ${name}` : name} kbd={kbd('mod', 'J')} delayMs={TOPBAR_TIP_DELAY_MS}>
       <button
-        ref={ref}
         type="button"
         data-companion-button=""
         className={`t-icon-btn companion-topbar-btn${panel.open ? ' is-on' : ''}`}
         aria-label={label}
         aria-pressed={panel.open}
         onClick={() => { if (panel.open) closeCompanionPanel(); else openCompanionPanel(); }}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
         style={{
           minWidth: 26,
           height: 26,
@@ -57,7 +53,6 @@ export function CompanionTopbarButton() {
           ? <span className="companion-topbar-btn__badge" aria-hidden="true">{count > 9 ? '9+' : count}</span>
           : fresh ? <span className="companion-topbar-btn__new" aria-hidden="true" /> : null}
       </button>
-      {hover && <Tooltip anchorRef={ref} label={panel.open ? `Close ${name}` : name} kbd={kbd('mod', 'J')} />}
-    </>
+    </HoverTip>
   );
 }

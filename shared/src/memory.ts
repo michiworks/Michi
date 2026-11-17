@@ -70,6 +70,12 @@ export interface MemoryRecord {
   /** When the user said it (ms epoch); createdAt unless the writer knew the message time. */
   observedAt?: number;
   /**
+   * When it stops being true (ms epoch; it is past once now reaches this), as
+   * the user said or set it; null when it has no end. Memory packs leave out a
+   * memory past it. Absent from older backends.
+   */
+  validUntil?: number | null;
+  /**
    * Set on a memory Michi imported, read-only, from a runtime's own memory:
    * which runtime, and the item there (a file such as
    * '<project>/<note>.md', with '#<part>' for a part of a split note).
@@ -135,31 +141,21 @@ export interface MemoryProfileResponse {
 
 /**
  * What a reply was based on (GET /api/nodes/:nodeId/memory-sources): a memory
- * or a past-conversation turn the conversation's session was given and the
- * reply repeated, as Michi tracks it (backend services/memory/replySources.ts).
+ * the conversation's session was given and the reply repeated, as Michi
+ * tracks it (backend services/memory/replySources.ts).
  */
-export type ReplyMemorySource =
-  | {
-    kind: 'memory';
-    memoryId: string;
-    text: string;
-    /** The user saved it; Michi noted it on its own; it was imported from a runtime's own memory. */
-    savedBy: 'user' | 'michi' | 'import';
-    importSource?: MemoryImportSource;
-    /** When the user said it (ms epoch). */
-    at: number;
-    /** The conversation it came from, while its title may be shown. */
-    from: { nodeId: string; messageId: string | null; title: string } | null;
-  }
-  | {
-    kind: 'conversation';
-    /** memory_recall_docs.id: what POST /api/memory-recall/hide takes. */
-    docId: number;
-    /** The user's words in that turn, clipped. */
-    text: string;
-    at: number;
-    from: { nodeId: string; messageId: string | null; title: string | null };
-  };
+export interface ReplyMemorySource {
+  kind: 'memory';
+  memoryId: string;
+  text: string;
+  /** The user saved it; Michi noted it on its own; it was imported from a runtime's own memory. */
+  savedBy: 'user' | 'michi' | 'import';
+  importSource?: MemoryImportSource;
+  /** When the user said it (ms epoch). */
+  at: number;
+  /** The conversation it came from, while its title may be shown. */
+  from: { nodeId: string; messageId: string | null; title: string } | null;
+}
 
 export interface ReplyMemorySourcesResponse {
   messages: Array<{ messageId: string; sources: ReplyMemorySource[] }>;
@@ -213,9 +209,31 @@ export interface MemoryUpdateRequest {
   body?: string;
   scope?: MemoryScope;
   kind?: MemoryKind;
+  /** When it stops being true (ms epoch); null clears it. */
+  validUntil?: number | null;
   /** null clears it. */
   topic?: string | null;
   expectedVersion: number;
+}
+
+// ── Guesses (/api/memory-guesses) ──────────────────────────────────────────
+
+/**
+ * A pattern background consolidation noticed across two or more of the
+ * user's notes, which the user may confirm (it becomes a note they saved) or
+ * reject. A guess is never put in a memory pack or used as a fact.
+ */
+export interface MemoryGuess {
+  id: string;
+  body: string;
+  /** The notes it rests on, as they read now. */
+  cites: MemoryProfileCitation[];
+  createdAt: number;
+}
+
+/** GET /api/memory-guesses: the pending guesses, newest first. */
+export interface MemoryGuessListResponse {
+  guesses: MemoryGuess[];
 }
 
 export type MemoryErrorCode =

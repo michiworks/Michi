@@ -158,6 +158,20 @@ describe('HoverTip', () => {
     }
   });
 
+  it('stays open while the pointer moves onto the tip, and closes once it has left both', () => {
+    render(<HoverTip label="Help" delayMs={0}><button type="button">?</button></HoverTip>);
+    const anchor = screen.getByRole('button');
+    fireEvent.mouseEnter(anchor);
+    const tip = screen.getByRole('tooltip');
+
+    fireEvent.mouseLeave(anchor, { relatedTarget: tip });
+    fireEvent.mouseLeave(tip, { relatedTarget: anchor });
+    expect(screen.getByRole('tooltip')).toBe(tip);
+    fireEvent.mouseLeave(anchor, { relatedTarget: tip });
+    fireEvent.mouseLeave(tip, { relatedTarget: document.body });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
   it('stays closed when a mouse click focuses the anchor', () => {
     render(<HoverTip label="Help" delayMs={400}><button type="button">?</button></HoverTip>);
     const anchor = screen.getByRole('button');

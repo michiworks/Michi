@@ -11,6 +11,7 @@ import { clearHeldWorkspaceHome, useHeldWorkspaceHome } from '../../../state/pag
 import type { OpenNativePageRoute } from '../../../state/pages/nativePageRoute';
 import type { SpaceRoute } from './SpaceView';
 import { ModalShell } from '../../ui/ModalShell';
+import { homeDateLabel } from './home/homeFormat';
 import './spaces.css';
 import '../rail/rail.css';
 
@@ -24,7 +25,9 @@ const templates = [
   { value: 'travel', label: 'Travel' },
 ] as const;
 
-/** Create a Space in a chosen backend workspace, then open it. */
+/** Create a Space in a chosen backend workspace, then open it. It is open
+ *  while mounted: callers render it inside <AnimatePresence>, so closing
+ *  plays its ModalShell's exit and returns focus at once (TR-06). */
 export function CreateSpaceDialog({ activeWorkspaceId, onClose, onCreated }: {
   activeWorkspaceId?: string;
   onClose: () => void;
@@ -97,7 +100,19 @@ const AllTasksView = React.lazy(() => import('./allTasks/AllTasksPage'));
 
 /** The Spaces landing page: its own blocks, and the sections Michi counts from conversation state. */
 export function SpacesHome({ now }: { now?: Date }) {
-  return <React.Suspense fallback={<main className="area-settings michi-doc space-doc" aria-busy="true"><h1>Home</h1><p role="status">Loading Home…</p></main>}><SpacesHomeView now={now} /></React.Suspense>;
+  // While its code loads, the Home's header holds its place, with one line where its blocks go (TR-30).
+  const loading = <main className="area-settings michi-doc space-doc spaces-home term-scrollbar" aria-busy="true" aria-labelledby="spaces-home-loading-title">
+    <div className="area-settings__doc spaces-home__doc">
+      <header className="spaces-home__head">
+        <div className="spaces-home__title-row">
+          <h1 id="spaces-home-loading-title" className="spaces-home__title">Home</h1>
+          <span className="spaces-home__date">{homeDateLabel(now ?? new Date())}</span>
+        </div>
+      </header>
+      <p className="space-doc__status" role="status">Loading Home…</p>
+    </div>
+  </main>;
+  return <React.Suspense fallback={loading}><SpacesHomeView now={now} /></React.Suspense>;
 }
 
 /** A workspace's home in Spaces: the Meta agent's page, the workspace's Spaces and its conversations. */

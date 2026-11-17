@@ -1,10 +1,12 @@
 import React from 'react';
 import { Button } from '../../ui/controls';
+import { CloseIcon, WarningIcon } from '../icons';
 import type { AgentCapabilityCatalogEntryV1, AgentDefinitionDtoV1 } from 'michi-shared';
 import { MAX_RUN_TTL_MS, MIN_RUN_TTL_MS } from 'michi-shared';
 import AgentPermissionFields, { defaultPermissionPolicyDraft, type PermissionPolicyDraft } from './AgentPermissionFields';
 import AgentRuntimeProfileFields, { catalogKey, emptyRuntimeProfileDraft, type RuntimeFieldCatalog, type RuntimeProfileDraft } from './AgentRuntimeProfileFields';
 import { resolveProfileReasoning, supportedProfileReasoning } from '../../../lib/runtimeProfile';
+import { useFieldError, type FieldErrorProps } from './useFieldError';
 
 export interface AgentDefinitionFormValue {
   scope: 'global' | 'workspace';
@@ -90,8 +92,12 @@ export function validateAgentDefinitionForm(value: AgentDefinitionFormValue, cat
   return errors;
 }
 
-export function draftSaveBlocked(errors: AgentDefinitionFormErrors): boolean {
-  return Boolean(errors.defaultRunTtlMs || errors.workspaceId);
+/** The problems that stop even a Draft save; Enable takes a form with none. */
+export function draftSaveErrors(errors: AgentDefinitionFormErrors): AgentDefinitionFormErrors {
+  const stopping: AgentDefinitionFormErrors = {};
+  if (errors.workspaceId) stopping.workspaceId = errors.workspaceId;
+  if (errors.defaultRunTtlMs) stopping.defaultRunTtlMs = errors.defaultRunTtlMs;
+  return stopping;
 }
 
 interface Props {
@@ -115,10 +121,10 @@ export default function AgentDefinitionForm({ value, onChange, capabilities = nu
       {/* Identity fields carry their own labels — no section caption needed. */}
       <Section plain>
         <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: 10 }}>
-          <label style={labelStyle}>Scope<select className="ui-select" aria-label="agent scope" value={value.scope} onChange={(event) => { const scope = event.target.value as AgentDefinitionFormValue['scope']; onChange({ ...value, scope, workspaceId: scope === 'global' ? null : value.workspaceId }); }}><option value="workspace">Workspace</option><option value="global">Global</option></select></label>
-          <Field label="Name" error={errors.name}><input className="ui-input" aria-label="agent name" value={value.name} onChange={(event) => set('name', event.target.value)} /></Field>
+          <Field label="Scope" error={errors.workspaceId}>{(control) => <select className="ui-select" aria-label="agent scope" {...control} value={value.scope} onChange={(event) => { const scope = event.target.value as AgentDefinitionFormValue['scope']; onChange({ ...value, scope, workspaceId: scope === 'global' ? null : value.workspaceId }); }}><option value="workspace">Workspace</option><option value="global">Global</option></select>}</Field>
+          <Field label="Name" error={errors.name}>{(control) => <input className="ui-input" aria-label="agent name" {...control} value={value.name} onChange={(event) => set('name', event.target.value)} />}</Field>
         </div>
-        <Field label="Description · what it does, when to call it" error={errors.description}><textarea className="ui-input" aria-label="agent description" value={value.description} onChange={(event) => set('description', event.target.value)} rows={3} style={{ resize: 'vertical' }} /></Field>
+        <Field label="Description · what it does, when to call it" error={errors.description}>{(control) => <textarea className="ui-input" aria-label="agent description" {...control} value={value.description} onChange={(event) => set('description', event.target.value)} rows={3} style={{ resize: 'vertical' }} />}</Field>
         <p style={hintStyle}>Other agents read the description to decide whether to delegate here.</p>
       </Section>
 
@@ -127,7 +133,7 @@ export default function AgentDefinitionForm({ value, onChange, capabilities = nu
       </Section>
 
       <Section title="Instructions" aside="optional" description="Method and standards, not the task. “Implement with TDD.” “Prefer primary sources over summaries.” The parent supplies the task each run; empty is fine.">
-        <Field label="System instructions"><textarea className="ui-input" aria-label="agent instructions" value={value.instructions} onChange={(event) => set('instructions', event.target.value)} rows={6} placeholder="Optional — leave empty to let the delegated task stand alone." style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }} /></Field>
+        <Field label="System instructions">{(control) => <textarea className="ui-input" aria-label="agent instructions" {...control} value={value.instructions} onChange={(event) => set('instructions', event.target.value)} rows={6} placeholder="Optional — leave empty to let the delegated task stand alone." style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }} />}</Field>
       </Section>
 
       <Section title="Tools, Skills & MCP" description="This list is the whole surface the agent can touch — the parent’s capabilities are not inherited. Credentials remain in Backend bindings.">
@@ -149,7 +155,7 @@ export default function AgentDefinitionForm({ value, onChange, capabilities = nu
           <Check label="Files" checked={value.allowFileContext} onChange={(next) => set('allowFileContext', next)} />
           <Check label="Artifacts" checked={value.allowArtifactContext} onChange={(next) => set('allowArtifactContext', next)} />
         </div>
-        <Field label="Maximum estimated characters" error={errors.maxContextChars}><input className="ui-input" aria-label="maximum context characters" value={value.maxContextChars} onChange={(event) => set('maxContextChars', event.target.value)} inputMode="numeric" style={{ maxWidth: 240 }} /></Field>
+        <Field label="Maximum estimated characters" error={errors.maxContextChars}>{(control) => <input className="ui-input" aria-label="maximum context characters" {...control} value={value.maxContextChars} onChange={(event) => set('maxContextChars', event.target.value)} inputMode="numeric" style={{ maxWidth: 240 }} />}</Field>
       </Section>
 
       <Section title="Permissions" description="A Definition is a ceiling. Parent restrictions can only reduce it.">
@@ -166,7 +172,7 @@ export default function AgentDefinitionForm({ value, onChange, capabilities = nu
           <Check type="radio" name="retention" label="Indefinite" checked={value.retention === 'indefinite'} onChange={() => onChange({ ...value, retention: 'indefinite', defaultRunTtlMs: '' })} />
           <Check type="radio" name="retention" label="Bounded default" checked={value.retention === 'bounded'} onChange={() => set('retention', 'bounded')} />
         </div>
-        {value.retention === 'bounded' && <Field label="Default Run TTL (milliseconds)" error={errors.defaultRunTtlMs}><input className="ui-input" aria-label="default run TTL milliseconds" value={value.defaultRunTtlMs} onChange={(event) => set('defaultRunTtlMs', event.target.value)} inputMode="numeric" style={{ maxWidth: 280 }} /></Field>}
+        {value.retention === 'bounded' && <Field label="Default Run TTL (milliseconds)" error={errors.defaultRunTtlMs}>{(control) => <input className="ui-input" aria-label="default run TTL milliseconds" {...control} value={value.defaultRunTtlMs} onChange={(event) => set('defaultRunTtlMs', event.target.value)} inputMode="numeric" style={{ maxWidth: 280 }} />}</Field>}
       </Section>
     </form>
   );
@@ -240,10 +246,10 @@ function CapabilityPicker({ value, capabilities, onChange }: { value: AgentDefin
               color: unresolved ? 'var(--term-fg)' : ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-fg)',
               fontFamily: unresolved ? 'var(--font-mono)' : 'var(--ui-font)',
             }}>
-              {unresolved ? '⚠' : <span aria-hidden style={{ width: 4, height: 4, background: ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-digest)' }} />}
+              {unresolved ? <WarningIcon size="sm" /> : <span aria-hidden style={{ width: 4, height: 4, background: ref.kind === 'skill' ? 'var(--term-accent)' : 'var(--term-digest)' }} />}
               {ref.kind === 'tool' ? ref.id : `${KIND_LABEL[ref.kind]}: ${ref.id}`}
               <button type="button" aria-label={`Remove capability ${ref.id}`} onClick={() => remove(ref)}
-                style={{ border: 0, padding: 0, background: 'transparent', color: 'var(--term-faint)', cursor: 'pointer', fontSize: 'var(--fs-md)', lineHeight: 1 }}>×</button>
+                style={{ border: 0, padding: 0, background: 'transparent', color: 'var(--term-faint)', cursor: 'pointer', display: 'inline-flex' }}><CloseIcon size="sm" /></button>
             </span>
           );
         })}
@@ -262,7 +268,7 @@ function CapabilityPicker({ value, capabilities, onChange }: { value: AgentDefin
 }
 
 const hintStyle: React.CSSProperties = { margin: 0, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)' };
-function Field({ label, error, children }: { label: string; error?: string; children: React.ReactNode }) { return <label style={labelStyle}>{label}{children}{error && <span role="alert" style={{ color: 'var(--danger, var(--term-danger))', fontSize: 'var(--fs-xs)', letterSpacing: 0, textTransform: 'none' }}>{error}</span>}</label>; }
-function RefField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) { return <Field label={label}><textarea className="ui-input" aria-label={label.toLowerCase()} value={value} onChange={(event) => onChange(event.target.value)} rows={4} style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }} /></Field>; }
+function Field({ label, error, children }: { label: string; error?: string; children: (control: FieldErrorProps) => React.ReactNode }) { const { control, line } = useFieldError(error); return <label style={labelStyle}>{label}{children(control)}{line}</label>; }
+function RefField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) { return <Field label={label}>{(control) => <textarea className="ui-input" aria-label={label.toLowerCase()} {...control} value={value} onChange={(event) => onChange(event.target.value)} rows={4} style={{ fontFamily: 'var(--font-mono)', resize: 'vertical' }} />}</Field>; }
 function Check({ label, checked, onChange, type = 'checkbox', name }: { label: string; checked: boolean; onChange: (value: boolean) => void; type?: 'checkbox' | 'radio'; name?: string }) { return <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-md)' }}><input type={type} name={name} checked={checked} onChange={(event) => onChange(event.target.checked)} />{label}</label>; }
 const labelStyle: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 5, color: 'var(--term-muted)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', letterSpacing: 'var(--ls-caps)', textTransform: 'uppercase' };

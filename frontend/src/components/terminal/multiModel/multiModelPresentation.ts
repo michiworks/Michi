@@ -18,6 +18,7 @@ import {
 } from 'michi-shared';
 import { formatDuration as formatLength } from '../../../lib/duration';
 import { WORKFLOW_CHIP, WORKFLOW_NEEDS_YOU_CHIP } from '../workflows/workflowPresentation';
+import { CheckIcon, CloseIcon, StopIcon, type IconComponent } from '../icons';
 
 /**
  * Pure presentation of a multi-model run (MultiModelRunView) for the in-chat
@@ -79,16 +80,19 @@ export function stepLabel(kind: MultiModelStepKind, status: MultiModelStepStatus
 
 export type StepTone = 'ok' | 'run' | 'wait' | 'fail' | 'stop' | 'skip' | 'idle';
 
-/** A row's icon: `dot` renders the live dot (breathing while running). Intentional stops are not errors. */
-export function stepIcon(status: MultiModelStepStatus): { icon: '✓' | '✕' | '–' | '○' | '■' | 'dot'; tone: StepTone } {
+/**
+ * A row's mark: an icon, a text mark (– skipped, ○ queued), or `dot`, the live
+ * dot (breathing while running). Intentional stops are not errors.
+ */
+export function stepIcon(status: MultiModelStepStatus): { icon: IconComponent | '–' | '○' | 'dot'; tone: StepTone } {
   switch (status) {
-    case 'completed': return { icon: '✓', tone: 'ok' };
+    case 'completed': return { icon: CheckIcon, tone: 'ok' };
     case 'running': return { icon: 'dot', tone: 'run' };
     case 'waiting': return { icon: 'dot', tone: 'wait' };
-    case 'failed': return { icon: '✕', tone: 'fail' };
+    case 'failed': return { icon: CloseIcon, tone: 'fail' };
     case 'stopped':
     case 'cancelled':
-    case 'interrupted': return { icon: '■', tone: 'stop' };
+    case 'interrupted': return { icon: StopIcon, tone: 'stop' };
     case 'skipped': return { icon: '–', tone: 'skip' };
     case 'pending':
     case 'queued': return { icon: '○', tone: 'idle' };

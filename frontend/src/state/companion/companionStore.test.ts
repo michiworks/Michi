@@ -4,7 +4,6 @@ import { companionBadgeCount } from 'michi-shared';
 import {
   actOnCompanionItem,
   adoptCompanionAssistant,
-  companionBriefSeenBefore,
   companionItemShowsOnToday,
   getCompanionAssistant,
   getCompanionState,
@@ -53,24 +52,6 @@ describe('the Companion store', () => {
     expect(state.snapshot?.items.map((item) => item.id)).toEqual(['a']);
     expect(isCompanionNodeId('companion-node')).toBe(true);
     expect(isCompanionNodeId('other')).toBe(false);
-  });
-
-  it('remembers on this machine that a brief reached it, so the next one is not worded as the first', async () => {
-    localStorage.removeItem('michi:companion:brief-seen');
-    try {
-      handler = () => jsonResponse(companionSnapshotDto());
-      await loadCompanion();
-      expect(companionBriefSeenBefore()).toBe(false);
-      const brief = { id: 'brf-1', date: '2026-11-05', headline: 'Quiet day', cards: [], closing: '', origin: 'llm' as const, createdAt: 1, cardFeedback: {} };
-      handler = () => jsonResponse(companionSnapshotDto({ brief, revision: 2 }));
-      await refreshCompanion();
-      expect(companionBriefSeenBefore()).toBe(true);
-      // Another window, or the next launch, reads it back.
-      resetCompanionStoreForTests();
-      expect(companionBriefSeenBefore()).toBe(true);
-    } finally {
-      localStorage.removeItem('michi:companion:brief-seen');
-    }
   });
 
   it('takes an answer of another shape before any snapshot as "no Companion here"', async () => {

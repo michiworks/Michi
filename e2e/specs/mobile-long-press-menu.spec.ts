@@ -86,7 +86,7 @@ test('a long press on a sidebar thread lifts the row in its own shape and opens 
 
     const menu = page.getByRole('menu', { name: 'Actions' });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole('menuitem')).toHaveText(['Rename…', 'Pin', 'Archive', 'Export this thread…', 'Delete thread…']);
+    await expect(menu.getByRole('menuitem')).toHaveText(['Rename…', 'Pin', 'Archive', 'Export this thread…', 'Delete thread']);
     // The row hides behind a copy of itself: square, flush and as wide as the row.
     const lifted = page.locator('.phone-menu-lift');
     await expect(row).toBeHidden();
@@ -104,7 +104,20 @@ test('a long press on a sidebar thread lifts the row in its own shape and opens 
     await longPress(page, cdp, row);
     await expect(page.getByRole('menuitem', { name: 'Unpin' })).toBeVisible();
     // A tap that starts on the scrim closes the menu and gives the row back.
+    // The menu fades once: folded away, it stays hidden until it is removed.
+    const opacities = page.evaluate(() => new Promise<number[]>((resolve) => {
+      const menu = document.querySelector<HTMLElement>('.phone-menu')!;
+      const seen: number[] = [];
+      const sample = () => {
+        seen.push(menu.isConnected ? Number(getComputedStyle(menu).opacity) : -1);
+        if (menu.isConnected && seen.length < 120) requestAnimationFrame(sample);
+        else resolve(seen);
+      };
+      requestAnimationFrame(sample);
+    }));
     await page.locator('.phone-menu-scrim').tap({ position: { x: 380, y: 830 } });
+    const seen = await opacities;
+    expect(seen.slice(seen.indexOf(0)).every((opacity) => opacity <= 0)).toBe(true);
     await expect(page.getByRole('menu', { name: 'Actions' })).toHaveCount(0);
     await expect(row).toBeVisible();
     expect(errors).toEqual([]);

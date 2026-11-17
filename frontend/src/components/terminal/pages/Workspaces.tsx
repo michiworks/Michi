@@ -11,7 +11,7 @@ import type { PageId } from '../../../state/commands';
 import type { ChatNodeState, Project } from '../../../state/chatTypes';
 import { getElectron } from '../../../lib/electronBridge';
 import { toast } from 'sonner';
-import { Search, X } from 'lucide-react';
+import { CloseIcon, MoreIcon, SearchIcon } from '../icons';
 import { Button } from '../../ui/controls';
 import { WorkspaceLocation } from '../../WorkspaceLocation';
 import { useBackendConnections } from '../../../state/useBackendConnections';
@@ -34,6 +34,7 @@ import {
 } from './workspaceList';
 import PhoneWorkspaces from './WorkspacesPhone';
 import { InlineRenameInput } from '../../ui/InlineRenameInput';
+import './Workspaces.css';
 
 export function buildCard(p: Project, snapshot: Record<string, ChatNodeState>, streamingIds: ReadonlySet<string>, activeProjectId: string | null): WorkspaceCardData {
   // Page helpers and Meta agent maintenance runs are not the user's conversations.
@@ -215,7 +216,6 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
   } = useChatStore();
   const nodesSnapshot = useChatNodesSnapshot();
   const streamingIds = useStreamingNodeIds();
-  const [hoverId, setHoverId] = React.useState<string | null>(null);
   const [menu, setMenu] = React.useState<{ id: string; x: number; y: number; trigger: HTMLElement } | null>(null);
   const [renamingId, setRenamingId] = React.useState<string | null>(null);
   const [sort, setSort] = React.useState<{ key: SortKey; dir: SortDir }>({ key: 'last', dir: 'desc' });
@@ -393,7 +393,7 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
             {/* The shared page-search field and primary Button — the same
                 controls the Trash page's header uses. */}
             <label className="ui-search" style={{ minWidth: 220, maxWidth: 320, flex: '0 1 280px' }}>
-              <Search size={14} aria-hidden="true" />
+              <SearchIcon aria-hidden="true" />
               <input
                 ref={searchRef}
                 type="search"
@@ -408,7 +408,7 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
                   aria-label="Clear"
                   onClick={() => { setQuery(''); searchRef.current?.focus(); }}
                 >
-                  <X size={14} aria-hidden="true" />
+                  <CloseIcon aria-hidden="true" />
                 </button>
               )}
             </label>
@@ -460,7 +460,6 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
               fontSize: 'var(--fs-lg)',
               border: '1px solid var(--term-line)',
               background: 'var(--term-surface)',
-              boxShadow: '0 1px 2px rgba(26,25,22,.04), 0 6px 18px rgba(26,25,22,.05)',
             }}
           >
             No workspaces match &ldquo;{query}&rdquo;.
@@ -505,10 +504,8 @@ export default function TerminalWorkspaces({ onNav }: { onNav: (p: PageId) => vo
                   key={w.id}
                   w={w}
                   query={query.trim()}
-                  hover={hoverId === w.id}
+                  menuOpen={menu?.id === w.id}
                   renaming={renamingId === w.id}
-                  onEnter={() => setHoverId(w.id)}
-                  onLeave={() => setHoverId((cur) => (cur === w.id ? null : cur))}
                   onOpen={() => {
                     setManageWorkspaceId(w.id);
                     onNav('workspace-manage');
@@ -603,10 +600,8 @@ function SortHeader({
 function WorkspaceTableRow({
   w,
   query,
-  hover,
+  menuOpen,
   renaming,
-  onEnter,
-  onLeave,
   onOpen,
   onOpenMenu,
   onRename,
@@ -614,10 +609,8 @@ function WorkspaceTableRow({
 }: {
   w: WorkspaceCardData;
   query: string;
-  hover: boolean;
+  menuOpen: boolean;
   renaming: boolean;
-  onEnter: () => void;
-  onLeave: () => void;
   onOpen: () => void;
   onOpenMenu: (trigger: HTMLElement) => void;
   onRename: (name: string) => void;
@@ -646,15 +639,10 @@ function WorkspaceTableRow({
       // The whole row is a pointer target; keyboard users reach the same action
       // through the name button below, whose click bubbles up to here.
       onClick={() => { if (!renaming) onOpen(); }}
-      onMouseEnter={onEnter}
-      onMouseLeave={onLeave}
-      style={{
-        cursor: 'pointer',
-        background: w.active
-          ? 'var(--term-alt)'
-          : hover ? 'var(--term-hover-bg, var(--term-alt))' : 'transparent',
-        transition: 'background var(--t-quick) var(--t-ease)',
-      }}
+      // Its fill is .workspaces-row's (Workspaces.css).
+      className="workspaces-row"
+      data-active={w.active || undefined}
+      style={{ cursor: 'pointer' }}
     >
       <td
         style={{
@@ -797,15 +785,16 @@ function WorkspaceTableRow({
           type="button"
           title="More actions"
           aria-label="More actions"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
           onClick={(e) => {
             e.stopPropagation();
             onOpenMenu(e.currentTarget);
           }}
-          className="t-hover-frame"
+          className="t-hover-frame ws-table-more"
           style={{
             width: 24,
             height: 24,
-            opacity: hover ? 1 : 0.45,
             transition: 'opacity var(--t-soft), background var(--t-soft), border-color var(--t-soft)',
             cursor: 'pointer',
             display: 'inline-flex',
@@ -816,7 +805,7 @@ function WorkspaceTableRow({
             padding: 0,
           }}
         >
-          ⋯
+          <MoreIcon />
         </button>
       </td>
     </tr>

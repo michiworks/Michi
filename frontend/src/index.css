@@ -27,7 +27,6 @@
   --color-primary-foreground: var(--accent-fg);
   --color-secondary: var(--surface-muted);
   --color-secondary-foreground: var(--fg);
-  --color-muted: var(--surface-muted);
   --color-muted-foreground: var(--fg-muted);
   --color-border: var(--line);
   --color-input: var(--line);
@@ -49,6 +48,8 @@
    Both Tailwind --font-sans and Tailwind --font-mono inherit from --ui-font
    so prose-class defaults (which read --tw-font-mono via prose) follow suit. */
 :root {
+  /* Every line icon's stroke, in CSS px: STROKE_PX in components/terminal/icons.tsx. */
+  --icon-stroke: 1.25px;
   /* Defaults match DEFAULT_PREFS (Geist) so first paint doesn't flash another
      face before prefs.tsx applies the user's choice. */
   --ui-font: 'Geist', var(--cjk-alias), system-ui, -apple-system, sans-serif, var(--ui-cjk-font);
@@ -68,7 +69,7 @@
   --fs-2xl: 16px;  /* page and pane titles */
   --fs-3xl: 18px;  /* empty-state and dialog headlines */
   --fs-4xl: 22px;  /* page headings */
-  --fs-5xl: 28px;  /* Home headline, empty-state glyphs */
+  --fs-5xl: 28px;  /* Home headline, display titles */
   --fs-6xl: 36px;  /* page hero titles (Agents, Manage) */
 
   /* Tracking: tight for display text, the rest for uppercase captions. */
@@ -78,8 +79,10 @@
   --ls-caps-wide: 0.14em;
 
   /* Keyboard focus: the baseline ring below, and the one component rules
-     restate with an offset of their own. */
-  --focus-ring: 2px solid color-mix(in srgb, var(--term-accent) 62%, transparent);
+     restate with an offset of their own. cssVarsFor() sets the per-palette,
+     per-accent ring (lifted toward fg where the accent misses 3:1); this is
+     only the fallback outside the shell. */
+  --focus-ring: 2px solid var(--term-accent);
 }
 
 :root:lang(ja) {
@@ -95,14 +98,14 @@
 }
 
 /* Tailwind 4 changed the default border color from gray-200 to currentColor.
-   Restore a subtle gray default by using --line. */
+   Restore a subtle gray default by using --term-line. */
 @layer base {
   *,
   ::after,
   ::before,
   ::backdrop,
   ::file-selector-button {
-    border-color: var(--color-line, currentColor);
+    border-color: var(--term-line);
   }
 }
 
@@ -120,7 +123,7 @@
   .prose {
     --tw-prose-body: var(--fg);
     --tw-prose-headings: var(--fg);
-    --tw-prose-links: var(--accent);
+    --tw-prose-links: var(--term-accent-text);
     --tw-prose-bold: var(--fg);
     --tw-prose-quotes: var(--fg-muted);
     --tw-prose-code: var(--fg);
@@ -144,13 +147,15 @@
   margin: 2em 0;
 }
 
+/* Square, like every other structural block: the radius budget is for what
+   floats over the page, and a table is part of the text. */
 .prose table {
   margin-top: 1em;
   margin-bottom: 1em;
   border-collapse: separate;
   border-spacing: 0;
   border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  border-radius: var(--ui-radius-lg);
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -175,7 +180,7 @@
 }
 
 .prose blockquote {
-  border-left: 3px solid color-mix(in srgb, var(--term-accent, currentColor) 50%, transparent);
+  border-left: 3px solid color-mix(in srgb, var(--term-accent) 50%, transparent);
   padding: 0.4em 1em;
   background: color-mix(in srgb, currentColor 3%, transparent);
   border-radius: 0 var(--ui-radius) var(--ui-radius) 0;
@@ -342,13 +347,6 @@
 :is(.terminal-message-assistant, .terminal-message-user) .prose[data-markdown-first] > :first-child {
   margin-block-start: 0;
 }
-/* Prose carries only leading margins, so a thought/agent block right after a
-   paragraph would sit flush against it. Mirror the block's own 8px bottom
-   margin above it. The reinterpret wrapper is the streaming-time root. A line
-   run keeps its own distance from the prose (AgentLineBlocks.css). */
-.terminal-message-assistant > :is(.prose, [data-markdown-reinterpret-strategy]) + [data-agent-block]:not(.agent-line-run) {
-  margin-block-start: 8px;
-}
 :is(.terminal-message-assistant, .terminal-message-user) .prose table {
   font-size: calc(var(--message-body-size) * 0.95);
   width: 100%;
@@ -387,7 +385,6 @@
   font-size: calc(var(--message-body-size) * 0.875);
   font-weight: 400;
   line-height: 1;
-  background: color-mix(in srgb, currentColor 8%, transparent);
   border-radius: var(--ui-radius);
   padding: 0.1em 0.3em;
   white-space: pre-wrap;
@@ -408,21 +405,44 @@
 :is(.terminal-message-assistant, .terminal-message-user) .prose code > a[data-file-link]:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
 :is(.terminal-message-assistant, .terminal-message-user) .prose code > a[data-file-link] > .michi-file-link__glyph { display: none; }
 
-/* Focus dim. An unfocused pane is covered by a black veil at --pane-dim
-   (usePaneShellStyle, which every .terminal-pane root spreads): the same
-   result as the brightness(1 - --pane-dim) it replaces and the Topbar caption
-   cell still uses, composited as one layer instead of filtering the pane's
-   subtree. The pane isolates, so the veil sits over its raised children (find
-   bar, drop overlays) and under everything outside it. It never takes
-   pointer events: clicks, text selection, scrollbars and drops reach the pane
-   below. Black is the arithmetic of brightness(), not a theme surface. */
-.terminal-pane::after {
+/* Focus recede. An unfocused pane's SURFACE sinks toward the palette's deep
+   surface (--term-recede-fill); the text, code and controls it holds keep
+   their own colours. The layer is the last child of each .terminal-pane root
+   (usePaneShellStyle), on a negative rung inside the pane's own stacking
+   context, so it paints over the pane's background and under everything the
+   pane holds. Its inline opacity is how far the pane has sunk, composited as
+   one layer instead of filtering or restyling the pane's subtree, and set on
+   this element so a focus change restyles only it. It never takes pointer
+   events: clicks, text selection, scrollbars and drops reach the pane. The
+   bands that hide scrolled content behind the pane's surface sit over the
+   content, so they take the sunk colour themselves (paneSurface). */
+.terminal-pane__recede {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-pane-recede);
+  background: var(--term-recede-fill);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-soft) var(--t-ease);
+}
+
+/* The top bar's caption cell over an unfocused pane sinks by the pane's own
+   amount, --caption-recede (set by Topbar.tsx: 0 while the pane is focused or
+   none is), so the strip and the pane below stay one colour and fade in
+   lockstep. The cell isolates, so the layer stays inside it, and sits on the
+   same negative rung as the pane's: over the cell's background, under its
+   title, which keeps its colour. */
+[data-pane-caption-id] {
+  position: relative;
+  isolation: isolate;
+}
+[data-pane-caption-id]::after {
   content: '';
   position: absolute;
   inset: 0;
-  z-index: var(--z-pane-dim);
-  background: black;
-  opacity: var(--pane-dim, 0);
+  z-index: var(--z-pane-recede);
+  background: var(--term-recede-fill);
+  opacity: var(--caption-recede, 0);
   pointer-events: none;
   transition: opacity var(--t-soft) var(--t-ease);
 }
@@ -471,7 +491,7 @@
 }
 .terminal-pane[data-density='comfortable'] {
   --pane-pad-top: 16px; --pane-gutter: 32px; --pane-font-size: 13px; --pane-leading: 1.75;
-  --msg-gap: 16px; --msg-label-size: 10.5px; --msg-label-gap: 4px; --msg-assistant-pad: 6px;
+  --msg-gap: 16px; --msg-label-size: var(--fs-sm); --msg-label-gap: 4px; --msg-assistant-pad: 6px;
   --composer-inset: 26px; --user-turn-gap: 20px; --answer-lead: 20px;
 }
 .terminal-message-frame[data-next-role='user']:not([data-role='user']) { padding-bottom: var(--user-turn-gap, 14px); }
@@ -489,6 +509,39 @@
 .terminal-message-frame[data-role='user'][data-next-role='user'] .t-user-msg-actions {
   position: static;
 }
+/* The floating row takes pointers only through its buttons while they show,
+   so its box never swallows a click or tap meant for the line under it. */
+.t-user-msg-actions { pointer-events: none; }
+
+/* A message's actions (MessageBlock's MessageActions) show while it is
+   hovered, from CSS alone: a pointer over a message, even a streaming one,
+   commits no render (ST-27). The latest answer's meta line stays shown. */
+.t-msg-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-soft) ease-out;
+}
+[data-msg-actions='pinned'] > .t-msg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: hover) {
+  .terminal-message-frame:hover .t-msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+/* On a touch screen a tap is the hover, and a tap on a control in the message
+   is the control's: WebKit drops a tap whose mouseover makes something
+   visible, so the control would take only the second tap. A tap on the
+   actions themselves keeps them shown. */
+@media (hover: none) {
+  .terminal-message-frame:hover:not(:has(:is(a[href], button, input, select, textarea, summary, [role='button'], [data-mention], [data-tap-target]):not(.t-msg-actions *):hover))
+    .t-msg-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
 
 /* Replies with no user message between them read as one message, its actions
    under the last part (PaneMessageList marks the run). Hovering an earlier
@@ -497,19 +550,17 @@
   .terminal-message-frame[data-run-part]:hover
     ~ .terminal-message-frame[data-run-end]:not(.terminal-message-frame[data-run-part]:hover ~ [data-run-end] ~ *)
     .t-msg-actions {
-    opacity: 1 !important;
-    pointer-events: auto !important;
+    opacity: 1;
+    pointer-events: auto;
   }
 }
-/* On a touch screen a tap is the hover, and a tap on a control is the
-   control's: revealing the actions would make WebKit drop it. The list is
-   MessageBlock.tsx's TAP_CONTROL. */
+/* A tap on an earlier part's control is the control's, as above. */
 @media (hover: none) {
   .terminal-message-frame[data-run-part]:hover:not(:has(:is(a[href], button, input, select, textarea, summary, [role='button'], [data-mention], [data-tap-target]):hover))
     ~ .terminal-message-frame[data-run-end]:not(.terminal-message-frame[data-run-part]:hover ~ [data-run-end] ~ *)
     .t-msg-actions {
-    opacity: 1 !important;
-    pointer-events: auto !important;
+    opacity: 1;
+    pointer-events: auto;
   }
 }
 /* Focus shows them as hover does: anywhere in an answer (a link, a tool row,
@@ -519,8 +570,8 @@
    toggle, must not reveal the actions on a phone. */
 .terminal-message-frame[data-role='assistant']:has(:focus-visible) .t-msg-actions,
 .t-msg-actions:has(:focus-visible) {
-  opacity: 1 !important;
-  pointer-events: auto !important;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* An answer's meta line (MessageBlock): copy, retry and branch, then
@@ -735,12 +786,15 @@
   background-color: var(--michi-code-token-bg, transparent);
 }
 
+/* Square and unfilled: the border is the whole frame. On a pane the fill was
+   the pane's own colour anyway, and leaving it out keeps the table on the
+   surface it sits on, an unfocused pane's receded one included. */
 .michi-table-feature {
   position: relative;
   margin: var(--message-paragraph-spacing, 1em) 0;
   border: 1px solid var(--term-line, var(--line));
-  border-radius: var(--ui-radius);
-  background: var(--term-surface, var(--surface));
+  border-radius: 0;
+  background: transparent;
 }
 
 /* --- Table lightbox (fullscreen viewer on ModalShell) --- */
@@ -910,15 +964,18 @@
   white-space: nowrap;
 }
 
-/* Copy reveals on hover — pointer devices only; touch keeps it visible. */
+/* Copy reveals on hover — pointer devices only; touch keeps it visible.
+   Hidden, it takes no clicks. */
 @media (hover: hover) {
   .michi-code-copy {
     opacity: 0;
+    pointer-events: none;
   }
   .michi-code-body:hover .michi-code-copy,
   .michi-code-copy:focus-visible,
   .michi-code-copy.is-copied {
     opacity: 1;
+    pointer-events: auto;
   }
 }
 .michi-code-copy.is-copied { color: var(--ok, var(--term-accent, var(--accent))); }
@@ -992,8 +1049,8 @@
 /* User bubble · a quiet card with an accent right rule. No role/time label:
    the card, its right alignment and the 2px rule mark the speaker, and the
    time shows in the hover action row (MessageActions). The card is one step
-   up from the pane it sits on (--term-user-bubble-bg; the pane itself paints
-   --term-surface) with no shadow, so the rule is its only accent. Its left
+   up from the pane it sits on (--term-user-bubble-bg, a translucent lift over
+   whatever is behind it) with no shadow, so the rule is its only accent. Its left
    corners take the composer's radius (square on desktop, rounded on the
    phone, mobile.css); the rule's side stays square so the rule runs straight.
    Typography uses the !important rules so they beat the density-driven
@@ -1030,13 +1087,13 @@
   cursor: pointer;
   color: var(--term-fg);
   text-decoration: underline;
-  text-decoration-color: var(--term-line, currentColor);
+  text-decoration-color: var(--term-line);
   text-underline-offset: 2px;
 }
 .terminal-message-thread-link:hover { text-decoration-color: currentColor; }
 .terminal-message-thread-link:focus-visible {
-  outline: 1px solid var(--term-fg);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: 1px;
   border-radius: var(--ui-radius-sm);
 }
 
@@ -1047,15 +1104,16 @@
   flex-direction: column;
   width: 72%;
   max-width: 72%;
-  border: 1px solid var(--term-line, #333);
+  border: 1px solid var(--term-line);
   border-radius: var(--ui-radius);
   background: var(--term-surface);
   overflow: hidden;
 }
+.terminal-message-user-editing:has(.user-edit-area:focus-visible) { outline: var(--focus-ring); outline-offset: 1px; }
 .user-edit-area {
   width: 100%;
   border: 0;
-  outline: 0;
+  outline: 2px solid transparent;
   resize: none;
   background: transparent;
   color: var(--term-fg);
@@ -1071,7 +1129,7 @@
   display: flex;
   align-items: center;
   padding: 7px 12px;
-  border-top: 1px solid var(--term-line, #333);
+  border-top: 1px solid var(--term-line);
 }
 .user-edit-footer .user-edit-action {
   display: inline-flex;
@@ -1085,22 +1143,30 @@
   border: none;
   padding: 0;
 }
+.user-edit-footer .user-edit-hint {
+  flex: 1;
+  min-width: 0;
+  padding: 0 12px;
+  text-align: right;
+  font-family: var(--ui-font, system-ui);
+  font-size: var(--fs-xs);
+  color: var(--term-muted);
+}
 .user-edit-footer .user-edit-action:hover {
   color: var(--term-fg);
 }
 .user-edit-footer .user-edit-action kbd {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: var(--fs-xs);
-  border: 1px solid var(--term-line, #333);
+  border: 1px solid var(--term-line);
   border-radius: var(--ui-radius-sm);
   padding: 1px 5px;
   color: var(--term-muted);
 }
 
 /* Legacy --app-* / --surface* / --fg* / --line* / --accent* / --danger / --ok
- * are now thin aliases of the active terminal palette (--term-*). The few
- * remaining consumers (LandingPage, ApiKeyGate, Profile) don't need changes —
- * they automatically follow whichever palette the user picks in Settings. */
+ * are thin aliases of the active terminal palette (--term-*), kept for the
+ * rules that still read them; new rules read the --term-* roles directly. */
 :root {
   --app-bg: var(--term-bg);
   --app-bg-muted: var(--term-page-bg);
@@ -1164,11 +1230,11 @@ body {
 
 /* Design-system variables consumed by the terminal shell's inline styles. */
 :root {
-  /* Left-anchored wash so the glass sidebar (backdrop-filter) has something to
-     blur instead of a flat color — otherwise it reads as a plain translucent
-     block. The radials fade out well before screen center, so the main content
-     area (panes / Home) stays visually unchanged; the tint is only revealed
-     through the translucent sidebar. */
+  /* Left-anchored wash that shows through the translucent sidebar, so it
+     reads as tinted glass instead of a plain translucent block. The radials
+     fade out well before screen center, so the main content area (panes /
+     Home) stays visually unchanged; the tint is only revealed through the
+     translucent sidebar. */
   --term-shell-bg:
     radial-gradient(680px 460px at -6% -12%,
       color-mix(in srgb, var(--term-accent) 12%, transparent), transparent 60%),
@@ -1194,9 +1260,12 @@ body {
   --term-sidebar-outline: none;
   --term-sidebar-radius: 0px;
   --term-pane-bg: var(--term-surface);
-  /* The user bubble: the pane lifted by a little of the text colour, so it
-     reads as a card in light and dark palettes alike. */
-  --term-user-bubble-bg: color-mix(in srgb, var(--term-fg) 4%, var(--term-pane-bg));
+  /* The user bubble: whatever it sits on lifted by a little of the text
+     colour, so it reads as a card in light and dark palettes alike. The lift
+     is 4% of the text over nothing, not over --term-pane-bg: composited on
+     the pane the two are the same colour, and the translucent one follows the
+     pane down when it recedes instead of staying a lighter card on it. */
+  --term-user-bubble-bg: color-mix(in srgb, var(--term-fg) 4%, transparent);
   --term-pane-border: none;
   --term-pane-divider: 1px solid var(--term-line);
   --term-pane-radius: 0px;
@@ -1204,23 +1273,39 @@ body {
   --term-hover-bg: var(--term-alt);
   /* Motion timing tokens. motion/tokens.ts (DUR) mirrors the one-shot ones
      for motion components; tokens.css.test.js keeps the two in step. Every
-     transition and one-shot animation uses one of the first six; every
+     transition and one-shot animation uses one of the first eleven; every
      looping animation one of the three loop rhythms. Keep duration and
-     easing as SEPARATE tokens — the call sites pair them.
-       quick      hover and colour changes
-       soft       state changes: carets, fades, borders; menus popping in
-       enter      drawers, modals, scrims and overlays arriving
-       exit       the same surfaces leaving: exits run a little faster
-                  than their entrances
-       decay      slow fades
-       slow       highlights that linger: find/message flash, new-pane glow
-       loop-fast  spinners, cursor blink, flowing edges
-       loop       pulses, breathing dots, skeletons
-       loop-slow  ambient breathing and shimmer */
+     easing as SEPARATE tokens — the call sites pair them. An exit runs
+     shorter than its entrance.
+       quick       hover and colour changes
+       soft        state changes: carets, fades, borders; fade-only menus
+                   and tooltips popping in
+       brief       menus and popovers growing in, the selection popup's
+                   entrance, status words, labels and digits leaving,
+                   status cross-fades and short content fades
+       dismiss     menus, popovers and the selection popup fading out,
+                   inline content fading as it leaves
+       enter       drawers, modals, scrims and overlays arriving
+       exit        modals, toasts, notices and list items leaving
+       move        on-screen layout moves and settles, pane tracks opening,
+                   the canvas camera
+       collapse    disclosures, drawers, sheets and panels closing
+       scrim-exit  a drawer's or sheet's scrim, clearing just before its
+                   panel has collapsed
+       decay       slow fades nobody waits on
+       slow        highlights that linger: find/message flash, new-pane glow
+       loop-fast   spinners, cursor blink, the Map's feeding edge
+       loop        pulses, breathing dots, skeletons
+       loop-slow   ambient breathing: live labels, the Map's glows */
   --t-quick: 60ms;
   --t-soft: 100ms;
+  --t-brief: 120ms;
+  --t-dismiss: 80ms;
   --t-enter: 180ms;
   --t-exit: 110ms;
+  --t-move: 220ms;
+  --t-collapse: 160ms;
+  --t-scrim-exit: 140ms;
   --t-decay: 360ms;
   --t-slow: 600ms;
   --t-loop-fast: 1s;
@@ -1244,17 +1329,15 @@ body {
   --term-rail-3: color-mix(in srgb, var(--term-line) 40%, var(--term-bg));
   /* ── Glass materials: the sidebar and the overlays are separate ──────────────
      The sidebar is thin glass: its solidity follows the translucency slider and
-     it blurs the --term-shell-bg wash painted behind it. Overlays (modals,
-     popovers, menus — every .term-glass surface) float over reading text, so
-     they use a denser frost of their own (below) that does not follow the
-     sidebar: at the sidebar's thin setting the text and colour behind a dialog
-     ghosted through its navigation and lists. Under vibrancy the CSS blur still
-     works over OPAQUE web content (a modal over the content column), but an
-     overlay floating over a transparent region (a menu over the
+     the --term-shell-bg wash painted behind it shows through, unblurred.
+     Overlays (modals, popovers, menus — every .term-glass surface) float over
+     reading text, so they use a denser frost of their own (below) that does not
+     follow the sidebar: at the sidebar's thin setting the text and colour
+     behind a dialog ghosted through its navigation and lists. Under vibrancy
+     the CSS blur still works over OPAQUE web content (a modal over the content
+     column), but an overlay floating over a transparent region (a menu over the
      vibrancy-transparent sidebar) has nothing to blur — a positional limit, not
      a vibrancy bug. */
-  --term-glass-blur: 26px;
-  --term-glass-saturate: 160%;
   /* Overlay frost: mostly solid surface, a wide blur so nothing behind keeps
      its shape, near-neutral saturation and no accent wash, so what shows
      through is a soft haze rather than smeared text and colour. Desktop modals
@@ -1275,20 +1358,12 @@ body {
   --term-surface-glass: color-mix(in srgb, color-mix(in srgb, var(--term-accent) 6%, var(--term-surface)) 46%, transparent);
 }
 
-/* ── Glass sidebar · proposal A (克制雾面玻璃) ──────────────────────────────
-   The <aside> already carries .terminal-sidebar and reads its background from
-   --term-sidebar-bg (now a translucent color-mix). backdrop-filter blurs the
-   left-anchored --term-shell-bg wash painted behind it. In wide mode the
-   sidebar is a flex sibling (never overlaps panes), so its backdrop is static
-   → the blur result is cached and stays cheap even while messages stream.
-   No inner highlight (dialed to 0); the existing right-edge shadow is the only
-   elevation. Desktop-only true window vibrancy (see-through to the OS / other
-   apps) will layer on top of this in a later pass, gated to Electron.
+/* ── Glass sidebar ────────────────────────────────────────────────────────────
+   The <aside> (.terminal-sidebar) reads its background from --term-sidebar-bg,
+   a translucent color-mix that the translucency slider sets, and nothing blurs
+   behind it. The docked frame and the overlay drawer below set how it paints;
+   under macOS vibrancy the native material does the frosting.
    ------------------------------------------------------------------------- */
-.terminal-sidebar {
-  -webkit-backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
-  backdrop-filter: blur(var(--term-glass-blur)) saturate(var(--term-glass-saturate));
-}
 /* Separate the conversation list from the titlebar without shifting rows. */
 .terminal-sidebar:not([data-collapsed])::before {
   content: '';
@@ -1315,9 +1390,11 @@ body {
 .terminal-shell[data-sidebar-layout='docked'] > .terminal-body {
   background: var(--term-chrome-bg);
 }
-.terminal-shell[data-sidebar-layout='docked'] .terminal-sidebar {
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
+/* The overlay layout's drawer (phones, and windows up to 700px) slides over
+   a transcript that may be streaming, so it is opaque, as desktop overlays
+   are. */
+.terminal-shell[data-sidebar-layout='overlay'] {
+  --term-sidebar-bg: var(--term-surface);
 }
 .terminal-shell[data-sidebar-layout='docked'] .terminal-content-col {
   position: relative;
@@ -1357,24 +1434,25 @@ body {
 /* ── Sidebar unread dot (see UnreadDot.tsx) ─────────────────────────────────
    Solid = the row itself has an unopened reply; ring = a collapsed row hiding
    one. Always mounted at scale(0) so only a CHANGE animates: rows that mount
-   already unread paint settled, a reply landing on a visible row pops in, and
-   opening it removes the dot at once. */
+   already unread paint settled, a reply landing on a visible row scales in,
+   and opening it removes the dot at once. */
 .sb-unread-dot {
   position: absolute;
   top: 50%;
   width: 6px;
   height: 6px;
   margin-top: -3px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   pointer-events: none;
   transform: scale(0);
 }
 .sb-unread-dot[data-unread='self'],
 .sb-unread-dot[data-unread='within'] {
   transform: scale(1);
-  /* A beat late, so a reply that lands while the row's rail is still lit pops
-     its dot as the rail starts to go out (see RailAfterglow), not over it. */
-  transition: transform var(--t-enter) cubic-bezier(.3, 1.6, .5, 1) 120ms;
+  /* A beat late, so a reply that lands while the row's rail is still lit
+     brings its dot in as the rail starts to go out (see RailAfterglow), not
+     over it. It comes with every reply, so it settles without overshoot. */
+  transition: transform var(--t-enter) cubic-bezier(0.23, 1, 0.32, 1) var(--t-brief);
 }
 .sb-unread-dot[data-unread='self'] { background: var(--term-digest); }
 .sb-unread-dot[data-unread='within'] { box-shadow: inset 0 0 0 1.5px var(--term-digest); }
@@ -1383,6 +1461,13 @@ body {
   top: auto;
   margin-top: 0;
   flex-shrink: 0;
+}
+/* Classic workspace rows keep it mounted while read, so a reply scales it in
+   there too: it takes no room, and the margin cancels the 4px gap the name
+   row (.ws-head__name) puts before it. */
+.sb-unread-dot--inline[data-unread='none'] {
+  width: 0;
+  margin-inline-start: -4px;
 }
 @media (prefers-reduced-motion: reduce) {
   .sb-unread-dot { transition: none !important; }
@@ -1396,7 +1481,8 @@ body {
   top: 5px;
   bottom: 5px;
   width: 2px;
-  border-radius: var(--ui-radius-pill);
+  /* Square ends, like the rail it fades out over (SidebarOpenRail). */
+  border-radius: 0;
   color: var(--term-run);
   background: var(--term-run);
   box-shadow: 0 0 6px 0 currentColor;
@@ -1417,9 +1503,9 @@ body {
    The first attempt used `--term-alt` at 62% and still read as opaque, because
    painting a light colour over a translucent surface is additive: the sidebar
    is already a thin tint (under macOS vibrancy it's `--term-vibrancy-tint` over
-   the *native* window material, with CSS backdrop-filter switched off), so a
-   second light layer on top only pushes the composite toward solid. The row
-   ends up more opaque than its neighbours — exactly the "loses its frost" look.
+   the *native* window material), so a second light layer on top only pushes
+   the composite toward solid. The row ends up more opaque than its neighbours
+   — exactly the "loses its frost" look.
 
    Instead these are low-alpha overlays of the FOREGROUND colour. They darken
    (or, on dark palettes where --term-fg is near-white, lighten) whatever shows
@@ -1441,7 +1527,12 @@ html[data-vibrancy='on'] {
 
 /* The generic row hover lives in shared CSS that classic also uses, so it's
    overridden per-mode here rather than edited in place. */
-.terminal-sidebar[data-row-style]:not([data-row-style='classic']) .t-row-hover:not(.is-active):is(:hover, :focus-within) {
+@media (hover: hover) {
+  .terminal-sidebar[data-row-style]:not([data-row-style='classic']) .t-row-hover:not(.is-active):hover {
+    background: var(--sb-card-hover) !important;
+  }
+}
+.terminal-sidebar[data-row-style]:not([data-row-style='classic']) .t-row-hover:not(.is-active):is(:focus-visible, :has(:focus-visible), :active) {
   background: var(--sb-card-hover) !important;
 }
 /* Card modes drop the kebab's fade-to-solid strip entirely. Its job was to mask
@@ -1467,13 +1558,9 @@ html[data-vibrancy='on'] {
 }
 
 /* Respect users who ask the OS to reduce transparency: fall back to the solid
-   surface and drop the blur entirely. */
+   surface. */
 @media (prefers-reduced-transparency: reduce) {
   :root { --term-sidebar-bg: var(--term-surface); }
-  .terminal-sidebar {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
 }
 
 /* ── Overlay glass · reusable frost for floating chrome ──────────────────────
@@ -1542,8 +1629,7 @@ html[data-vibrancy="on"],
 }
 /* Chrome frame — topbar + sidebar — frost with the SAME tint so the left column
    and the top bar read as one continuous glass sheet. The native material
-   provides the blur; kill any CSS backdrop-filter so it doesn't double-blur /
-   muddy. */
+   provides the blur. */
 [data-vibrancy="on"] .terminal-topbar {
   background: var(--term-vibrancy-tint) !important;
 }
@@ -1551,8 +1637,6 @@ html[data-vibrancy="on"],
    overlays have no frame behind them, so they still need their own tint. */
 [data-vibrancy="on"] .terminal-sidebar {
   background: var(--term-sidebar-body-bg, var(--term-vibrancy-tint)) !important;
-  -webkit-backdrop-filter: none !important;
-  backdrop-filter: none !important;
 }
 /* NOTE: do NOT blanket-disable backdrop-filter on .term-glass under vibrancy.
    backdrop-filter works fine under vibrancy WHEN there is opaque web content
@@ -1619,8 +1703,8 @@ html[data-vibrancy="on"],
 
 .terminal-composer:focus-within {
   background: var(--term-composer-bg-focus, var(--term-surface)) !important;
-  border: var(--term-composer-border-focus, 1px solid var(--term-line-s)) !important;
-  box-shadow: var(--term-composer-shadow, 0 1px 0 rgba(0,0,0,0.04), 0 2px 6px rgba(0,0,0,0.10)) !important;
+  border: var(--term-composer-border-focus) !important;
+  box-shadow: var(--term-composer-shadow) !important;
 }
 
 /* Drag-hover outline — driven by ComposerShell's dragHover prop. */
@@ -1630,17 +1714,9 @@ html[data-vibrancy="on"],
 }
 
 /* ===== Redesign animations ===== */
-@keyframes fadeUp {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
 @keyframes fadeIn {
   from { opacity: 0; }
   to   { opacity: 1; }
-}
-@keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--accent) 35%, transparent); }
-  50%      { box-shadow: 0 0 0 6px color-mix(in oklab, var(--accent) 6%, transparent); }
 }
 @keyframes bounce-dot {
   0%, 80%, 100% { transform: translateY(0); }
@@ -1656,30 +1732,12 @@ html[data-vibrancy="on"],
   0%, 100% { opacity: .4; }
   50%      { opacity: 1; }
 }
-/* Pulse for shape-based status glyphs — uses opacity only so it composes
-   cleanly with rotation animations on the same element. */
-@keyframes tpulse-glyph {
-  0%, 100% { opacity: .55; }
-  50%      { opacity: 1; }
-}
 @keyframes tspin {
   to { transform: rotate(360deg); }
 }
-@keyframes tblink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
 @keyframes t-stream-token-reveal {
   from { opacity: .28; }
   to { opacity: 1; }
-}
-@keyframes tdots {
-  0%   { content: ''; }
-  25%  { content: '.'; }
-  50%  { content: '..'; }
-  75%  { content: '...'; }
-  100% { content: ''; }
-}
-.tdots-after::after {
-  content: '';
-  animation: tdots var(--t-loop) steps(1) infinite;
 }
 .stream-token-reveal {
   animation: t-stream-token-reveal var(--stream-token-reveal-duration, var(--t-decay)) ease-out both;
@@ -1717,16 +1775,19 @@ html[data-vibrancy="on"],
   display: inline-block;
   width: 4px;
   height: 4px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-muted);
   margin-right: 4px;
   vertical-align: middle;
   animation: bounce-dot var(--t-loop) infinite ease-in-out;
 }
+/* The pane's activity row (StreamActivityIndicator) fades in only when its
+   turn has just started on screen; a re-show or remount comes settled. */
+.t-stream-activity[data-fresh] { animation: fadeIn var(--t-brief) ease-out; }
 
 /* ── Tool call / thinking status language (ToolCallGroup, TermThoughtBlock) ──
    One glyph system: breathing run dot = running, muted dot = done,
-   red × = failed (rendered inline, no class). Labels shimmer while live. */
+   red × = failed (rendered inline, no class). Labels breathe while live. */
 .term-dot-i {
   display: inline-block;
   width: 5px;
@@ -1745,74 +1806,31 @@ html[data-vibrancy="on"],
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
-/* Streaming label shimmer — a highlight sweeping across the text, in the
-   Claude-app family. Colors ride --term-* tokens so it adapts per theme. */
+/* A live label is plain text in its own colour (a caller may set another,
+   as the digest line does) breathing as a whole: an opacity loop composites,
+   where a gradient swept through clipped text repainted every label each
+   frame. Its base frame is full opacity, where reduced motion leaves it. */
 .term-shimmer {
-  --term-shimmer-base: var(--term-muted);
-  background-color: var(--term-shimmer-base);
-  background-image: linear-gradient(90deg,
-    var(--term-shimmer-base) 0%, var(--term-shimmer-base) 35%,
-    var(--term-fg) 50%,
-    var(--term-shimmer-base) 65%, var(--term-shimmer-base) 100%);
-  background-size: 220% 100%;
-  background-repeat: no-repeat;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  animation: termShimmer var(--t-loop-slow) linear infinite;
+  color: var(--term-muted);
+  animation: termBreathe var(--t-loop-slow) ease-in-out infinite;
 }
-@keyframes termShimmer {
-  /* With a 220%-wide image, these offsets keep the entire 35–65% highlight
-     outside the label at both ends. The loop resets on identical base color. */
-  0% { background-position: 120% 0; }
-  100% { background-position: -20% 0; }
-}
-/* Agent-block variant parts (AgentBlockVariants.tsx). Card variant (1b):
-   10px accent-arc spinner. Terminal variant (1d): blinking block caret after
-   the streaming "thinking" label, breathing ❯ glyph on running rows, and an
-   accent-tinted shimmer for the "running" duration slot. */
+/* A 10px accent-arc spinner, and a breathing glyph on running rows. */
 .agent-spinner {
   display: inline-block;
   width: 10px;
   height: 10px;
   border: 1.5px solid var(--term-line);
   border-top-color: var(--term-run);
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   flex-shrink: 0;
   animation: tspin var(--t-loop-fast) linear infinite;
-}
-.agent-caret {
-  display: inline-block;
-  width: 6px;
-  height: 11px;
-  background: var(--term-accent);
-  align-self: center;
-  flex-shrink: 0;
-  animation: tblink var(--t-loop-fast) steps(1) infinite;
 }
 .agent-glyph-run {
   animation: termBreathe var(--t-loop) ease-in-out infinite;
 }
-.term-shimmer--accent {
-  --term-shimmer-base: var(--term-accent);
-}
 @media (prefers-reduced-motion: reduce) {
   .term-dot-i--run { animation: none; opacity: 1; }
-  .term-shimmer {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    color: var(--term-muted);
-  }
-  .term-shimmer--accent {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    color: var(--term-accent);
-  }
   .agent-spinner { animation: none; }
-  .agent-caret { animation: none; }
   .agent-glyph-run { animation: none; }
 }
 
@@ -1888,7 +1906,7 @@ html[data-vibrancy="on"],
 /* Collapsing the sidebar fades its content in place (still clipped by the
    shell); the content keeps its expanded width, so nothing reflows mid-slide. */
 .terminal-sidebar-content {
-  transition: opacity 100ms var(--t-ease);
+  transition: opacity var(--t-soft) var(--t-ease);
 }
 .terminal-sidebar[data-collapsed] .terminal-sidebar-content {
   opacity: 0;
@@ -1900,7 +1918,9 @@ html[data-vibrancy="on"],
 }
 
 /* Terminal hover utilities — pair with --t-* motion tokens.
-   Replaces inline onMouseEnter style mutations with smooth CSS transitions. */
+   Replaces inline onMouseEnter style mutations with smooth CSS transitions.
+   Hover paints only for a real pointer, so a tap leaves nothing lit (ST-02);
+   :active, outside the gate, gives taps their press. */
 .t-hover-bg-line {
   transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
@@ -1909,20 +1929,34 @@ html[data-vibrancy="on"],
 .t-hover-bg-alt {
   transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.t-hover-bg-alt:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+@media (hover: hover) {
+  .t-hover-bg-alt:hover { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
+}
+.t-hover-bg-alt:not(:disabled):active { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
 
 .t-hover-fg {
   transition: color var(--t-quick) var(--t-ease);
 }
-.t-hover-fg:hover { color: var(--term-fg); }
+@media (hover: hover) {
+  .t-hover-fg:hover { color: var(--term-fg); }
+}
 
 .t-hover-accent {
   color: var(--term-muted);
   transition: color var(--t-soft);
 }
-.t-hover-accent:hover { color: var(--term-accent); }
+@media (hover: hover) {
+  .t-hover-accent:hover { color: var(--term-accent-text); }
+}
 
-/* Icon buttons — subtle bg on hover, dimmed bg + press on active. Used by
+/* The resting ink of an element whose hover class steps it to --term-fg
+   (.t-hover-fg, .t-hover-bg-alt, .t-icon-btn): an inline colour would beat
+   that :hover (ST-05). --term-muted, or the tier a caller sets as --rest-ink
+   (style={{ '--rest-ink': … }}: TPane's Open plan). One class, so every
+   :hover rule outranks it. */
+.t-rest-ink { color: var(--rest-ink, var(--term-muted)); }
+
+/* Icon buttons — subtle bg on hover, a darker one on press. Used by
    message-action rows and any single-icon interactive affordance.
    Provides minimal layout so bare <button class="t-icon-btn">…</button>
    works without inline overrides. 26×26 matches the Topbar toggle size.
@@ -1940,26 +1974,116 @@ html[data-vibrancy="on"],
   cursor: pointer;
   border-radius: var(--ui-radius);
   transition: color var(--t-quick) var(--t-ease),
-              background var(--t-quick) var(--t-ease),
-              transform 60ms var(--t-ease);
+              background var(--t-quick) var(--t-ease);
 }
-.t-icon-btn:hover {
-  background: var(--term-hover-bg, var(--term-alt));
+@media (hover: hover) {
+  .t-icon-btn:hover:not(:disabled) {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.t-icon-btn:not(:disabled):active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
   color: var(--term-fg);
-}
-.t-icon-btn:active {
-  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 80%, var(--term-fg) 10%);
-  transform: scale(0.9);
 }
 .t-icon-btn.is-on {
   background: color-mix(in srgb, var(--term-fg) 8%, transparent);
   color: var(--term-fg);
 }
-.t-icon-btn.is-on:hover {
-  background: color-mix(in srgb, var(--term-fg) 12%, transparent);
+@media (hover: hover) {
+  .t-icon-btn.is-on:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--term-fg) 12%, transparent);
+  }
+}
+.t-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Top-bar icon buttons (TopbarIconButton, the pane and browser launchers):
+   faint at rest, --term-fg hovered or on. In CSS, so the hover ink wins
+   (ST-05). */
+.topbar-icon-btn {
+  color: var(--term-faint);
 }
 
-/* Pane caption controls (PaneCaption.tsx): the hover-only ⤢ and ×, and the
+/* The pane caption (PaneCaption.tsx): a .t-reveal-host whose ⤢ and × show
+   for a pointer over it and for keyboard focus, while its border and fill
+   light for a pointer only. The title reads --term-fg while its pane is
+   focused; its background-work badge (◆) turns amber while a run waits. */
+.pane-caption {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--term-mid);
+  transition: background var(--t-quick) var(--t-ease);
+}
+.pane-caption[data-focused] { color: var(--term-fg); }
+@media (hover: hover) {
+  .pane-caption:hover {
+    border-color: var(--term-line);
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+.pane-caption-badge {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--term-mid);
+  transition: background var(--t-quick) var(--t-ease),
+              color var(--t-quick) var(--t-ease),
+              border-color var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  .pane-caption-badge:hover {
+    border-color: var(--term-line);
+    background: var(--term-alt2);
+    color: var(--term-fg);
+  }
+}
+.pane-caption-badge[data-state='waiting'] {
+  background: var(--term-select-f);
+  color: var(--term-waiting-text);
+}
+
+/* Single-page mode's pane tabs (PaneTabStrip.tsx): the selected tab is a
+   --term-alt pill, as .michi-db-tab draws it (ST-18); another tab's hover
+   changes its ink only, and reveals its × (.t-reveal), as keyboard focus
+   does. */
+.pane-tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--term-muted);
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
+}
+.pane-tab[aria-selected='true'] {
+  background: var(--term-alt);
+  color: var(--term-fg);
+}
+@media (hover: hover) {
+  .pane-tab:not([aria-selected='true']):hover { color: var(--term-fg); }
+}
+.pane-tab:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+.pane-tab__btn {
+  background: transparent;
+  color: var(--term-muted);
+  transition: opacity var(--t-quick) var(--t-ease),
+              background var(--t-quick) var(--t-ease),
+              color var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  .pane-tab__btn:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+/* Its menu open, the ⋯ stays pressed. */
+.pane-tab__btn[aria-expanded='true'] {
+  background: var(--term-hover-bg, var(--term-alt));
+  color: var(--term-fg);
+}
+
+/* Pane caption controls (PaneCaption.tsx): the revealed ⤢ and ×, and the
    persistent exit control a zoomed caption carries. */
 .pane-caption-icon,
 .pane-caption-zoom-exit {
@@ -1975,11 +2099,27 @@ html[data-vibrancy="on"],
   border-color: var(--term-line);
   color: var(--term-mid);
 }
-.pane-caption-icon:hover,
-.pane-caption-zoom-exit:hover {
+@media (hover: hover) {
+  .pane-caption-icon:hover,
+  .pane-caption-zoom-exit:hover {
+    border-color: var(--term-line-s, var(--term-line));
+    background: var(--term-alt2, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.pane-caption-zoom-exit[aria-expanded='true'] {
   border-color: var(--term-line-s, var(--term-line));
-  background: var(--term-alt2, var(--term-alt));
   color: var(--term-fg);
+}
+/* PaneZoomExit's list of the panes a zoom hides. */
+.pane-zoom-list-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px var(--m-rowX, 8px) 6px;
+  color: var(--term-muted);
+  font-size: var(--fs-xs);
 }
 /* Message actions (copy, retry, edit, branch) are 26px for a mouse; a finger
    needs 40. The negative block margin keeps the space under the message. */
@@ -1990,7 +2130,7 @@ html[data-vibrancy="on"],
      rest (MessageBlock actionsAtRest). All of it, Retry included: the row must
      not change when a tap's emulated hover lands, or iOS takes the first tap on
      a button as a hover and drops the click (and the buttons would shift). */
-  [data-msg-actions='rest'] > .t-msg-actions { opacity: 1 !important; pointer-events: auto !important; }
+  [data-msg-actions='rest'] > .t-msg-actions { opacity: 1; pointer-events: auto; }
 }
 
 /* Text buttons — compact text-label affordance, default borderless.
@@ -2017,23 +2157,25 @@ html[data-vibrancy="on"],
               border-color var(--t-quick) var(--t-ease),
               color var(--t-quick) var(--t-ease);
 }
-.t-text-btn:hover {
-  background: var(--term-hover-bg, var(--term-alt));
+@media (hover: hover) {
+  .t-text-btn:hover:not(:disabled) {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.t-text-btn:not(:disabled):active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
   color: var(--term-fg);
 }
-.t-text-btn:active {
-  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 80%, var(--term-fg) 10%);
-}
 .t-text-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.5;
   cursor: not-allowed;
-}
-.t-text-btn:disabled:hover {
-  background: transparent;
-  color: var(--term-mid);
 }
 .t-text-btn.is-bordered {
   border-color: var(--term-line);
+}
+.t-text-btn.is-bordered:not(:disabled):active {
+  background: var(--term-hover-bg, var(--term-alt));
 }
 .t-text-btn.is-active {
   background: var(--term-alt);
@@ -2054,39 +2196,48 @@ html[data-vibrancy="on"],
   border-top: 1px solid var(--term-line);
 }
 .t-followups-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 2px;
-}
-.t-followups-heading h3 {
-  margin: 0;
-  color: var(--term-mid);
+  margin: 0 0 2px;
   font-size: var(--fs-md);
   line-height: 1.5;
   font-weight: 500;
 }
+/* The whole heading line toggles, like a tool group's header: hover steps
+   the label and the chevron up to --term-fg. */
 .t-followups-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-mid);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
+}
+.t-followups-chevron {
   display: inline-grid;
   place-items: center;
   flex-shrink: 0;
   width: 26px;
   height: 26px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--ui-radius);
-  background: transparent;
   color: var(--term-muted);
-  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease);
 }
-.t-followups-toggle:hover { background: var(--term-alt); }
-/* Touch: a 40px target; the negative margin keeps the heading's height. */
+@media (hover: hover) {
+  .t-followups-toggle:hover,
+  .t-followups-toggle:hover .t-followups-chevron { color: var(--term-fg); }
+}
+/* Touch: a 40px-tall target; the negative margin keeps the heading's height. */
 @media (hover: none) and (pointer: coarse) {
-  .t-followups-toggle { width: 40px; height: 40px; margin: -7px -7px -7px 0; }
+  .t-followups-toggle { min-height: 40px; margin: -7px 0; }
 }
-.t-followups-toggle svg { transition: transform var(--t-soft) ease-out; }
-.t-followups-toggle[aria-expanded='false'] svg { transform: rotate(-90deg); }
+.t-followups-chevron svg { transition: transform var(--t-soft) ease-out; }
+.t-followups-toggle[aria-expanded='false'] .t-followups-chevron svg { transform: rotate(-90deg); }
 .t-followups > [hidden] { display: none; }
 .t-followups-loading {
   display: flex;
@@ -2097,11 +2248,12 @@ html[data-vibrancy="on"],
   font-size: var(--fs-lg);
 }
 
-/* Keep both actions on one surface; the right quarter is a full-height hit area. */
+/* Keep both actions on one surface; the right quarter is a full-height hit area.
+   Flex, not a 3fr/1fr grid: Safari kept the grid rows as tall as the text laid
+   out one glyph per line when the follow-ups first appeared. */
 .t-followup-row {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 1fr);
+  display: flex;
   align-items: stretch;
   min-height: 40px;
   border-radius: var(--ui-radius-sm);
@@ -2110,12 +2262,18 @@ html[data-vibrancy="on"],
   font-size: var(--branch-ui-text-size, 15.5px);
   letter-spacing: 0;
   --followup-final-opacity: 1;
-  opacity: 0;
-  animation: t-followup-pop var(--t-enter) var(--t-ease) forwards;
-  animation-delay: var(--followup-delay, 0ms);
+  opacity: var(--followup-final-opacity);
   --followup-tint: 14%;
   --followup-mid-tint: 6%;
   --followup-mid-stop: 86.25%;
+}
+/* Settled unless the turn they follow ended on screen (FollowUpRow
+   `arriving`, which also sets --followup-delay): restored, remounted and
+   re-expanded rows never replay the pop. A row waiting out its delay holds
+   the pop's first frame (fill both) instead of showing settled first. */
+.t-followup-row[data-arriving] {
+  animation: t-followup-pop var(--t-enter) var(--t-ease) both;
+  animation-delay: var(--followup-delay, 0ms);
 }
 .t-followup-row + .t-followup-row {
   border-top: 1px solid color-mix(in srgb, var(--term-line) 55%, transparent);
@@ -2131,14 +2289,12 @@ html[data-vibrancy="on"],
   pointer-events: none;
   transition: opacity var(--t-soft) ease-out;
 }
-.t-followup-row[data-disabled='true'] {
-  --followup-final-opacity: 0.68;
-}
 .t-followup-row[data-disabled='true'] .t-followup-text,
 .t-followup-row[data-disabled='true'] .t-followup-branch {
-  cursor: default;
+  cursor: not-allowed;
 }
 .t-followup-text {
+  flex: 3 1 0;
   min-width: 0;
   min-height: 40px;
   text-align: left;
@@ -2162,9 +2318,8 @@ html[data-vibrancy="on"],
   display: flex;
   align-items: center;
   justify-content: center;
-  align-self: stretch;
+  flex: 1 1 0;
   gap: 8px;
-  width: 100%;
   min-width: 0;
   min-height: 40px;
   padding: 8px 12px;
@@ -2184,13 +2339,12 @@ html[data-vibrancy="on"],
 .t-followup-row[data-branched='true'] .t-followup-text,
 .t-followup-row[data-branched='true'] .t-followup-branch { color: var(--term-muted); transition: color var(--t-decay) ease; }
 .t-followup-branch:focus-visible {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
 }
 .t-followup-branch:disabled,
 .t-followup-text:disabled {
-  color: var(--term-muted);
-  cursor: default;
-  opacity: .45;
+  color: var(--term-faint);
+  cursor: not-allowed;
 }
 .t-followup-branch-glyph {
   display: inline-flex;
@@ -2207,7 +2361,7 @@ html[data-vibrancy="on"],
     --followup-mid-tint: 14%;
     --followup-mid-stop: 83.75%;
   }
-  .t-followup-branch:not(:disabled):hover { color: var(--term-accent); }
+  .t-followup-branch:not(:disabled):hover { color: var(--term-accent-text); }
 }
 /* Narrow: the glyph and "Branch" stay on one line inside the right quarter by
    trimming its padding; below 300px only the glyph fits, and the button keeps
@@ -2223,26 +2377,15 @@ html[data-vibrancy="on"],
   0% {
     opacity: 0;
     transform: translateY(7px) scale(0.985);
-    filter: brightness(1.2);
   }
   70% {
     opacity: var(--followup-final-opacity);
     transform: translateY(-1px) scale(1);
-    filter: brightness(1.08);
   }
   100% {
     opacity: var(--followup-final-opacity);
     transform: translateY(0) scale(1);
-    filter: brightness(1);
   }
-}
-@media (prefers-reduced-motion: reduce) {
-  .t-followup-row {
-    opacity: var(--followup-final-opacity);
-    animation: none;
-  }
-  .t-followup-row::before,
-  .t-followups-toggle svg { transition: none; }
 }
 
 /* Messages loading skeleton — placeholder while lazy-loaded message bodies
@@ -2255,9 +2398,10 @@ html[data-vibrancy="on"],
   50%      { opacity: 0.6; }
 }
 /* The softer skeleton pulse, for faint or --term-alt bars that would vanish at
-   the message skeleton's .3 low: follow-ups below, and the page, Scheduled and
-   Trash loading bars (michiPage.css, Scheduled.css, Trash.css). Pair it with
-   var(--t-loop) ease-in-out infinite and a reduced-motion `animation: none`. */
+   the message skeleton's .3 low: follow-ups below, and the page, Scheduled,
+   Trash and Settings history loading bars (michiPage.css, Scheduled.css,
+   Trash.css, history.css). Pair it with var(--t-loop) ease-in-out infinite
+   and a reduced-motion `animation: none`. */
 @keyframes t-skeleton-pulse-soft {
   0%, 100% { opacity: 0.55; }
   50%      { opacity: 0.9; }
@@ -2295,10 +2439,19 @@ html[data-vibrancy="on"],
   transition: background var(--t-quick) var(--t-ease),
               color var(--t-quick) var(--t-ease);
 }
-.t-row-hover:not(.is-active):hover,
-.t-row-hover:not(.is-active):focus-within {
+@media (hover: hover) {
+  .t-row-hover:not(.is-active):hover {
+    background: var(--term-hover-bg, var(--term-alt)) !important;
+    color: var(--term-fg) !important;
+  }
+}
+.t-row-hover:not(.is-active):is(:focus-visible, :has(:focus-visible)) {
   background: var(--term-hover-bg, var(--term-alt)) !important;
   color: var(--term-fg) !important;
+}
+/* Pressed: the hover fill (ST-06), which taps on a touch screen show too. */
+.t-row-hover:not(.is-active):active {
+  background: var(--term-hover-bg, var(--term-alt)) !important;
 }
 /* Rows that are buttons to the keyboard (sidebar bottom nav, Appearance swatches): a ring inside the row. */
 .t-row-focus:focus-visible {
@@ -2321,13 +2474,28 @@ html[data-vibrancy="on"],
   cursor: pointer;
   transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.show-more-toggle:hover {
+@media (hover: hover) {
+  .show-more-toggle:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.show-more-toggle:active {
   background: var(--term-hover-bg, var(--term-alt));
-  color: var(--term-fg);
 }
 .show-more-toggle:focus-visible {
   outline: var(--focus-ring);
   outline-offset: -2px;
+}
+
+/* A disclosure's one › (DisclosureChevron) turns a quarter while it is open;
+   its rows appear in one frame. Reduced motion lands the turn at once. */
+.t-chevron {
+  display: inline-block;
+  transition: transform var(--t-soft) var(--t-ease);
+}
+.t-chevron[data-open] {
+  transform: rotate(90deg);
 }
 
 /* Section label → first workspace row: collapse the inter-workspace gap so
@@ -2364,39 +2532,6 @@ html[data-vibrancy="on"],
   background: var(--term-hover-bg, var(--term-alt));
 }
 
-/* Workspace "new chat" + button — no visible box: just the glyph. Muted at
-   rest, it lights up on hover with a text-shadow glow in its own current color
-   (currentColor — no accent), so the halo always matches the glyph. A little
-   transparent padding keeps the hit target slightly larger than the glyph. */
-.t-add-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  color: var(--term-muted);
-  cursor: pointer;
-  font-family: var(--ui-font);
-  font-size: var(--fs-2xl);
-  font-weight: 700;
-  line-height: 1;
-  flex-shrink: 0;
-  transition: text-shadow var(--t-quick) var(--t-ease),
-              transform var(--t-quick) var(--t-ease);
-}
-.t-add-btn:hover {
-  text-shadow: 0 0 6px currentColor;
-  transform: scale(1.15);
-}
-.t-add-btn:active {
-  transform: translateY(1px);
-}
-.t-add-btn:focus-visible {
-  outline: none;
-  text-shadow: 0 0 6px currentColor;
-}
-
 /* Workspace row hover actions — chevron + ⋯ + compose icon appear only on
    hover; hidden at rest for a clean look. The chevron sits right of the name
    and the action buttons at the row's trailing edge. */
@@ -2408,8 +2543,8 @@ html[data-vibrancy="on"],
 }
 .t-row-hover:hover .ws-hover-chevron,
 .t-row-hover:hover .ws-hover-actions,
-.t-row-hover:focus-within .ws-hover-chevron,
-.t-row-hover:focus-within .ws-hover-actions {
+.t-row-hover:is(:focus-visible, :has(:focus-visible)) .ws-hover-chevron,
+.t-row-hover:is(:focus-visible, :has(:focus-visible)) .ws-hover-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2429,34 +2564,36 @@ html[data-vibrancy="on"],
   flex-shrink: 0;
   transition: background var(--t-quick) ease-out, color var(--t-quick) ease-out;
 }
-.ws-action-btn:hover {
-  background: var(--term-line);
+/* A ghost control: hover lights only for a real pointer, an open menu keeps
+   its trigger lit, and a press, a tap's too, goes one step darker. */
+@media (hover: hover) {
+  .ws-action-btn:hover:not(:disabled) {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+.ws-action-btn[aria-expanded='true'] {
+  background: var(--term-hover-bg, var(--term-alt));
   color: var(--term-fg);
 }
-.ws-action-btn:active {
-  transform: translateY(1px);
+.ws-action-btn:not(:disabled):active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
+  color: var(--term-fg);
 }
 
-/* Composer pre-textarea blocks — unified visual language built on the
-   quote block's vocabulary. Every region (active quote, pending
-   comments, file attachments, future queue) shares:
-
-     - 2px coloured left rail, no panel background
-     - mono caption (`replying to selection`, `comment 1 · pending …`)
-     - sans body content
-     - bordered × button to dismiss
+/* Composer pre-textarea blocks — a message that is waiting: the queue above
+   the editor, the merge notice, a runtime warning. Each one is a 2px
+   coloured left rail with no panel background, a caption that says what it
+   is and when it goes (`queued 1 · sends when stream ends`), the message on
+   one line, and a bordered × to take it back.
 
    Rail tone is set per region via `.tone-*`:
-     accent — quote (you're actively replying)
-     select — comments / queue (your queued content)
-     muted  — attachments (low-importance metadata)
+     select — a queued message of yours
+     mauve  — what a synthesis reads from
      danger — error / paused state
 
-   Each block has either:
-     - a single body row (quote, queue), or
-     - two-line body (comments — quoted snippet on top, reply below), or
-     - a caption row + inline-chip row (attachments)
-*/
+   The passages a person pointed at (comments, quotes) are not waiting
+   messages and do not use this recipe; they are the context rows below. */
 
 /* Scrollable container for pre-blocks above the editor caret row.
    Default max-height shows ~5 items; override via --composer-pre-blocks-max-h. */
@@ -2472,8 +2609,10 @@ html[data-vibrancy="on"],
   padding: 6px 10px;
   margin: 8px 12px 0;
   border-left: 2px solid var(--tone);
-  animation: fadeIn var(--t-enter) ease-out;
 }
+/* Blocks mount settled (MO-01); only one created while its composer shows
+   fades in: a queued message, a pending comment, a quote picked later. */
+.t-pre-block[data-fresh] { animation: fadeIn var(--t-enter) ease-out; }
 .t-pre-block + .t-pre-block { margin-top: 4px; }
 .t-pre-block.tone-accent { --tone: var(--term-accent); }
 .t-pre-block.tone-select { --tone: var(--term-select); }
@@ -2507,13 +2646,6 @@ html[data-vibrancy="on"],
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.t-pre-block-body.is-multi {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  white-space: normal;
-  word-break: break-word;
-}
-/* Comment-variant body — two-line: quoted snippet on top (muted), reply below (fg) */
 .t-pre-block-quoted {
   font-family: var(--ui-font);
   font-size: var(--fs-sm);
@@ -2522,39 +2654,6 @@ html[data-vibrancy="on"],
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.t-pre-block-reply {
-  font-family: var(--ui-font);
-  font-size: var(--fs-md);
-  color: var(--term-fg);
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.t-pre-block-reply.is-editable {
-  cursor: text;
-  border-radius: var(--ui-radius-sm);
-  padding: 1px 3px;
-  margin: -1px -3px;
-}
-.t-pre-block-reply.is-editable:hover {
-  background: rgba(255,255,255,0.06);
-  outline: 1px solid var(--term-line);
-}
-.t-pre-block-edit-textarea {
-  font-family: var(--ui-font);
-  font-size: var(--fs-md);
-  color: var(--term-fg);
-  background: rgba(0,0,0,0.25);
-  border: 1px solid var(--term-accent, var(--term-mauve));
-  border-radius: var(--ui-radius-sm);
-  padding: 4px 6px;
-  line-height: 1.4;
-  resize: vertical;
-  width: 100%;
-  outline: none;
-}
-
 .t-pre-block-x {
   background: transparent;
   border: 1px solid var(--term-line);
@@ -2574,9 +2673,15 @@ html[data-vibrancy="on"],
   transition: color var(--t-quick) var(--t-ease),
               border-color var(--t-quick) var(--t-ease);
 }
-.t-pre-block-x:hover {
-  color: var(--term-danger);
-  border-color: var(--term-danger);
+@media (hover: hover) {
+  .t-pre-block-x:not(:disabled):hover {
+    color: var(--term-danger);
+    border-color: var(--term-danger);
+  }
+}
+.t-pre-block-x:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .t-pre-block-actions {
@@ -2608,41 +2713,508 @@ html[data-vibrancy="on"],
 }
 
 .t-pre-block-steer:hover:not(:disabled) {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   border-color: var(--term-accent);
   background: color-mix(in srgb, var(--term-accent) 8%, transparent);
 }
 
 .t-pre-block-steer:disabled {
-  cursor: wait;
-  opacity: .55;
+  cursor: progress;
+  opacity: 0.5;
 }
 
-/* Static in-message variant — QuoteChip / CommentChips reuse the pre-block
-   recipe inside the sent user bubble. The composer margins collapse to a
-   bottom gap, the dismiss × is replaced by an expand toggle (the block can't
-   be removed after send), and bodies unclamp when expanded. */
-.t-pre-block.is-msg { margin: 0 0 8px; }
-.t-pre-block-exp {
-  border: none;
+/* ───────────────────────────────────────────────────────────────────────────
+   Context rows (.t-ctx) — the passages a person pointed at, as margin notes:
+   comments on a reply and the quote a message answers. The same row renders
+   in the composer before the send (PaneComposerPreBlocks) and in the sent
+   message after it (CommentChips, QuoteChip), so a comment looks the same
+   where it is written and where it is read.
+
+   A row is three columns — gutter mark, the passage, one quiet action —
+   with the person's own note under the passage:
+
+     ▢  ┃the passage they picked, washed like a highlighter pen┃      ×
+         their note, in the message's own voice and size
+
+     ↳   ┃the passage the message replies to┃                         ×
+
+   The mark says the row's kind and carries its only colour: a comment's
+   speech bubble (the selection toolbar's Comment icon) in the select hue,
+   your pending material, as the queue is; a quote's reply arrow in the
+   accent. Without it a comment chip read as one more file beside the
+   attachments. Comments carry no numbers: the agent reads them as a list
+   without any (formatCommentsBlock), so a number named nothing it could
+   answer to, and the list's own order and count say the rest. The passage
+   wears a neutral wash, lifted off the surface the way quoted material is
+   — a tint of the row's own hue went khaki on amber and pink on rust, and
+   read as a warning. Nothing is captioned per row: the stack says once
+   that it travels with the next message. ------------------------------- */
+.t-ctx-list {
+  margin: 8px 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+ol.t-ctx-list,
+.t-ctx-rows {
+  list-style: none;
+  padding: 0;
+}
+.t-ctx-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Inside the sent bubble the composer's side margins fall away: the bubble
+   already holds the column, and the rows sit above its text. */
+.t-ctx-list.is-msg,
+.t-ctx.is-msg { margin: 0 0 8px; }
+.t-ctx-cap {
+  margin: 0;
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  color: var(--term-muted);
+}
+
+.t-ctx {
+  --tone: var(--term-select);
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 20px;
+  grid-template-areas: "mark line btn" ". note .";
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: start;
+}
+/* A row fades in only when it is new; rows already there mount settled (MO-01). */
+.t-ctx[data-fresh] { animation: fadeIn var(--t-enter) ease-out; }
+.t-ctx.is-quote { --tone: var(--term-accent); }
+
+/* The gutter: a comment's bubble, a quote's arrow. Its line box matches the
+   passage's first line, so mark and passage sit on one baseline. */
+.t-ctx-mark {
+  grid-area: mark;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: calc(var(--fs-md) * 1.45);
+  color: var(--tone);
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  user-select: none;
+}
+
+.t-ctx-line {
+  grid-area: line;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+/* The passage, lifted off the surface. The wash bleeds 5px past the text and
+   the row pulls that back, so the text column still lines up with the note
+   under it. */
+.t-ctx-excerpt {
+  min-width: 0;
+  padding: 1px 5px;
+  margin-left: -5px;
+  border-radius: var(--ui-radius-sm);
+  background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  line-height: 1.45;
+  color: var(--term-mid);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+/* The composer's quote keeps the reader's quoteMaxLines pref, so a passage
+   worth several lines shows them (the clamp count comes in inline). */
+.t-ctx-excerpt.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+.t-ctx.is-expanded .t-ctx-excerpt {
+  display: block;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+/* Where the passage came from, when it is not the reply above: the file. */
+.t-ctx-meta {
+  flex-shrink: 0;
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  color: var(--term-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The note is the person's own words, so it reads at the size of the
+   message it belongs to — the composer's text in the composer, the
+   bubble's text in the bubble — not at chrome size. */
+.t-ctx-note {
+  grid-area: note;
+  font-family: var(--ui-font);
+  font-size: var(--composer-body-size, var(--message-body-size));
+  line-height: 1.5;
+  color: var(--term-fg);
+  overflow-wrap: anywhere;
+}
+.t-ctx-list.is-msg .t-ctx-note { font-size: inherit; }
+.t-ctx:not(.is-expanded) .t-ctx-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A pending comment's note is still editable: it opens a field in place. */
+button.t-ctx-note.is-editable {
+  all: unset;
+  grid-area: note;
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 1px 5px;
+  margin-left: -5px;
+  border-radius: var(--ui-radius-sm);
+  font-family: var(--ui-font);
+  font-size: var(--composer-body-size, var(--message-body-size));
+  line-height: 1.5;
+  color: var(--term-fg);
+  text-align: left;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  button.t-ctx-note.is-editable:hover {
+    background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+  }
+}
+button.t-ctx-note.is-editable:active {
+  background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+}
+button.t-ctx-note.is-editable:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+.t-ctx-edit {
+  grid-area: note;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  margin-left: -6px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: var(--term-alt);
+  color: var(--term-fg);
+  font-family: var(--ui-font);
+  font-size: var(--composer-body-size, var(--message-body-size));
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--t-quick) var(--t-ease);
+}
+.t-ctx-edit:focus {
+  border-color: color-mix(in srgb, var(--term-accent) 55%, var(--term-line));
+}
+
+/* One action per row, in the third column: dismiss while it is pending,
+   unfold once it is sent. Quiet at rest; the composer's × waits for the
+   row's hover (.t-reveal), the sent row's chevron stays, because it is the
+   only sign that the passage goes on. */
+.t-ctx-btn {
+  grid-area: btn;
+  position: relative;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
+  color: var(--term-faint);
+  cursor: pointer;
+  transition: color var(--t-quick) var(--t-ease),
+              background var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  .t-ctx-btn:hover {
+    color: var(--term-fg);
+    background: color-mix(in srgb, var(--term-fg) 8%, transparent);
+  }
+}
+.t-ctx-btn:active {
+  color: var(--term-fg);
+  background: color-mix(in srgb, var(--term-fg) 8%, transparent);
+}
+.t-ctx-btn:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+/* The button stays 20px; its hit area is 24px, and 40px on touch, where
+   .t-reveal always shows it (ST-21). In the card a pending comment is two
+   lines (it always has a note), so its 40px stays clear of the next row's,
+   and the quote sits last, over the card's bottom padding. A sent row may be
+   one line, a quote or an old comment without a note: one that carries a
+   chevron is 32px tall on touch, so with the 8px under it its area ends where
+   the next row's begins, and 10px before the message's text. */
+.t-ctx-btn::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+}
+@media (hover: none) and (pointer: coarse) {
+  .t-ctx-btn::after { inset: -10px; }
+  .t-ctx-list.is-msg > .t-ctx:has(> .t-ctx-btn),
+  .t-ctx.is-msg:has(> .t-ctx-btn) { min-height: 32px; }
+}
+.t-ctx-toggle svg { transition: transform var(--t-soft) var(--t-ease); }
+.t-ctx-toggle[aria-expanded='true'] svg { transform: rotate(180deg); }
+
+/* ── The composer's tray (.t-ctx-tray, ContextTray.tsx) ─────────────────────
+   What travels with the next send, as one row of chips instead of a stack of
+   rows: the composer stays one row tall however many comments wait. A chip
+   is an attachment's height (.t-att-pending-file, 64px) and starts at the
+   same inset, so the two rows read as one kind of thing. Three fit across;
+   the rest scroll sideways, and the row fades out at an end with more past
+   it (data-overflow). A chip opens the full list as a card (.t-ctx-card)
+   above the composer.
+
+     ┌ ▢ ▌the passage…▐    ×┐ ┌ ▢ ▌another…▐      ┐ ┌ ↳ Replying to     ┐
+     │ their note, two lines │ │ their note        │ │ the passage, two  │
+     └ before it clips…      ┘ └                   ┘ └ lines…            ┘ */
+.t-ctx-tray {
+  /* Three chips, the gaps between them, and a sliver of the fourth: what is
+     past the end shows as itself, so nothing fades over a chip's own words. */
+  --chip-gap: 6px;
+  --chip-peek: 20px;
+  --chip-fade: 26px;
+  padding: var(--composer-att-row-padding, 10px 12px 0);
+}
+* + .t-ctx-tray { padding-top: 8px; }
+.t-ctx-tray-row {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: var(--chip-gap);
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+.t-ctx-tray-row::-webkit-scrollbar { display: none; }
+.t-ctx-tray[data-overflow='end'] .t-ctx-tray-row {
+  -webkit-mask-image: linear-gradient(to left, transparent, black var(--chip-fade));
+  mask-image: linear-gradient(to left, transparent, black var(--chip-fade));
+}
+.t-ctx-tray[data-overflow='start'] .t-ctx-tray-row {
+  -webkit-mask-image: linear-gradient(to right, transparent, black var(--chip-fade));
+  mask-image: linear-gradient(to right, transparent, black var(--chip-fade));
+}
+.t-ctx-tray[data-overflow='start end'] .t-ctx-tray-row {
+  -webkit-mask-image: linear-gradient(to right, transparent, black var(--chip-fade), black calc(100% - var(--chip-fade)), transparent);
+  mask-image: linear-gradient(to right, transparent, black var(--chip-fade), black calc(100% - var(--chip-fade)), transparent);
+}
+
+.t-ctx-chip {
+  --tone: var(--term-select);
+  --chip-bg: var(--color-surface, var(--term-alt));
+  position: relative;
+  flex: 0 0 calc((100% - 2 * var(--chip-gap) - var(--chip-peek)) / 3);
+  min-width: 148px;
+  height: 64px;
+  box-sizing: border-box;
+  border: 1px solid var(--color-line, var(--term-line));
+  border-radius: var(--ui-radius);
+  background: var(--chip-bg);
+  scroll-snap-align: start;
+  transition: border-color var(--t-quick) var(--t-ease);
+}
+.t-ctx-chip.is-quote { --tone: var(--term-accent); }
+.t-ctx-chip[data-fresh] { animation: fadeIn var(--t-enter) ease-out; }
+@media (hover: hover) {
+  .t-ctx-chip:hover { border-color: color-mix(in srgb, var(--term-fg) 28%, var(--term-line)); }
+}
+.t-ctx-chip:active,
+.t-ctx-chip.is-open {
+  border-color: color-mix(in srgb, var(--term-fg) 28%, var(--term-line));
+}
+.t-ctx-chip-open {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  height: 100%;
+  padding: 5px 9px;
+  border-radius: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+/* The row clips sideways, so the ring sits inside the chip. */
+.t-ctx-chip-open:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
+.t-ctx-chip-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 16px;
+  padding-right: 16px;
+  font-family: var(--ui-font);
+  font-size: var(--fs-sm);
+  line-height: 16px;
+}
+.t-ctx-chip-mark {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--tone);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.t-ctx-chip-mark svg { width: 12px; height: 12px; }
+/* The passage, washed the way the full row washes it (.t-ctx-excerpt). */
+.t-ctx-chip-excerpt {
+  min-width: 0;
+  padding: 0 4px;
+  border-radius: var(--ui-radius-sm);
+  background: color-mix(in srgb, var(--term-fg) 7%, transparent);
+  color: var(--term-mid);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t-ctx-chip-label {
+  min-width: 0;
+  color: var(--term-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A comment's note, the person's own words; a quote's passage. Two lines. */
+.t-ctx-chip-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-family: var(--ui-font);
+  font-size: var(--fs-lg);
+  line-height: 1.3;
+  color: var(--term-fg);
+}
+.t-ctx-chip.is-quote .t-ctx-chip-text { color: var(--term-mid); }
+.t-ctx-chip-x {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  background: var(--chip-bg);
   color: var(--term-muted);
   cursor: pointer;
-  padding: 0;
-  font-family: var(--ui-font);
-  font-size: var(--fs-xs);
-  letter-spacing: var(--ls-wide);
-  flex-shrink: 0;
-  margin-top: 1px;
-  user-select: none;
-  transition: color var(--t-quick) var(--t-ease);
+  transition: opacity var(--t-soft) ease, color var(--t-quick) var(--t-ease);
 }
-.t-pre-block-exp:hover { color: var(--term-fg); }
-.t-pre-block-body.is-expanded,
-.t-pre-block-quoted.is-expanded,
-.t-pre-block-reply.is-expanded {
+@media (hover: hover) {
+  .t-ctx-chip-x:hover { color: var(--term-fg); }
+}
+.t-ctx-chip-x:active { color: var(--term-fg); }
+.t-ctx-chip-x:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -1px;
+}
+/* The × stays 18px; its hit area is 24px, and 40px on touch (ST-21). On
+   touch it stops at the chip's right edge, short of the next chip and of
+   the row's scroll width, and reaches 6px above the chip into padding the
+   row borrows from the tray, since the row clips. */
+.t-ctx-chip-x::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+}
+@media (hover: none) and (pointer: coarse) {
+  .t-ctx-chip-x::after { inset: -11px -5px -11px -17px; }
+  .t-ctx-tray-row { padding-top: 6px; margin-top: -6px; }
+}
+
+/* The card: the tray's items in full, over the transcript and as wide as
+   the composer under it. The row a chip opened is tinted. */
+.t-ctx-card-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
+}
+.t-ctx-card-sink { position: absolute; width: 0; height: 0; overflow: hidden; outline: none; }
+.t-ctx-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-right: -4px;
+}
+/* On touch the head is 40px, so its Close's area ends where the first row's
+   begins. Close sits 8px inside the card's edge (the body's 12px less the
+   head's -4px), so its 40px reaches 12px left and 8px right: up to the edge,
+   not past it into a sideways scroll. */
+@media (hover: none) and (pointer: coarse) {
+  .t-ctx-card-head { min-height: 40px; margin-top: -10px; }
+  .t-ctx-card-close::after { inset: -10px -8px -10px -12px; }
+}
+.t-ctx-card .t-ctx {
+  border-radius: var(--ui-radius-sm);
+  transition: background var(--t-soft) var(--t-ease), box-shadow var(--t-soft) var(--t-ease);
+}
+.t-ctx-card .t-ctx[data-target] {
+  --target-wash: color-mix(in srgb, var(--tone) 9%, transparent);
+  background: var(--target-wash);
+  box-shadow: 0 0 0 5px var(--target-wash);
+}
+/* There is room here to read the passage and the note whole. */
+.t-ctx-card .t-ctx-excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.t-ctx-card button.t-ctx-note.is-editable {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-ctx,
+  .t-ctx-chip { animation: none; }
+  .t-ctx-toggle svg { transition: none; }
 }
 
 /* Attachment variant — caption on top, inline chips wrap below.
@@ -2759,7 +3331,7 @@ html[data-vibrancy="on"],
 }
 .t-branch-anchor-underline:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 .t-branch-card {
   position: fixed;
@@ -2876,14 +3448,6 @@ html[data-vibrancy="on"],
   font-size: var(--fs-sm);
   color: var(--term-fg);
   max-width: 280px;
-  transition: background var(--t-quick) var(--t-ease),
-              border-color var(--t-quick) var(--t-ease),
-              box-shadow var(--t-quick) var(--t-ease);
-}
-.t-att-chip:hover {
-  background: var(--term-hover-bg, var(--term-alt));
-  border-color: var(--term-line-s);
-  box-shadow: 0 0 6px rgba(128,128,128,.2);
 }
 .t-att-chip-x {
   color: var(--term-muted);
@@ -2895,13 +3459,9 @@ html[data-vibrancy="on"],
 }
 .t-att-chip-x:hover { color: var(--term-danger); }
 
-/* Sent-message image thumbnail button — hover effect */
+/* Sent-message image thumbnail button */
 .t-att-thumb-btn {
   border-radius: 0;
-  transition: box-shadow var(--t-soft) ease;
-}
-.t-att-thumb-btn:hover {
-  box-shadow: 0 0 6px rgba(128,128,128,.2);
 }
 
 /* Pending attachments start at the field's inset, so a thumbnail clears the
@@ -2920,10 +3480,6 @@ html[data-vibrancy="on"],
 .t-att-pending-item {
   position: relative;
   border-radius: 0;
-  transition: box-shadow var(--t-soft) ease;
-}
-.t-att-pending-item:hover {
-  box-shadow: 0 0 6px rgba(128,128,128,.2);
 }
 /* Non-image file pill in pending state */
 .t-att-pending-file {
@@ -2949,7 +3505,7 @@ html[data-vibrancy="on"],
   justify-content: center;
   background: var(--color-surface, var(--term-bg));
   border: 1px solid var(--term-line);
-  border-radius: 50%;
+  border-radius: var(--ui-radius-sm);
   font-size: var(--fs-md);
   line-height: 1;
   color: var(--term-muted);
@@ -2959,6 +3515,17 @@ html[data-vibrancy="on"],
   user-select: none;
   box-shadow: 0 1px 3px rgba(0,0,0,.15);
   transition: opacity var(--t-soft) ease, color var(--t-soft) ease;
+}
+/* The × stays 18px; its hit area is 24px, and 40px on touch, where .t-reveal
+   always shows it, without moving the thumbnail. The insets count from inside
+   its 1px border. */
+.t-att-pending-x::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+}
+@media (hover: none) and (pointer: coarse) {
+  .t-att-pending-x::after { inset: -12px; }
 }
 .t-att-pending-x:hover {
   color: var(--term-danger);
@@ -2984,7 +3551,7 @@ html[data-vibrancy="on"],
   color: var(--term-muted);
 }
 .t-upload-progress__label {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   flex-shrink: 0;
 }
 .t-upload-progress__name {
@@ -3008,10 +3575,13 @@ html[data-vibrancy="on"],
   background: var(--term-line);
   overflow: hidden;
 }
+/* A determinate bar fills the track and scales from its left edge
+   (UploadProgressBar sets scaleX), so progress stays on the compositor. */
 .t-upload-progress__bar {
   height: 100%;
   background: var(--term-accent);
-  transition: width var(--t-soft) ease-out;
+  transform-origin: left;
+  transition: transform var(--t-soft) ease-out;
 }
 .t-upload-progress__bar.is-indeterminate {
   width: 30%;
@@ -3099,13 +3669,23 @@ html[data-vibrancy="on"],
 .composer-agent-chevron { flex-shrink: 0; transform: rotate(90deg); color: var(--term-muted); }
 .t-toolbar-chip[aria-expanded="true"] > .composer-agent-chevron { transform: rotate(-90deg); }
 .t-toolbar-chip[data-icononly="true"] > .composer-agent-chevron { display: none; }
+.t-toolbar-chip:disabled,
 .t-toolbar-chip[aria-disabled="true"] {
   cursor: not-allowed;
   color: var(--term-faint);
 }
+/* While its choice saves, the chip shows the wait (ST-13). */
+.t-toolbar-chip[aria-busy="true"] { cursor: progress; }
 .t-toolbar-chip[aria-disabled="true"]:hover {
   background: transparent;
   color: var(--term-faint);
+}
+
+/* The context ring is a meter, not a button, so the baseline ring misses it;
+   keyboard focus opens its usage card (ContextRing). */
+.composer-context-ring:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
 
 /* Composer action buttons — icon-only, fixed size. Three roles:
@@ -3133,7 +3713,7 @@ html[data-vibrancy="on"],
 }
 .t-action-btn:disabled,
 .t-action-btn[aria-disabled="true"] {
-  opacity: .4;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 .t-action-btn.is-outline {
@@ -3212,6 +3792,12 @@ html[data-vibrancy="on"],
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+/* Reduced motion, either trigger: the hint appears in place. Its transform
+   also centres it, so the transition goes instead of the transform. */
+@media (prefers-reduced-motion: reduce) {
+  .t-action-btn .t-action-kbd { transition: none; }
+}
+:root[data-reduce-motion='on'] .t-action-btn .t-action-kbd { transition: none; }
 /* A tap leaves :hover stuck on touch screens, which would pin a shortcut
    hint for a key the on-screen keyboard does not have. */
 @media (hover: none) {
@@ -3241,7 +3827,12 @@ html[data-vibrancy="on"],
               border-color var(--t-quick) var(--t-ease),
               color var(--t-quick) var(--t-ease);
 }
-.t-border-btn:hover {
+@media (hover: hover) {
+  .t-border-btn:hover:not(:disabled) {
+    background: var(--term-hover-bg, var(--term-alt)) !important;
+  }
+}
+.t-border-btn:not(:disabled):active {
   background: var(--term-hover-bg, var(--term-alt)) !important;
 }
 
@@ -3252,16 +3843,49 @@ html[data-vibrancy="on"],
   background: transparent;
   color: var(--term-muted);
 }
-.t-hover-frame:hover:not(:disabled) {
+@media (hover: hover) {
+  .t-hover-frame:hover:not(:disabled):not([aria-disabled='true']) {
+    border-color: var(--term-line);
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+/* Borderless and unfilled at rest, it presses a step darker than its hover. */
+.t-hover-frame:not(:disabled):not([aria-disabled='true']):active {
+  border-color: var(--term-line);
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
+  color: var(--term-fg);
+}
+.t-hover-frame[aria-expanded='true'] {
   border-color: var(--term-line);
   background: var(--term-hover-bg, var(--term-alt));
   color: var(--term-fg);
 }
-/* The pane chooser's keyboard row: the hover frame, a shade firmer. It shows
-   from the moment the chooser opens (data-keys), until the pointer is used in it. */
+/* A pane chooser row (PaneChooser): its icon and note read --chooser-icon and
+   --chooser-note. While a choice opens, the rows are busy (ST-13): focusable,
+   taking no clicks, the progress cursor, and every row but the opening one in
+   the faint ink of an unavailable row (ST-11), with no fade. An option that is
+   off here (Terminal on a phone) takes the same ink. */
+.pane-chooser-row {
+  color: var(--term-fg);
+  cursor: pointer;
+  --chooser-icon: var(--term-mid);
+  --chooser-note: var(--term-muted);
+}
+.pane-chooser-row[aria-disabled='true'] { cursor: progress; }
+.pane-chooser-row[aria-disabled='true']:not([data-chosen]),
+.pane-chooser-row[data-off] {
+  color: var(--term-faint);
+  --chooser-icon: var(--term-faint);
+}
+.pane-chooser-row[aria-disabled='true']:not([data-chosen]) { --chooser-note: var(--term-faint); }
+/* The pane chooser's keyboard row: the hover frame, a shade firmer, and the
+   ring. It shows from the moment the chooser opens (data-keys), until the
+   pointer is used in it. */
 .pane-chooser-row:focus-visible,
 .pane-chooser[data-keys] .pane-chooser-row:focus {
-  outline: none;
+  outline: var(--focus-ring);
+  outline-offset: -2px;
   border-color: var(--term-line-s);
   background: var(--term-hover-bg, var(--term-alt));
   color: var(--term-fg);
@@ -3271,25 +3895,24 @@ html[data-vibrancy="on"],
    on hover, and not while disabled for a running check. */
 .t-danger-outline-btn {
   background: transparent;
+  cursor: pointer;
 }
 .t-danger-outline-btn:hover:not(:disabled) {
   background: var(--term-danger-f);
 }
 
-/* Inline icon button — color brightens, no background. */
-.t-icon-hover {
-  cursor: pointer;
-  transition: color var(--t-quick) var(--t-ease),
-              opacity var(--t-quick) var(--t-ease);
-}
-.t-icon-hover:hover {
-  color: var(--term-fg) !important;
-  opacity: 1 !important;
+/* The hand-rolled buttons above take the disabled look of .ui-btn (ST-11). */
+.ws-action-btn:disabled,
+.t-border-btn:disabled,
+.t-danger-outline-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Hover reveal: a control (.t-reveal) that a pointer device shows only while
-   its row (.t-reveal-host) is hovered or holds the focus, while the control
-   has keyboard focus, or while its menu is open. Hidden, it takes no clicks.
+   its row (.t-reveal-host) is hovered or holds keyboard focus, while the
+   control has keyboard focus, or while its menu is open; a click's focus left
+   behind reveals nothing. Hidden, it takes no clicks.
    A touch screen has no hover to reveal it, so there it always shows, and a
    tap's hover changes nothing (iOS drops a tap that reveals content on
    hover). Each control keeps its own transition. */
@@ -3298,7 +3921,7 @@ html[data-vibrancy="on"],
     opacity: 0;
     pointer-events: none;
   }
-  .t-reveal-host:is(:hover, :focus-within) .t-reveal,
+  .t-reveal-host:is(:hover, :focus-visible, :has(:focus-visible)) .t-reveal,
   .t-reveal:focus-visible,
   .t-reveal[aria-expanded='true'] {
     opacity: 1;
@@ -3320,20 +3943,20 @@ html[data-vibrancy="on"],
   pointer-events: none;
 }
 .t-row-hover:hover .row-kebab,
-.t-row-hover:focus-within .row-kebab,
-.t-reveal-host:is(:hover, :focus-within) .row-kebab,
+.t-row-hover:is(:focus-visible, :has(:focus-visible)) .row-kebab,
+.t-reveal-host:is(:hover, :focus-visible, :has(:focus-visible)) .row-kebab,
 .row-kebab.is-open,
-.row-kebab:focus-within {
+.row-kebab:is(:focus-visible, :has(:focus-visible)) {
   opacity: 1;
 }
 .row-kebab > button {
   pointer-events: none;
 }
 .t-row-hover:hover .row-kebab > button,
-.t-row-hover:focus-within .row-kebab > button,
-.t-reveal-host:is(:hover, :focus-within) .row-kebab > button,
+.t-row-hover:is(:focus-visible, :has(:focus-visible)) .row-kebab > button,
+.t-reveal-host:is(:hover, :focus-visible, :has(:focus-visible)) .row-kebab > button,
 .row-kebab.is-open > button,
-.row-kebab:focus-within > button {
+.row-kebab:is(:focus-visible, :has(:focus-visible)) > button {
   pointer-events: auto;
 }
 
@@ -3373,9 +3996,10 @@ html[data-vibrancy="on"],
     pointer-events: auto;
   }
 }
-/* A finger needs more than the 22px workspace buttons. */
+/* A finger needs more than the 22px workspace buttons: a 40px target whose
+   negative margins keep the 32px footprint, so the row keeps its height. */
 @media (hover: none) and (pointer: coarse) {
-  .ws-action-btn { width: 32px; height: 32px; }
+  .ws-action-btn { width: 40px; height: 40px; margin: -4px; }
 }
 
 /* Rows that host a kebab also drop the .t-row-hover 60ms bg/color fade
@@ -3383,21 +4007,6 @@ html[data-vibrancy="on"],
    become instant too — acceptable since clicks already feel immediate. */
 .t-row-hover:has(> .row-kebab) {
   transition: none;
-}
-
-/* Close-button icon — on hover a soft square fill appears behind the glyph,
-   like a small tinted box. Used for × close buttons (tabs, panes, quotes).
-   The class name still says "danger" for legacy reasons; semantically it's
-   the close-button variant of IconBtn. */
-.t-icon-danger-hover {
-  cursor: pointer;
-  border-radius: var(--ui-radius-sm);
-  transition: color var(--t-quick) var(--t-ease),
-              background var(--t-quick) var(--t-ease);
-}
-.t-icon-danger-hover:hover {
-  background: var(--term-line);
-  color: var(--term-fg) !important;
 }
 
 /* Inline code: drop the typography plugin's literal backtick pseudo-elements
@@ -3441,8 +4050,8 @@ html[data-vibrancy="on"],
 }
 @keyframes t-find-flash-anim {
   0% {
-    background: color-mix(in srgb, var(--term-select, #ffd54f) 85%, transparent);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-select, #ffd54f) 55%, transparent);
+    background: color-mix(in srgb, var(--term-select) 85%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-select) 55%, transparent);
   }
   100% {
     background: transparent;
@@ -3450,13 +4059,34 @@ html[data-vibrancy="on"],
   }
 }
 
-.t-sidebar-toggle:hover {
-  background: var(--term-hover-bg, var(--term-alt));
-  border-color: color-mix(in srgb, var(--term-fg) 12%, transparent);
+/* The sidebar toggle (SidebarToggleButton), a ghost control: faint at rest,
+   --term-mid under a pointer, a step darker pressed. The Michi brand beside
+   it brightens under a pointer. */
+.t-sidebar-toggle {
+  border: none;
+  background: transparent;
+  color: var(--term-faint);
+  transition: background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
 }
-.t-sidebar-toggle[aria-expanded="false"] {
-  background: color-mix(in srgb, var(--term-fg) 10%, transparent);
-  border-color: color-mix(in srgb, var(--term-fg) 14%, transparent);
+.topbar-brand {
+  border: none;
+  background: transparent;
+  color: var(--term-fg);
+  opacity: 0.85;
+  transition: opacity var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  .t-sidebar-toggle:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-mid);
+  }
+  .topbar-brand:hover {
+    opacity: 1;
+  }
+}
+.t-sidebar-toggle:active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
+  color: var(--term-fg);
 }
 
 /* -----------------------------------------------------------------------
@@ -3467,12 +4097,13 @@ html[data-vibrancy="on"],
    which is why hover/click menus visibly differed across the app.
    ----------------------------------------------------------------------- */
 :root {
-  /* Corner radius for every floating surface (menus, modals, popovers, toasts)
-     and the controls inside them. Overwritten live from the Appearance
-     "Corner radius" pref (prefs.tsx); these are its defaults. -sm is half the
-     surface radius, for rows / buttons / tooltips nested inside a surface;
-     -lg is double, for cards, tables and tab pills. Panes, bars and edge-docked
-     drawers stay square — they have no free corner to round. -pill is for dots,
+  /* Corner radius for every floating surface (menus, modals, popovers, toasts),
+     in-flow card and box, button and tab pill. Overwritten live from the
+     Appearance "Corner radius" pref (prefs.tsx); these are its defaults. -sm is
+     half the surface radius, for rows / buttons / tooltips nested inside a
+     surface; -lg is double, for hover cards (the branch card), the raised pane
+     tab and a sheet's top corners, never an in-flow card. Panes, bars and
+     edge-docked drawers stay square — they have no free corner to round. -pill is for dots,
      capsules, scrollbar thumbs and badges: always round, never follows the pref. */
   --ui-radius: 4px;
   --ui-radius-sm: 2px;
@@ -3506,22 +4137,32 @@ html[data-vibrancy="on"],
   transition: background var(--t-quick) var(--t-ease),
               color var(--t-quick) var(--t-ease);
 }
-.ui-menu-item:hover,
-.ui-menu-item[data-active='true'] {
+@media (hover: hover) {
+  .ui-menu-item:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+.ui-menu-item[data-active='true'],
+.ui-menu-item:not([data-disabled='true']):active {
   background: var(--term-hover-bg, var(--term-alt));
 }
 .ui-menu-item[data-active='true'] {
   color: var(--term-accent);
 }
+/* A row that takes DOM focus (ContextMenu, ActionMenu) rings inside its edge. */
+.ui-menu-item:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: -2px;
+}
 .ui-menu-item[data-danger='true'] {
-  color: var(--term-danger, #a8261a);
+  color: var(--term-danger-text);
 }
 @media (hover: none) and (pointer: coarse) {
   .ui-menu-item { min-height: 44px; }
 }
-.ui-menu-item[data-disabled='true'] {
+.ui-menu-item[data-disabled='true'],
+.ui-menu-item:disabled {
   color: var(--term-faint);
-  opacity: 0.6;
   cursor: not-allowed;
   background: transparent;
 }
@@ -3532,15 +4173,15 @@ html[data-vibrancy="on"],
    comes back ON, ending lit as the menu closes: ON → OFF → ON = one blink. The
    ±1% steps around 30/69 are ~1.4ms linear ramps, i.e. hard on/off with no fade,
    matching the crisp 0ms hover. Flashes the row's own hover color (not a bolder
-   accent) so it stays a gentle confirm. BLINK_MS in ContextMenu.tsx must match
-   this 160ms. */
+   accent) so it stays a gentle confirm. Its length is --m-clickDelay (Menu.css),
+   which MENU_CONFIRM_MS in useMenuConfirm.ts must match. */
 @keyframes ui-menu-blink {
   0%, 30%   { background: var(--term-hover-bg, var(--term-alt)); }
   31%, 69%  { background: transparent; }
   70%, 100% { background: var(--term-hover-bg, var(--term-alt)); }
 }
 .ui-menu-blink {
-  animation: ui-menu-blink 160ms both;
+  animation: ui-menu-blink var(--m-clickDelay) both;
 }
 @media (prefers-reduced-motion: reduce) {
   .ui-menu-blink { animation: none; }
@@ -3561,6 +4202,7 @@ html[data-vibrancy="on"],
   padding: 2px 8px;
   cursor: pointer;
 }
+.boot-warm-failed button[aria-disabled='true'] { opacity: 0.5; cursor: progress; }
 
 /* ── Composer lazy-load fallback ────────────────────────────────────────────── */
 .composer-loading-stub {
@@ -3575,6 +4217,7 @@ html[data-vibrancy="on"],
    message), caps at ~6 rows with a hidden scrollbar, and renders atomic @-mention
    chips. Constants mirror what the old MentionTextarea set inline. */
 .mention-editor-host { position: relative; flex: 1; min-width: 0; }
+.mention-editor-host[data-disabled='true'] { opacity: 0.5; cursor: not-allowed; }
 .mention-editor-host .ProseMirror {
   outline: none;
   min-height: calc(var(--composer-body-size, var(--message-body-size)) * var(--message-body-leading) * var(--composer-min-rows, 1.5));
@@ -3607,7 +4250,7 @@ html[data-vibrancy="on"],
 .mention-editor-host .ProseMirror code {
   font-family: var(--message-code-font);
   font-size: calc(var(--message-body-size) * 0.9);
-  background: color-mix(in srgb, var(--term-composer-bg, var(--term-bg)) 88%, var(--term-fg));
+  background: color-mix(in srgb, currentColor 12%, transparent);
   border-radius: var(--ui-radius-sm);
   padding: 0 3px;
 }
@@ -3655,7 +4298,7 @@ html[data-vibrancy="on"],
    plain click places the caret. They become clickable (pointer, full underline)
    only while Cmd/Ctrl is held — MentionEditor sets data-link-modifier. */
 .mention-editor-host .ProseMirror a[href] {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   text-decoration: underline;
   text-underline-offset: 3px;
   text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
@@ -3694,11 +4337,13 @@ html[data-vibrancy="on"],
   box-shadow: 0 0 3px color-mix(in srgb, var(--term-accent) 30%, transparent);
 }
 /* Picked from the @ menu (see mentionEnter.ts): the chip grows out of the
-   query it replaces. Its first frame is the typed `@query`, plain and in
-   place: no fill, no padding, the label clear, the query (::before, from
-   data-from) drawn over it. Then the fill opens from the query's width to the
-   whole label, the padding eases in so the text after the chip moves rather
-   than jumps, and the query fades into the label. */
+   query it replaces. Its padding is there from the pick's own commit, so the
+   text after it moves once and the grow animates no layout. Its first frame
+   is the typed `@query`, plain and in place: no fill, the label clear,
+   the query (::before, from data-from, which sits after the 6px padding-left)
+   drawn over it, with the chip shifted 6px left so the query starts where it
+   was typed. Then the fill opens from the query's width to the whole chip as
+   the chip slides into place, and the query fades into the label. */
 .mention-chip--enter {
   position: relative;
   animation: mention-chip-grow var(--t-decay) cubic-bezier(.23, 1, .32, 1) both;
@@ -3713,9 +4358,8 @@ html[data-vibrancy="on"],
 }
 @keyframes mention-chip-grow {
   from {
-    clip-path: inset(0 calc(100% - var(--mention-from-w, 0px)) 0 0);
-    padding-left: 0;
-    padding-right: 0;
+    transform: translateX(-6px);
+    clip-path: inset(0 calc(100% - var(--mention-from-w, 0px) - 6px) 0 0);
     background-color: transparent;
     color: transparent;
   }
@@ -3834,7 +4478,7 @@ html[data-vibrancy="on"],
 }
 .shell-notice-title:focus-visible {
   outline: var(--focus-ring);
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
 .shell-notice-text {
   margin: 6px 0 0;
@@ -3956,14 +4600,13 @@ html[data-vibrancy="on"],
   font-size: var(--fs-xs);
   color: var(--term-muted);
 }
-/* Toasts start below the notice stack. */
+/* Toasts start below the notice stack, and move with it: when a notice
+   arrives, shrinks to its tab or steps aside, they glide on the compositor
+   over the stack's own step-aside time. The list repeats sonner's own
+   transition, its 400ms lift while an expanded stack is hovered. */
 :root [data-sonner-toaster][data-y-position='top'] {
-  top: calc(var(--offset-top) + var(--shell-notices-height, 0px));
-}
-@media (max-width: 600px) {
-  :root [data-sonner-toaster][data-y-position='top'] {
-    top: calc(var(--mobile-offset-top) + var(--shell-notices-height, 0px));
-  }
+  translate: 0 var(--shell-notices-height, 0px);
+  transition: transform 400ms ease, translate var(--t-enter) var(--t-ease);
 }
 
 /* The inline ask card lives in components/terminal/UserInputBanner.css. */
@@ -3984,6 +4627,7 @@ html[data-vibrancy="on"],
   /* In-shell layers — always below the page-level rungs, so no pane overlay
      can cover a drawer, menu or modal. Values 1–6 inside a single component
      (badge over image, ordering siblings) stay local. */
+  --z-pane-recede: -1;    /* unfocused pane's receded surface, over the pane's own background and under all it holds */
   --z-raised: 1;          /* lift above siblings (sidebar edge shadow, hovered map card) */
   --z-sticky: 10;         /* resize handles, scroll thumbs, expanded map cards */
   --z-pane-overlay: 20;   /* over a pane: find bar, find flash, map toolbar, drop zones */
@@ -3991,7 +4635,6 @@ html[data-vibrancy="on"],
   --z-sidebar-scrim: 34;  /* behind the overlay sidebar in narrow windows */
   --z-sidebar-overlay: 35;
   --z-drag: 36;           /* pane drag-and-drop targets */
-  --z-pane-dim: 38;       /* unfocused pane's veil, over all it holds (inside the pane's own stacking context) */
   /* Page-level ladder. */
   --z-drawer-scrim: 40;
   --z-drawer: 41;
@@ -4029,7 +4672,17 @@ html[data-vibrancy="on"],
      per-palette value (mixed toward fg on the dark palettes, whose danger is
      too dim for words); this is only the fallback outside the shell. */
   --term-danger-text: var(--term-danger);
+  /* The filled danger button: fill (border too), ink and hover fill.
+     cssVarsFor() sets them per palette (the dark palettes take the soft fill
+     with danger words); these are only the fallbacks outside the shell. */
+  --term-danger-btn-bg: var(--term-danger);
+  --term-danger-btn-fg: var(--on-accent);
+  --term-danger-btn-hover: color-mix(in srgb, var(--term-danger) 88%, var(--term-fg));
   --term-waiting-text: var(--term-waiting, var(--term-select));
+  /* Accent WORDS; fills, borders and glyphs keep --term-accent. cssVarsFor()
+     sets the per-palette, per-accent value (lifted toward fg where the accent
+     misses 4.5:1); this is only the fallback outside the shell. */
+  --term-accent-text: var(--term-accent);
 }
 
 /* ── Button primitive · .ui-btn ──────────────────────────────────────────────
@@ -4059,16 +4712,28 @@ html[data-vibrancy="on"],
               color var(--t-soft) var(--t-ease),
               opacity var(--t-soft) var(--t-ease);
 }
-.ui-btn:hover:not(:disabled) {
+@media (hover: hover) {
+  .ui-btn:hover:not(:disabled, [aria-disabled='true']) {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+/* A press shows the hover fill, and never moves (ST-06). */
+.ui-btn:not(:disabled, [aria-disabled='true']):active {
   background: var(--term-hover-bg, var(--term-alt));
 }
 .ui-btn:focus-visible {
   outline: var(--focus-ring);
   outline-offset: 1px;
 }
-.ui-btn:disabled {
+.ui-btn:disabled,
+.ui-btn[aria-disabled='true'] {
   opacity: 0.5;
   cursor: not-allowed;
+}
+/* While its action runs a button is aria-disabled, which keeps it focused,
+   and aria-busy: the cursor says to wait (ST-13). */
+.ui-btn[aria-busy='true'] {
+  cursor: progress;
 }
 /* primary — accent fill. ONE recipe for every solid accent button: the text
    Button and the composer's Send (.t-action-btn.is-primary). A coloured button
@@ -4085,18 +4750,31 @@ html[data-vibrancy="on"],
   border-color: transparent;
   font-weight: 600;
 }
-.ui-btn--primary:hover:not(:disabled),
-.t-action-btn.is-primary:hover {
-  background-color: color-mix(in srgb, var(--term-accent) 88%, black);
+@media (hover: hover) {
+  .ui-btn--primary:hover:not(:disabled, [aria-disabled='true']),
+  .t-action-btn.is-primary:hover {
+    background-color: color-mix(in srgb, var(--term-accent) 88%, var(--term-fg));
+  }
+}
+.ui-btn--primary:not(:disabled, [aria-disabled='true']):active,
+.t-action-btn.is-primary:not(:disabled, [aria-disabled='true']):active {
+  background-color: color-mix(in srgb, var(--term-accent) 88%, var(--term-fg));
 }
 /* ghost — no border, quiet */
 .ui-btn--ghost {
   border-color: transparent;
   color: var(--term-mid);
 }
-.ui-btn--ghost:hover:not(:disabled) {
+@media (hover: hover) {
+  .ui-btn--ghost:hover:not(:disabled, [aria-disabled='true']) {
+    color: var(--term-fg);
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+/* With no border or fill to hold it, a ghost press goes one step darker. */
+.ui-btn--ghost:not(:disabled, [aria-disabled='true']):active {
   color: var(--term-fg);
-  background: var(--term-hover-bg, var(--term-alt));
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
 }
 /* action — small bordered, used inside dense drawer rows */
 .ui-btn--action {
@@ -4112,13 +4790,20 @@ html[data-vibrancy="on"],
 .ui-btn[data-danger='true']:not(.ui-btn--primary) {
   color: var(--term-danger-text);
 }
+/* The filled danger button reads its palette's recipe (tokens.ts cssVarsFor):
+   solid on the light palettes, a soft fill with danger words on the dark. */
 .ui-btn--primary[data-danger='true'] {
-  border-color: var(--term-danger);
-  background: var(--term-danger);
-  color: var(--on-accent);
+  border-color: var(--term-danger-btn-bg);
+  background: var(--term-danger-btn-bg);
+  color: var(--term-danger-btn-fg);
 }
-.ui-btn--primary[data-danger='true']:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--term-danger) 88%, var(--term-fg));
+@media (hover: hover) {
+  .ui-btn--primary[data-danger='true']:hover:not(:disabled, [aria-disabled='true']) {
+    background: var(--term-danger-btn-hover);
+  }
+}
+.ui-btn--primary[data-danger='true']:not(:disabled, [aria-disabled='true']):active {
+  background: var(--term-danger-btn-hover);
 }
 /* A disabled primary says "nothing to do yet", not "a paler button": neutral
    fill and ink at full opacity instead of the accent faded out, which read as
@@ -4126,12 +4811,40 @@ html[data-vibrancy="on"],
    hover and danger so it wins over both. */
 .ui-btn--primary:disabled,
 .ui-btn--primary[data-danger='true']:disabled,
+.ui-btn--primary[aria-disabled='true'],
+.ui-btn--primary[data-danger='true'][aria-disabled='true'],
 .t-action-btn.is-primary:disabled,
 .t-action-btn.is-primary[aria-disabled="true"] {
   opacity: 1;
   border-color: transparent;
   background-color: var(--term-alt2);
   color: var(--term-muted);
+}
+/* BusyLabel (controls.tsx): the label and its in-flight form share one grid
+   cell, so the control keeps the wider one's width as they swap. */
+.ui-busy-label { display: inline-grid; gap: inherit; }
+.ui-busy-label > * { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: inherit; }
+.ui-busy-label > [aria-hidden='true'] { visibility: hidden; }
+
+/* ── Text link outside prose · .ui-link ──────────────────────────────────────
+   Accent words that underline on hover, as a link in prose does. */
+.ui-link {
+  color: var(--term-accent-text);
+  text-decoration: none;
+}
+@media (hover: hover) {
+  .ui-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}
+
+/* ── Empty-state glyph · .t-empty-glyph ──────────────────────────────────────
+   The line icon above an empty state's sentence, drawn at size={30}: faint,
+   at the stroke .sched-empty > svg draws. */
+.t-empty-glyph {
+  color: var(--term-faint);
+  stroke-width: 1.3;
 }
 
 /* ── Switch primitive · .ui-switch ───────────────────────────────────────────
@@ -4150,8 +4863,13 @@ html[data-vibrancy="on"],
   cursor: pointer;
   transition: background var(--t-soft) var(--t-ease);
 }
+/* The track keeps its 28×16 look and its hit area grows to 28×24. An inset
+   counts from the padding edge, so -1px reaches over the 1px border. */
+.ui-switch::after { content: ''; position: absolute; inset: -5px -1px; }
 .ui-switch[aria-checked='true'] { background: var(--term-accent); }
 .ui-switch:disabled { cursor: not-allowed; opacity: 0.5; }
+/* Busy (Switch's busy prop): its save is in flight. */
+.ui-switch[aria-disabled='true'] { cursor: progress; opacity: 0.5; }
 .ui-switch__knob {
   position: absolute;
   top: 1px;
@@ -4159,25 +4877,25 @@ html[data-vibrancy="on"],
   width: 12px;
   height: 12px;
   background: var(--term-line-s);
-  transition: left var(--t-soft) var(--t-ease);
+  transition: transform var(--t-soft) var(--t-ease);
 }
-.ui-switch[aria-checked='true'] .ui-switch__knob { left: 13px; background: var(--term-surface); }
+.ui-switch[aria-checked='true'] .ui-switch__knob { transform: translateX(12px); background: var(--term-surface); }
 
-/* Approval choices stay neutral until hover or keyboard focus. */
+/* Approval choices stay neutral until hover or keyboard focus. The tone
+   paints the border and fill; its text form paints the words. */
 .ui-btn.t-permission-choice {
   --permission-tone: var(--term-accent);
+  --permission-tone-text: var(--term-accent-text);
   color: var(--term-mid);
 }
 .ui-btn.t-permission-choice--deny {
   --permission-tone: var(--term-danger);
+  --permission-tone-text: var(--term-danger-text);
 }
 .ui-btn.t-permission-choice:not(:disabled):is(:hover, :focus-visible) {
-  color: var(--permission-tone);
+  color: var(--permission-tone-text);
   border-color: color-mix(in srgb, var(--permission-tone) 50%, var(--term-line));
   background: color-mix(in srgb, var(--permission-tone) 9%, var(--term-surface));
-}
-.ui-btn.t-permission-choice:focus-visible {
-  outline-color: color-mix(in srgb, var(--permission-tone) 60%, transparent);
 }
 
 /* ── Text input / select primitive · .ui-input / .ui-select ──────────────────
@@ -4202,6 +4920,18 @@ html[data-vibrancy="on"],
 .ui-select:focus {
   border-color: color-mix(in srgb, var(--term-accent) 70%, var(--term-line));
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--term-accent) 22%, transparent);
+  /* Forced colours drop the box-shadow and draw this as a ring. */
+  outline: 2px solid transparent;
+}
+.ui-input:disabled,
+.ui-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* A field that failed validation; its message says why (aria-describedby). */
+.ui-input[aria-invalid='true'],
+.ui-select[aria-invalid='true'] {
+  border-color: var(--term-danger);
 }
 .ui-input::placeholder {
   color: var(--term-faint);
@@ -4273,6 +5003,22 @@ html[data-vibrancy="on"],
   font-size: var(--fs-sm);
 }
 
+/* ── Framed field · .t-field-frame ───────────────────────────────────────────
+   A borderless field set in a frame of its own: a prompt row, a guidance box,
+   a run's steering box. The frame draws the ring while its field has keyboard
+   focus, so the field drops its own. A frame as wide as its dialog insets
+   the ring (--row), as rows do. */
+.t-field-frame > :is(input, select, textarea) {
+  outline: none;
+}
+.t-field-frame:has(> :is(input, select, textarea):focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+.t-field-frame--row:has(> :is(input, select, textarea):focus-visible) {
+  outline-offset: -2px;
+}
+
 /* ── Shared drawer / modal scrim + panel classes ─────────────────────────────
    The React shells (DrawerShell / ModalShell / BottomSheet) apply these; they
    own layering and the scrim so every side drawer and centered modal is
@@ -4328,14 +5074,17 @@ html[data-vibrancy="on"],
   -webkit-app-region: no-drag;
 }
 /* Centered modal card. Material is .term-glass (applied by ModalShell); this
-   class owns sizing. */
+   class owns sizing. Over its scrim it needs no drawn edge: the border stays,
+   transparent, for forced-colors mode and the layout, and of the glass's
+   shadows only the cast, the same with live, frozen or solid glass. */
 .ui-modal-panel {
   position: relative;
   display: flex;
   flex-direction: column;
   max-height: min(70vh, 640px);
-  border: 1px solid var(--term-line-s);
+  border: 1px solid transparent;
   border-radius: var(--ui-radius);
+  box-shadow: var(--term-overlay-cast);
   font-family: var(--ui-font);
   -webkit-app-region: no-drag;
 }
@@ -4376,8 +5125,15 @@ html[data-vibrancy="on"],
   flex-shrink: 0;
   transition: background var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
 }
-.ui-overlay-close:hover {
-  background: var(--term-hover-bg, var(--term-alt));
+@media (hover: hover) {
+  .ui-overlay-close:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+    color: var(--term-fg);
+  }
+}
+/* A ghost ×: it presses a step darker than its hover (ST-06). */
+.ui-overlay-close:active {
+  background: color-mix(in srgb, var(--term-hover-bg, var(--term-alt)) 90%, var(--term-fg));
   color: var(--term-fg);
 }
 
@@ -4399,16 +5155,42 @@ html[data-vibrancy="on"],
   --success-text: var(--term-digest);
   --info-bg: color-mix(in srgb, var(--term-accent) 8%, var(--term-surface));
   --info-border: color-mix(in srgb, var(--term-accent) 35%, var(--term-line));
-  --info-text: var(--term-accent);
+  --info-text: var(--term-accent-text);
   --warning-bg: color-mix(in srgb, var(--term-select) 8%, var(--term-surface));
   --warning-border: color-mix(in srgb, var(--term-select) 35%, var(--term-line));
-  --warning-text: var(--term-select);
+  --warning-text: var(--term-waiting-text);
   --error-bg: color-mix(in srgb, var(--term-danger) 8%, var(--term-surface));
   --error-border: color-mix(in srgb, var(--term-danger) 35%, var(--term-line));
-  --error-text: var(--term-danger);
+  --error-text: var(--term-danger-text);
   --border-radius: var(--ui-radius);
   font-family: var(--ui-font);
   z-index: var(--z-toast);
+}
+/* A toast's action (Undo, Open, Review …) is Michi's small secondary button,
+   .ui-btn--sm, not sonner's filled one, whose only focus cue is a box-shadow.
+   height: auto lets min-height keep sonner's 24px as the text grows. */
+:root [data-sonner-toaster] [data-sonner-toast] [data-button] {
+  height: auto;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--term-line);
+  border-radius: var(--ui-radius);
+  background: transparent;
+  color: var(--term-fg);
+  font-size: var(--fs-sm);
+}
+@media (hover: hover) {
+  :root [data-sonner-toaster] [data-sonner-toast] [data-button]:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+:root [data-sonner-toaster] [data-sonner-toast] [data-button]:active {
+  background: var(--term-hover-bg, var(--term-alt));
+}
+:root [data-sonner-toaster] [data-sonner-toast] [data-button]:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+  box-shadow: none;
 }
 
 /* Clickable notice card from services/notifications.ts (sonner custom toast,
@@ -4419,15 +5201,15 @@ html[data-vibrancy="on"],
   box-sizing: border-box;
   padding: 13px 16px;
   border-radius: var(--ui-radius);
-  border: 1px solid var(--color-line);
-  background: var(--color-surface);
-  color: var(--color-fg);
+  border: 1px solid var(--term-line);
+  background: var(--term-surface);
+  color: var(--term-fg);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   font-size: 13px;
   line-height: 1.4;
 }
 .app-toast-card__title { font-weight: 500; }
-.app-toast-card__body { margin-top: 2px; color: var(--color-fg-muted); }
+.app-toast-card__body { margin-top: 2px; color: var(--term-mid); }
 
 /* Desktop top-right toasts dock to the window's right edge as a tab beneath
    the topbar icon cluster, sized to their content, and slide in/out
@@ -4472,7 +5254,19 @@ html[data-vibrancy="on"],
    cursor blink, spinning glyphs) so the GPU + compositor can idle when the tab
    is backgrounded. Set via a visibilitychange listener on <html>. */
 html[data-page-hidden] *,
+html[data-page-hidden] *::after,
 html[data-page-hidden] .typing-dot {
+  animation-play-state: paused !important;
+}
+/* So do containers that stay mounted while nobody sees them (MO-13): the
+   phone panes behind the visible one and the panes and captions a zoom hides
+   (inert), the desktop panes and their captions scrolled off the strip
+   (data-offstrip, which Dashboard's IntersectionObserver writes), and the
+   collapsed sidebar's content. */
+[data-node-id][inert] *,
+[data-pane-caption-id][inert] *,
+[data-offstrip] *,
+.terminal-sidebar[data-collapsed] * {
   animation-play-state: paused !important;
 }
 
@@ -4485,44 +5279,58 @@ html[data-page-hidden] .typing-dot {
    is `white` used purely as a color-mix blend target). Philosophy: only living
    things glow — streaming / just-arrived; everything else cools by fading. */
 
-/* Card hover lift — a spring rise + deeper shadow. */
+/* Card hover lift: a 3px rise within a hover's 100ms and no overshoot, since
+   hovers are frequent. The shadow stays put: both renderers set the card's
+   shadow inline, which a hover rule could not deepen anyway. */
 .map-card {
-  transition: transform var(--t-enter) cubic-bezier(.34, 1.4, .5, 1), box-shadow var(--t-enter), opacity var(--t-soft), border-color var(--t-soft);
+  transition: transform var(--t-soft) var(--t-ease), opacity var(--t-soft), border-color var(--t-soft);
 }
 .map-card:hover {
   transform: translateY(-3px);
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--term-fg) 8%, transparent),
-    0 22px 50px -20px color-mix(in srgb, var(--term-fg) 30%, transparent);
 }
+/* A Timeline lane only holds its chips, so it has no hover; its border still
+   eases as it starts and stops streaming. */
+.map-timeline__lane { transition: border-color var(--t-soft); }
 
-/* 前沿呼吸 — the streaming card breathes an accent glow (2.8s), pulling the eye
-   to "where thinking is now". box-shadow only, so hover's transform composes. */
-@keyframes map-breathe-b {
-  0%, 100% {
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--term-fg) 5%, transparent),
-      0 16px 40px -20px color-mix(in srgb, var(--term-fg) 22%, transparent);
-  }
-  50% {
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--term-accent) 8%, transparent),
-      0 16px 44px -14px color-mix(in srgb, var(--term-accent) 40%, transparent),
-      0 0 0 1px color-mix(in srgb, var(--term-accent) 22%, transparent);
-  }
+/* 前沿呼吸 — the streaming card breathes an accent glow, pulling the eye to
+   "where thinking is now". The glow is painted once, on a layer over the
+   card's border box whose opacity pulses, so nothing repaints per frame
+   (MO-13); it moves with the card's hover lift. Its base opacity 0 is the
+   frame it rests on when paused or under reduced motion. */
+@keyframes map-glow-breathe { 0%, 100% { opacity: 0; } 50% { opacity: 1; } }
+.map-card--breathe::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--term-accent) 8%, transparent),
+    0 16px 44px -14px color-mix(in srgb, var(--term-accent) 40%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--term-accent) 22%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  animation: map-glow-breathe var(--t-loop-slow) ease-in-out infinite;
 }
-.map-card--breathe { animation: map-breathe-b var(--t-loop-slow) ease-in-out infinite; }
 
 /* The `● streaming` dot blinks so a still frame still reads as "live". */
 @keyframes map-live-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 .map-card__live-dot { animation: map-live-blink var(--t-loop) ease-in-out infinite; }
 
 /* 未读微光 — reply done but not yet seen: a slow green pulse, distinct from the
-   red streaming breathe (red = running, green = done, waiting). */
-@keyframes map-unread-pulse {
-  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--term-digest) 50%, transparent); }
-  70%, 100% { box-shadow: 0 0 0 6px transparent; }
-}
+   accent streaming breathe (accent = live, green = done, waiting). Its ring is
+   painted once and fades in and out the same way. */
 .map-card__unread-dot {
-  position: absolute; top: 9px; right: 9px; width: 7px; height: 7px; border-radius: 50%;
-  background: var(--term-digest); animation: map-unread-pulse var(--t-loop-slow) ease-out infinite; z-index: 2;
+  position: absolute; top: 9px; right: 9px; width: 7px; height: 7px; border-radius: var(--ui-radius-pill);
+  background: var(--term-digest); z-index: 2;
+}
+.map-card__unread-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-digest) 40%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  animation: map-glow-breathe var(--t-loop-slow) ease-in-out infinite;
 }
 
 /* Expanded section grows down from the card body. The wrapper animates its
@@ -4539,6 +5347,10 @@ html[data-page-hidden] .typing-dot {
   grid-template-rows: 1fr;
   opacity: 1;
 }
+/* The collapse runs shorter than the expand, as exits do. */
+.map-card__expand-wrap[data-expanded='false'] {
+  transition-duration: var(--t-exit);
+}
 .map-card__expand-inner {
   overflow: hidden;
   min-height: 0;
@@ -4552,10 +5364,15 @@ html[data-page-hidden] .typing-dot {
   .map-card__expand-wrap { transition: none; }
 }
 
-/* Footer action — quiet until hover, then it lights accent. */
-.map-card__footer { transition: color var(--t-soft), background var(--t-soft); }
+/* Footer action — quiet until hover, then it lights accent. Its resting ink
+   and fill live here, not inline, so the hover can win (ST-05). */
+.map-card__footer {
+  color: var(--term-muted);
+  background: transparent;
+  transition: color var(--t-soft), background var(--t-soft);
+}
 .map-card__footer:hover {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   background: color-mix(in srgb, var(--term-accent-f) 30%, var(--term-surface));
 }
 
@@ -4576,9 +5393,9 @@ html[data-page-hidden] .typing-dot {
 .map-edge--draw { stroke-dasharray: 620; animation: map-edge-draw var(--t-slow) ease-out both; }
 
 /* Reduced motion: new cards and edges are simply there, and the live glows
-   hold still (the in-app toggle's global rule below covers the rest). */
+   stay off (the in-app toggle's global rule below covers the rest). */
 @media (prefers-reduced-motion: reduce) {
-  .map-card--in, .map-card--breathe, .map-card__live-dot, .map-card__unread-dot, .map-edge--flow { animation: none; }
+  .map-card--in, .map-card--breathe::after, .map-card__live-dot, .map-card__unread-dot::after, .map-edge--flow { animation: none; }
   .map-edge--draw { animation: none; stroke-dasharray: none; }
 }
 
@@ -4604,10 +5421,77 @@ html[data-page-hidden] .typing-dot {
 .map-topbar__back { transition: color var(--t-soft); }
 .map-topbar__back:hover { color: var(--term-fg); }
 
-/* ── App-level reduce motion ────────────────────────────────────── */
-/* Mirrors @media (prefers-reduced-motion: reduce) but fires from the
-   user's in-app "Reduce motion" toggle (data-reduce-motion="on" on <html>).
-   This catches any CSS transition/animation we haven't handled in JS. */
+/* The selection bar's actions (Map.tsx): surface plates on the inverted bar,
+   filled on hover and press, ringed inside the plate, where --focus-ring
+   reaches 3:1, and faded while unavailable. */
+.map-selection__action {
+  border: 1px solid color-mix(in srgb, var(--term-surface) 42%, transparent);
+  background: var(--term-surface);
+  color: var(--term-fg);
+  padding: 3px 9px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--t-quick) var(--t-ease);
+}
+@media (hover: hover) {
+  .map-selection__action:hover:not(:disabled) { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.map-selection__action:not(:disabled):active { background: var(--term-hover-bg, var(--term-alt)); }
+.map-selection__action:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.map-selection__action:disabled {
+  background: transparent;
+  color: var(--term-faint);
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The Graph / Timeline / Doc switcher's tabs (Map.tsx): the selected tab is
+   the --term-alt pill of .michi-db-tab (ST-18), and an unselected tab's hover
+   changes its ink only. */
+.map-view-tab {
+  border: none;
+  padding: 4px 14px;
+  font-family: var(--ui-font);
+  font-size: var(--fs-md);
+  font-weight: 450;
+  color: var(--term-mid);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--t-soft) var(--t-ease), color var(--t-soft) var(--t-ease);
+}
+@media (hover: hover) {
+  .map-view-tab:not([aria-selected='true']):hover { color: var(--term-fg); }
+}
+.map-view-tab[aria-selected='true'] {
+  color: var(--term-fg);
+  background: var(--term-alt);
+  cursor: default;
+}
+
+/* A timeline event chip (MapTimeline.tsx) focuses its node: it fills on hover
+   and press as a ghost button does; the live one keeps its accent tint. */
+.map-timeline__chip {
+  border: 1px solid color-mix(in srgb, var(--term-line) 70%, var(--term-bg));
+  background: var(--term-bg);
+  transition: background var(--t-quick) var(--t-ease);
+}
+.map-timeline__chip[data-live] {
+  border-color: color-mix(in srgb, var(--term-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--term-accent-f) 40%, var(--term-surface));
+}
+@media (hover: hover) {
+  .map-timeline__chip:hover { background: var(--term-hover-bg, var(--term-alt)); }
+}
+.map-timeline__chip:active { background: var(--term-hover-bg, var(--term-alt)); }
+
+/* ── Reduce motion ──────────────────────────────────────────────── */
+/* One catch-all, fired by the user's in-app "Reduce motion" toggle
+   (data-reduce-motion="on" on <html>) and, with the same declarations, by
+   the OS setting. This catches any CSS transition/animation we haven't
+   handled in JS, inline ones included: each runs once, at once, so a loop
+   rests on its base frame. It only cuts timings; where the reduced end state
+   differs, give it a rule under both triggers. */
 :root[data-reduce-motion='on'] *,
 :root[data-reduce-motion='on'] *::before,
 :root[data-reduce-motion='on'] *::after {
@@ -4617,4 +5501,16 @@ html[data-page-hidden] .typing-dot {
   transition-duration: 0.01ms !important;
   transition-delay: 0ms !important;
   scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
 }

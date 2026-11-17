@@ -1,8 +1,10 @@
+import { memo } from 'react';
 import { AgentRunStatus } from 'michi-shared';
 import type { AgentRunAttemptDtoV1, AgentRunEventV1 } from 'michi-shared';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
 import { useNow } from '../../../hooks/useNow';
 import { FadeOnChange, RevealOnShow } from '../agentBlockMotion';
+import { Button } from '../../ui/controls';
 import {
   compactRunHandoff,
   elapsedRunLabel,
@@ -13,9 +15,9 @@ import {
 } from './agentRunSelectors';
 
 const STATUS_COLOR: Record<AgentRunStatus, string> = {
-  queued: 'var(--term-muted)', preparing: 'var(--term-select)', running: 'var(--term-run)',
-  waiting: 'var(--term-select)', recovering: 'var(--term-mauve)', completed: 'var(--term-digest)',
-  failed: 'var(--term-danger)', cancelled: 'var(--term-muted)',
+  queued: 'var(--term-muted)', preparing: 'var(--term-waiting-text)', running: 'var(--term-run)',
+  waiting: 'var(--term-waiting-text)', recovering: 'var(--term-mauve)', completed: 'var(--term-digest)',
+  failed: 'var(--term-danger-text)', cancelled: 'var(--term-muted)',
 };
 
 export interface AgentRunCardProps {
@@ -67,19 +69,16 @@ export function AgentRunCard({ run: resource, attempts = [], events = [], now, o
         <span aria-hidden>·</span>
         <span>{elapsedRunLabel(run, now ?? clock)}</span>
         <FadeOnChange k={recovered ? 'recovered' : null} style={{ color: 'var(--term-mauve)' }}>Recovered automatically</FadeOnChange>
-        <button
-          type="button"
-          onClick={() => onOpen(identity)}
-          style={{ marginLeft: 'auto', border: 0, padding: 0, background: 'transparent', color: 'var(--term-accent)', font: 'inherit', cursor: 'pointer', whiteSpace: 'nowrap' }}
-        >
+        <Button variant="ghost" size="sm" onClick={() => onOpen(identity)} style={{ marginLeft: 'auto' }}>
           Open →
-        </button>
+        </Button>
       </div>
     </article>
   );
 }
 
-export function AgentRunCardGroup({ runs, onOpen, onOpenAll }: {
+/** Memoized: a transcript's history run cards skip its streamed chunks. */
+export const AgentRunCardGroup = memo(function AgentRunCardGroup({ runs, onOpen, onOpenAll }: {
   runs: readonly LocatedAgentRun[];
   onOpen: (identity: AgentResourceIdentity) => void;
   onOpenAll?: (identities: AgentResourceIdentity[]) => void;
@@ -87,12 +86,11 @@ export function AgentRunCardGroup({ runs, onOpen, onOpenAll }: {
   return (
     <section aria-label={`${runs.length} agent runs`} style={{ display: 'grid', gap: 6 }}>
       {runs.length > 1 && onOpenAll && (
-        <button type="button" onClick={() => onOpenAll(runs.map(runIdentity))}
-          style={{ justifySelf: 'end', border: 0, background: 'transparent', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)', cursor: 'pointer' }}>
+        <Button variant="ghost" size="sm" onClick={() => onOpenAll(runs.map(runIdentity))} style={{ justifySelf: 'end' }}>
           Open all
-        </button>
+        </Button>
       )}
       {runs.map((run) => <AgentRunCard key={`${run.backendConnectionId}:${run.value.id}`} run={run} onOpen={onOpen} />)}
     </section>
   );
-}
+});

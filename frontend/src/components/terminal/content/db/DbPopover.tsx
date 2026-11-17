@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { PopoverSurface } from '../../../ui/Popover';
+import { useIsPresent } from 'motion/react';
+import { measureSurface, PopoverSurface } from '../../../ui/Popover';
 import { useBackLayer } from '../../../../lib/backStack';
 import { placeBelowAnchor, useAnchoredPosition } from '../../../ui/useAnchoredPosition';
 import { isImeComposing } from '../../../../lib/ime';
@@ -50,21 +51,30 @@ export function DbPopover({
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
-  useBackLayer(true, { back: () => onCloseRef.current('escape') });
+  // Inside the caller's <AnimatePresence> a closed panel fades out for a moment
+  // (PopoverSurface); meanwhile it is off the stack and takes no keys, presses or Back.
+  const present = useIsPresent();
+  // Focus goes back to the anchor, or, for a panel opened at a point (a
+  // right-click), to what had it before the panel took it.
+  const [focusedBefore] = useState(() => document.activeElement);
+  useBackLayer(present, { back: () => onCloseRef.current('escape') });
 
   useAnchoredPosition({ anchor: anchor instanceof HTMLElement ? anchor : null, surfaceRef: ref, dependencies: [anchor, align, width], measure: () => {
-    const box = ref.current?.getBoundingClientRect();
-    const { left, top } = placeBelowAnchor(anchorRect(anchor), { width: box?.width || width || 240, height: box?.height || 0 }, { align, gap: GAP });
+    // The size it settles to, not the scaled box it grows in from.
+    const size = ref.current ? measureSurface(ref.current) : null;
+    const { left, top } = placeBelowAnchor(anchorRect(anchor), { width: size?.width || width || 240, height: size?.height || 0 }, { align, gap: GAP });
     setPos((prev) => (prev && prev.left === left && prev.top === top ? prev : { left, top }));
   } });
 
   useEffect(() => {
+    if (!present) return;
     const entry: Entry = { surface: () => ref.current };
     stack.push(entry);
     const top = () => stack[stack.length - 1] === entry;
+    const anchorElement = anchor instanceof HTMLElement ? anchor : null;
+    const returnTo = anchorElement ?? (focusedBefore instanceof HTMLElement && focusedBefore !== document.body ? focusedBefore : null);
     const focusable = ref.current?.querySelector<HTMLElement>('[data-autofocus], input, select, textarea, button, [tabindex="0"], [role="menuitem"], [role="menuitemradio"]');
     (focusable ?? ref.current)?.focus({ preventScroll: true });
-    const returnTo = anchor instanceof HTMLElement ? anchor : null;
 
     const onKey = (event: KeyboardEvent) => {
       if (!top() || isImeComposing(event)) return;
@@ -80,7 +90,7 @@ export function DbPopover({
       const target = event.target as Node | null;
       if (!target) return;
       if (ref.current?.contains(target)) return;
-      if (returnTo?.contains(target)) return;
+      if (anchorElement?.contains(target)) return;
       onCloseRef.current('outside');
     };
     document.addEventListener('keydown', onKey, true);
@@ -90,16 +100,21 @@ export function DbPopover({
       if (i >= 0) stack.splice(i, 1);
       document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('pointerdown', onPointer, true);
+      // A choice or Enter closes the panel with focus inside it, which drops
+      // focus to <body> (ST-10). Once the commit is done, give it back,
+      // unless it went somewhere on purpose, such as a panel opened next.
+      if (restoreFocus && returnTo) queueMicrotask(() => {
+        if (returnTo.isConnected && (!document.activeElement || document.activeElement === document.body)) returnTo.focus({ preventScroll: true });
+      });
     };
-    // Opened once per mount: the anchor of an open panel does not change.
+    // Armed while present: the anchor of an open panel does not change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [present]);
 
   return (
     <PopoverSurface
       ref={ref}
       menuKind="context"
-      animate={false}
       role={role}
       aria-label={label}
       escapeLayer="over"

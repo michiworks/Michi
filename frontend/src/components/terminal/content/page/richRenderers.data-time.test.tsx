@@ -13,7 +13,7 @@ type T = (typeof TYPES)[number];
 // What each type draws, as Desk's sheets name it.
 const MARK: Record<T, string> = {
   gauge: '.desk-gauge', ring: '.desk-ring', rating: '.desk-rate', leaderboard: '.desk-lb', agenda: '.desk-agenda', calendar: '.desk-time-cal',
-  clocks: '.desk-clock', countdown: '.desk-countdown', gantt: '.desk-bars', stepper: '.desk-time-stepper',
+  clocks: '.desk-clock', countdown: '.desk-countdown', gantt: '.desk-bars', stepper: '.michi-doc-track',
 };
 const ctx: MichiBlockCtx = { depth: 0, loadImages: true };
 
@@ -63,9 +63,21 @@ describe('Desk-drawn data and time blocks', () => {
     expect(screen.getByText('92%')).toBeTruthy();
   });
 
-  it('marks the stepper position', () => {
+  it('marks the stepper position on the milestone track', () => {
     const { container } = draw(sample('stepper'));
-    expect(container.querySelectorAll('.desk-time-step').length).toBe(4);
+    const steps = [...container.querySelectorAll('ol.michi-doc-track > li')];
+    expect(steps.map((li) => li.getAttribute('data-state'))).toEqual(['done', 'done', 'next', 'later']);
+    expect(steps.map((li) => li.getAttribute('aria-current'))).toEqual([null, null, 'step', null]);
+    expect(steps.map((li) => li.querySelector('.michi-doc-track__note')?.textContent ?? null)).toEqual(['Done', 'Done', 'Now', null]);
+    expect(container.querySelector('ol.michi-doc-track')?.hasAttribute('data-stack')).toBe(false);
+  });
+
+  it('stacks a long run of steps, and marks every step done past the last', () => {
+    const steps = Array.from({ length: 7 }, (_, i) => ({ label: `Step ${i + 1}` }));
+    const { container } = draw({ type: 'stepper', steps, current: 7 } as unknown as MichiPageBlock);
+    expect(container.querySelector('ol.michi-doc-track')?.hasAttribute('data-stack')).toBe(true);
+    expect([...container.querySelectorAll('ol.michi-doc-track > li')].every((li) => li.getAttribute('data-state') === 'done')).toBe(true);
+    expect(container.querySelector('[aria-current]')).toBeNull();
   });
 });
 
@@ -98,5 +110,25 @@ describe('ticking blocks', () => {
     expect(time()).toBe('12:00');
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(time()).toBe('12:01');
+  });
+
+  it('lists a month\'s events by day under the calendar, in date order', () => {
+    const { container } = draw({ type: 'calendar', month: '2026-11', events: [
+      { date: '2026-11-20', title: 'Freeze' }, { date: '2026-11-08', title: 'Design review' }, { date: '2026-11-20', title: 'Notes due' },
+    ] } as unknown as MichiPageBlock);
+    const rows = [...container.querySelectorAll('.desk-time-cal-event')].map((li) => [
+      li.querySelector('.desk-time-cal-day')?.textContent,
+      [...li.querySelectorAll('.desk-time-cal-names > span')].map((n) => n.textContent),
+    ]);
+    expect(rows).toEqual([['Nov 8', ['Design review']], ['Nov 20', ['Freeze', 'Notes due']]]);
+  });
+
+  it("gives a clock's offset a line of its own, apart from the date", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-11-17T08:00:00Z'));
+    const { container } = draw({ type: 'clocks', zones: [{ label: 'Seattle', tz: 'America/Los_Angeles' }] });
+    const offset = container.querySelector('.desk-clock-offset');
+    expect(offset?.textContent).toMatch(/^GMT-8$/);
+    expect(offset?.previousElementSibling?.textContent).not.toContain('GMT');
   });
 });

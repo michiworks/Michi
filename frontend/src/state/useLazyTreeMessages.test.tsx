@@ -67,6 +67,31 @@ describe('useLazyTreeMessages live-turn races', () => {
     expect(dispatch.mock.calls[0][0].messagesByNode.n1).toBeUndefined();
   });
 
+  it('opens a local tree on its first page in the phone layout and leaves the older history on the server', async () => {
+    vi.useFakeTimers();
+    const width = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+    try {
+      apiMocks.fetchTreeMessageSnapshot.mockReset();
+      apiMocks.fetchTreeMessagePage.mockReset().mockResolvedValue({
+        messages: [{ id: 'm40', node_id: 'n1', role: 'user', content: 'Newest', seq: 40, created_at: 1 }],
+        pages: [{ nodeId: 'n1', total: 41, before: { seq: 40, id: 'm40' } }],
+      });
+      const nodesRef = { current: { n1: node({ messageCount: 41 }) } as Record<string, ChatNodeState> };
+      const dispatch = (action: ChatAction) => { nodesRef.current = reduceNodes(nodesRef.current, action); };
+      renderHook(() => useLazyTreeMessages({ hydrated: true, activeProjectId: 'ws-1', projects: [project(1)], nodesRef, dispatch }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      expect(apiMocks.fetchTreeMessageSnapshot).not.toHaveBeenCalled();
+      expect(apiMocks.fetchTreeMessagePage).toHaveBeenCalledExactlyOnceWith('ws-1', 'tree-1', undefined, expect.any(AbortSignal),
+        expect.objectContaining({ limit: 15 }));
+      // Partial, never complete: the loader does not read the tree again for it.
+      expect(nodesRef.current.n1).toMatchObject({ messagesLoaded: false, historyBefore: { seq: 40, id: 'm40' }, messageCount: 41 });
+      expect(nodesRef.current.n1.messages.map((message) => message.id)).toEqual(['m40']);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    }
+  });
+
   it('does not prefetch before hydration and disposes speculative reads on unmount', () => {
     apiMocks.fetchTreeMessageSnapshot.mockReset().mockReturnValue(new Promise(() => {}));
     const nodesRef = { current: { n1: node() } };

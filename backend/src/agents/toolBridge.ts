@@ -48,6 +48,14 @@ export interface AgentToolBridgeDeps {
         prompt: string;
     }) => Promise<{ chatId: string; nodeId: string }>;
     /**
+     * Why the spawning chat may not have `requested` more children now
+     * (services/spawnChild.ts spawnRefusal), or null. Every runtime's
+     * spawn_branches reaches this bridge, so a tool list a runtime cached
+     * before the chat was too deep cannot get past it. Absent in isolated
+     * tests: only the five per call apply.
+     */
+    spawnRefusal?: (args: { parentChatId: string; ownerUserId?: string | null; requested: number }) => string | null;
+    /**
      * Records agent-owned context metadata immediately after the file write.
      * Optional so isolated runtime/unit tests can use the filesystem-only bridge.
      */
@@ -97,9 +105,23 @@ export function createAgentToolBridge(deps: AgentToolBridgeDeps): MichiAgentTool
         ...(deps.agentRunToolsForSession ? { agentRunToolsForSession: deps.agentRunToolsForSession } : {}),
         async spawnBranches(args: BridgeSpawnBranchesArgs): Promise<SpawnedBranch[]> {
             const capped = args.topics.slice(0, 5);
+            const refusal = (requested: number) => deps.spawnRefusal?.({
+                parentChatId: args.parentChatId,
+                ...(args.ownerUserId !== undefined ? { ownerUserId: args.ownerUserId } : {}),
+                requested,
+            }) ?? null;
+            const refused = refusal(capped.filter((t) => t?.title && t?.prompt).length);
+            if (refused) throw new Error(refused);
             const result: SpawnedBranch[] = [];
+            let attempted = 0;
             for (const t of capped) {
                 if (!t?.title || !t?.prompt) continue;
+                // Another chat's spawn can take the last places while this call awaits its children.
+                const late = attempted++ > 0 ? refusal(1) : null;
+                if (late) {
+                    log.warn("bridge", "branch children stopped at the spawn limit", { parentChatId: args.parentChatId, created: result.length });
+                    break;
+                }
                 try {
                     const child = await deps.createChild({
                         parentChatId: args.parentChatId,

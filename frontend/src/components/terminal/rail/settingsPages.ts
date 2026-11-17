@@ -1,9 +1,10 @@
-import {
-  Archive, Bell, BookOpen, Brain, CalendarClock, ChartColumn, CircleUser, Cpu, ExternalLink, HardDriveDownload, Keyboard, Palette, Radar, RefreshCw, Server,
-  Trash2, type LucideIcon,
-} from 'lucide-react';
 import { DEFAULT_COMPANION_NAME } from 'michi-shared';
 import { SETTINGS_AREA_SECTIONS, type SettingsAreaSection } from '../../../state/shellArea';
+import { CompanionGlyph } from '../companion/CompanionGlyph';
+import {
+  ArchiveIcon, BackupIcon, BellIcon, BrainIcon, ChartIcon, ClockIcon, CpuIcon, ExternalLinkIcon, KeyboardIcon, PaletteIcon, RetryIcon, ServerIcon,
+  SkillIcon, TrashIcon, UserIcon, type IconComponent,
+} from '../icons';
 
 /**
  * Settings pages, one topic each, shared by the phone list and the desktop
@@ -16,40 +17,44 @@ export type SettingsPage =
 
 export interface SettingsPageInfo {
   label: string;
-  icon: LucideIcon;
+  icon: IconComponent;
   section: SettingsAreaSection;
-  /** Only where it applies: shortcuts need a keyboard; a phone updates the machine it opened. */
-  only?: 'window' | 'phone';
+  /**
+   * Only where it applies: shortcuts need a keyboard; a phone updates the
+   * machine it opened; links open in the desktop app's browser pane, which a
+   * phone or a browser tab does not have ('app').
+   */
+  only?: 'window' | 'phone' | 'app';
 }
 
 export const SETTINGS_PAGES: Readonly<Record<SettingsPage, SettingsPageInfo>> = {
-  runtime: { label: 'Runtime & model', icon: Cpu, section: 'runtime' },
+  runtime: { label: 'Runtime & model', icon: CpuIcon, section: 'runtime' },
   /**
    * Settings › <name> (DESIGN-v2 §1.5): the agent the user talks to, with
    * what used to be Settings › Meta agent as its Pages upkeep part. Its label
    * is the agent's name (settingsPageLabel); this one is the default name.
    */
-  companion: { label: DEFAULT_COMPANION_NAME, icon: Radar, section: 'meta-agent' },
+  companion: { label: DEFAULT_COMPANION_NAME, icon: CompanionGlyph, section: 'meta-agent' },
   /** Memory on or off, and what agents remember across runtimes. */
-  memory: { label: 'Memory', icon: Brain, section: 'general' },
+  memory: { label: 'Memory', icon: BrainIcon, section: 'general' },
   /** The Michi skill library, and the skills each runtime finds on its own. */
-  skills: { label: 'Skills', icon: BookOpen, section: 'general' },
+  skills: { label: 'Skills', icon: SkillIcon, section: 'general' },
   /** Connected machines, and phone access, which opens one of them on a phone. */
-  machines: { label: 'Machines', icon: Server, section: 'general' },
-  appearance: { label: 'Appearance', icon: Palette, section: 'appearance' },
-  notifications: { label: 'Notifications', icon: Bell, section: 'general' },
-  links: { label: 'Links', icon: ExternalLink, section: 'general' },
+  machines: { label: 'Machines', icon: ServerIcon, section: 'general' },
+  appearance: { label: 'Appearance', icon: PaletteIcon, section: 'appearance' },
+  notifications: { label: 'Notifications', icon: BellIcon, section: 'general' },
+  links: { label: 'Links', icon: ExternalLinkIcon, section: 'general', only: 'app' },
   /** Deleted threads, pages and workspaces, and how long Trash keeps threads. */
-  trash: { label: 'Trash', icon: Trash2, section: 'data' },
+  trash: { label: 'Trash', icon: TrashIcon, section: 'data' },
   /** Threads and nodes archived out of the sidebar. */
-  archived: { label: 'Archived', icon: Archive, section: 'data' },
-  backup: { label: 'Backup & restore', icon: HardDriveDownload, section: 'data' },
-  scheduled: { label: 'Scheduled jobs', icon: CalendarClock, section: 'general' },
-  shortcuts: { label: 'Keyboard shortcuts', icon: Keyboard, section: 'general', only: 'window' },
+  archived: { label: 'Archived', icon: ArchiveIcon, section: 'data' },
+  backup: { label: 'Backup & restore', icon: BackupIcon, section: 'data' },
+  scheduled: { label: 'Scheduled jobs', icon: ClockIcon, section: 'general' },
+  shortcuts: { label: 'Keyboard shortcuts', icon: KeyboardIcon, section: 'general', only: 'window' },
   /** The machine serving the phone updates itself to the latest main branch (UpdatePane). */
-  update: { label: 'Update', icon: RefreshCw, section: 'general', only: 'phone' },
+  update: { label: 'Update', icon: RetryIcon, section: 'general', only: 'phone' },
   /** Who is signed in; the window lists it only for a signed-in user. */
-  account: { label: 'Account', icon: CircleUser, section: 'general' },
+  account: { label: 'Account', icon: UserIcon, section: 'general' },
 };
 
 /** A page's label as the navigation and its heading show it: Settings › <name> is called by the agent's name. */

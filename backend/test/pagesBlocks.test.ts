@@ -260,7 +260,8 @@ describe('native page block contracts', () => {
     assert.equal(PAGE_BLOCK_CATALOG.stepper.fields, '{title?, steps: [{label, text?}] (1-50), current: integer ≥ 0}; current is at most the number of steps');
     assert.equal(PAGE_BLOCK_CATALOG.actions.fields, '{buttons: [{label, prompt: text sent to the assistant when pressed}] (1-6)}');
     assert.equal(PAGE_BLOCK_CATALOG.stat.fields, '{label, value, delta?, deltaTone?: up|down|flat, spark?: [number] (2-100)}');
-    assert.match(PAGE_BLOCK_CATALOG.form.fields, /fields: \[\{key, label, type: text\|number\|select\|date\|checkbox, required\?: boolean/);
+    assert.match(PAGE_BLOCK_CATALOG.form.fields, /fields: \[\{key, label, type: text\|textarea\|number\|slider\|select\|multiselect\|date\|time\|checkbox, required\?: boolean/);
+    assert.match(PAGE_BLOCK_CATALOG.form.fields, /step\?: number > 0, unit\?: shown after a number or slider value, default\?: text \| number \| boolean \| \[text\]/);
     assert.match(PAGE_BLOCK_CATALOG.chart.fields, /\{title, kind: pie, slices: \[\{label, value: number ≥ 0\}\] \(1-50\), donut\?: boolean\}/);
     assert.doesNotMatch(pageBlockFieldsDoc(), /see schema/);
   });

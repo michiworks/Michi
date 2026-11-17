@@ -30,11 +30,8 @@ export const COMPANION_LIMITS = Object.freeze({
   maxGoals: 10,
   maxGoalChars: 500,
   maxNotesChars: 4000,
-  maxBriefCards: 7,
   /** Michi's latest line for Home (Q45, CompanionHeadlineDto.text). */
   maxHeadlineChars: 120,
-  /** Away this long, then back: catch-up. */
-  catchUpAfterMinutes: 30,
   /** Worker report excerpt cap. */
   maxReportChars: 4000,
   maxRulesChars: 2000,

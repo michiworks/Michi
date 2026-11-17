@@ -30,8 +30,7 @@ import { recallableWorkspaces, turnUserWords } from './recallIndex';
  * conversation whose memory setting is Use only or Off, of a page, digest,
  * maintenance or Scheduled-only thread or a check-in, a turn
  * nobody typed (self-turns, thread messages, scheduled runs), nor one recall
- * hides (the reply footer's Don't recall, a conversation that stopped
- * learning, Delete all memories). Nor a conversation in Trash, nor a turn
+ * hides (a conversation that stopped learning, Delete all memories). Nor a conversation in Trash, nor a turn
  * that read outside content (web pages, shell or another MCP server's output:
  * services/turnTrust.ts; its document's read_outside, migration 0080). A
  * conversation ranks by the newest turn it may show, so one whose newest

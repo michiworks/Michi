@@ -44,6 +44,12 @@ export interface MarkdownFeatureProfile {
   httpsImages?: boolean;
   /** true: only https links with a host and in-page `#` anchors stay links; any other link renders as its text. Default false. */
   httpsLinksOnly?: boolean;
+  /**
+   * true: the @mention chips of a user message (`span.mention-chip[data-mention]`,
+   * from highlightMentions) render as buttons, so the keyboard reaches them;
+   * the message's own click handler opens them. Default false.
+   */
+  mentionButtons?: boolean;
 }
 
 export interface MarkdownContentProps {
@@ -563,6 +569,9 @@ function MarkdownContentInner({
             if (isStreamingTailMarker(node)) return <MarkdownStreamingTail />;
             const keys = quoteMarks ? quoteMarkKeys(node) : null;
             if (keys) return <>{quoteMarks!.render(keys, children)}</>;
+            if (features?.mentionButtons && props.className === 'mention-chip' && props['data-mention'] !== undefined) {
+              return <button type="button" {...props}>{children}</button>;
+            }
             return <span {...props}>{children}</span>;
           },
           pre({ children, node: _node, ...props }: any) {

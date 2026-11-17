@@ -32,9 +32,9 @@ export function useCrewIntegration(apiBase: string, enabled: boolean) {
 export function CrewAppSetupNotice({ apiBase }: { apiBase: string }) {
   const status = useCrewIntegration(apiBase, true);
   if (!status?.updateRequired) return null;
-  return <div role="status" className="mb-4 rounded-lg border border-line bg-surface p-3 text-sm text-fg">
+  return <div role="status" className="mb-4 rounded-(--ui-radius) border border-line bg-surface p-3 text-sm text-fg">
     <p className="font-medium">Update the Crew App</p>
-    <p className="mt-1 text-muted">Installed: {status.installedVersion ?? 'unknown'} · Michi expects: {status.expectedVersion}.</p>
+    <p className="mt-1 text-fg-subtle">Installed: {status.installedVersion ?? 'unknown'} · Michi expects: {status.expectedVersion}.</p>
     <p className="mt-1">After updating Michi, open Crew Apps and Sync <strong>michi-crew-runtime</strong>.
       If its source is a custom directory or an old temporary directory, refresh that source with the compatibility helper first.
       Complete any launch approval or Gateway restart requested by Crew.</p>

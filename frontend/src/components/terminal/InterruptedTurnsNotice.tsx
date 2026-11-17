@@ -1,6 +1,5 @@
-import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, useIsPresent } from 'motion/react';
-import { CirclePause, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useChatActions, useChatProjects, useStructuralSelector } from '../../state/chatStore';
 import {
@@ -23,6 +22,8 @@ import {
 } from './interruptedTurnsModel';
 import { Button } from '../ui/controls';
 import { NoticeHeader, NoticeMotion, NoticeTab, shrinkOnEscape, useAnnounceNew, useNoticeMinimized } from './shellNoticeParts';
+import { CloseIcon, PauseIcon } from './icons';
+import { focusPaneComposer } from './paneFocus';
 
 /** What Resume does, on hover: the notice keeps its words to the actions. */
 const RESUME_HINT = 'Carries the task on from its saved output; does not send the request again';
@@ -47,7 +48,7 @@ const RESUME_WAIT_MS = 10_000;
  * it again. On a phone it starts as the tab.
  */
 export default function InterruptedTurnsNotice() {
-  const { projects } = useChatProjects();
+  const { projects, focusedNodeId } = useChatProjects();
   const { revealNode, resumeLastTurn } = useChatActions();
   const outcomes = useStructuralSelector(selectTurnOutcomes, turnOutcomesEqual);
   const [items, setItems] = useState<InterruptedTurn[]>([]);
@@ -125,6 +126,30 @@ export default function InterruptedTurnsNotice() {
     row?.querySelector<HTMLElement>('.interrupted-notice-resume')?.focus();
     setFocusRow(null);
   }, [focusRow, keys]);
+
+  // Resume all and Dismiss all can take away the button they were pressed
+  // on, or the whole card. Focus then goes, in the commit that follows, to a
+  // row still listed, else the next shell notice, else the composer (ST-10).
+  const footFocusRef = useRef(false);
+  const [, setFootActions] = useState(0);
+  const footAction = (run: () => void) => {
+    footFocusRef.current = true;
+    setFootActions((count) => count + 1);
+    run();
+  };
+  useLayoutEffect(() => {
+    if (!footFocusRef.current) return;
+    footFocusRef.current = false;
+    const live = (el: Element | null | undefined) => !!el && el.isConnected && !el.closest('[inert]');
+    const active = document.activeElement;
+    if (active !== document.body && live(active)) return;
+    const row = list.current?.querySelector<HTMLElement>('.interrupted-notice-resume');
+    const notice = [...document.querySelectorAll<HTMLElement>('.shell-notices .shell-notice-title, .shell-notices .shell-notice-tab')]
+      .find((el) => live(el) && !el.closest('.shell-notice--interrupted'));
+    const target = live(row) ? row : notice;
+    if (target) target.focus();
+    else focusPaneComposer([...document.querySelectorAll<HTMLElement>('.terminal-pane')].find((pane) => pane.dataset.nodeId === focusedNodeId));
+  });
 
   const settle = useCallback((key: string, on: boolean) => {
     setSettled((previous) => {
@@ -205,7 +230,7 @@ export default function InterruptedTurnsNotice() {
         <NoticeMotion key="interrupted-tab" noticeKey="interrupted-tab">
           <NoticeTab
             tone="interrupted"
-            icon={<CirclePause size={14} />}
+            icon={<PauseIcon />}
             count={visible.length}
             label={`Show ${visible.length === 1 ? 'the interrupted task' : `${visible.length} interrupted tasks`}`}
             onExpand={expand}
@@ -220,7 +245,7 @@ export default function InterruptedTurnsNotice() {
               <>
                 <NoticeHeader
                   tone="interrupted"
-                  icon={<CirclePause size={14} />}
+                  icon={<PauseIcon />}
                   title="Interrupted"
                   count={visible.length}
                   cardId={cardId}
@@ -244,7 +269,7 @@ export default function InterruptedTurnsNotice() {
                 </ul>
                 <div className="shell-notice-foot">
                   {visible.length > 1 && (
-                    <Button variant="primary" size="sm" title={RESUME_HINT} aria-describedby={hintId} onClick={() => resumeAll(visible)}>
+                    <Button variant="primary" size="sm" title={RESUME_HINT} aria-describedby={hintId} onClick={() => footAction(() => resumeAll(visible))}>
                       Resume all
                     </Button>
                   )}
@@ -253,7 +278,7 @@ export default function InterruptedTurnsNotice() {
                       {showAll ? 'Fewer' : `All ${visible.length}`}
                     </Button>
                   )}
-                  <Button variant="ghost" size="sm" className="shell-notice-end" onClick={() => dismiss(visible)}>
+                  <Button variant="ghost" size="sm" className="shell-notice-end" onClick={() => footAction(() => dismiss(visible))}>
                     {visible.length === 1 ? 'Dismiss' : 'Dismiss all'}
                   </Button>
                 </div>
@@ -311,7 +336,7 @@ function InterruptedRow({ item, hintId, showWorkspace, onResume, onOpen, onDismi
         Resume
       </Button>
       <button type="button" className="t-icon-btn shell-notice-icon interrupted-notice-dismiss" aria-label={`Dismiss ${item.title}`} title="Dismiss" onClick={() => onDismiss(item)}>
-        <X size={14} aria-hidden="true" />
+        <CloseIcon />
       </button>
     </li>
   );

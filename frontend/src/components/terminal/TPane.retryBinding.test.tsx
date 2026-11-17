@@ -125,7 +125,8 @@ vi.mock('../SelectionActions', () => ({
 vi.mock('../SlashPopup', () => ({ default: () => null }));
 vi.mock('../AtMentionPopup', () => ({ default: () => null }));
 vi.mock('../MentionEditor', () => ({
-  default: React.forwardRef((_props: any, _ref: any) => <textarea data-testid="composer" />),
+  // The editor as TipTap renders it: what focus lands on when the pane gives the composer focus.
+  default: React.forwardRef((_props: any, _ref: any) => <div role="textbox" aria-label="Message" contentEditable suppressContentEditableWarning tabIndex={0} />),
 }));
 vi.mock('./PaneFind', () => ({ default: () => null }));
 vi.mock('./PermissionBanner', () => ({ default: () => null }));
@@ -182,7 +183,11 @@ describe('TPane sends beside the composer with its binding', () => {
     render(<TPane nodeId="n1" />);
     fireEvent.click(screen.getByRole('button', { name: 'edit and resend' }));
     fireEvent.change(document.querySelector('.user-edit-area')!, { target: { value: 'hello again' } });
-    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    const resend = screen.getByRole('button', { name: /Resend/ });
+    resend.focus();
+    fireEvent.click(resend);
     expect(editAndResend).toHaveBeenCalledExactlyOnceWith('n1', 0, 'hello again', expect.objectContaining(binding));
+    // The resend hides Edit while it runs: the composer has the keyboard.
+    expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'Message' }));
   });
 });

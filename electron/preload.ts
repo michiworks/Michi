@@ -7,7 +7,7 @@ import type {
   DesktopResidency, DesktopResidencyPatch,
   DesktopInvokeResult, DesktopNotificationTarget, FilePreviewResult, FileTreeEntry, GitChangeEntry,
   RemoteAuthenticationTarget, SaveMarkdownResult, ScheduledRunTarget,
-  TerminalSurfaceSnapshot, VibrancyMaterial,
+  TerminalSurfaceSnapshot,
 } from 'michi-shared';
 
 function invoke<K extends keyof DesktopInvokeContract>(channel: K, ...args: DesktopInvokeArgs<K>): Promise<DesktopInvokeResult<K>> {
@@ -153,10 +153,6 @@ const electronBridge = {
   /** Match native chrome and Browser panes to the active palette. */
   setDarkMaterial(dark: boolean, backgroundColor?: string): void {
     send('app:setDarkMaterial', dark, backgroundColor);
-  },
-  /** Switch the sidebar's native vibrancy material (desktop see-through density). */
-  setVibrancy(material: VibrancyMaterial): void {
-    send('app:setVibrancy', material);
   },
   /** Window glass on/off: flips the page's see-through CSS here, the native
    *  material in main. */

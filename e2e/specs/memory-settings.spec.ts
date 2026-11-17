@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { installMockApi } from '../fixtures/mockApi';
 import { CONVERSATION_COMPOSER, openSettings, settingsMain } from '../fixtures/shell';
 import { createMemoryMock, memoryChange, memoryRecord, type MemoryMockController } from '../fixtures/memoryFixtures';
@@ -39,43 +39,205 @@ test('an agent’s memory shows “Remembered” with Undo, and Undo deletes it;
   expect(memory.records).toEqual([extracted]);
 });
 
-test('Settings › Memory edits, rescopes and deletes saved memories', async ({ page }) => {
-  const memory = createMemoryMock({
+const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
+
+/** Topics in two places, one memory without a topic, and About the user resting on some of them. */
+function library(): MemoryMockController {
+  return createMemoryMock({
     records: [
-      memoryRecord('mem-user', 'Answer in Chinese', { createdAt: 3 }),
-      memoryRecord('mem-ws', 'Use 2 spaces in this repo', { createdAt: 2, kind: 'convention', scope: { kind: 'workspace', workspaceId: 'a' } }),
+      memoryRecord('mem-zh', 'Answer in Chinese unless I write in English', { createdAt: 6, updatedAt: minutesAgo(10), topic: 'Answers' }),
+      memoryRecord('mem-short', 'Lead with the result; no recap at the end', { createdAt: 5, updatedAt: minutesAgo(20), topic: 'Answers', origin: 'extracted' }),
+      memoryRecord('mem-job', 'I work at Example Studio in Tokyo', { createdAt: 4, updatedAt: minutesAgo(30), topic: 'Work', kind: 'fact', origin: 'extracted', keywords: ['job', '工作'] }),
+      memoryRecord('mem-pnpm', 'Prefers pnpm over npm', { createdAt: 3, updatedAt: minutesAgo(40), topic: 'feedback', origin: 'extracted', importSource: 'claude', importRef: 'michi/feedback.md' }),
+      memoryRecord('mem-old', 'Deploys go out on Fridays', { createdAt: 2, updatedAt: minutesAgo(50), kind: 'fact', origin: 'extracted' }),
+      memoryRecord('mem-ws', 'Use 2 spaces in this repo', { createdAt: 1, updatedAt: minutesAgo(60), topic: 'Code style', kind: 'convention', scope: { kind: 'workspace', workspaceId: 'a' } }),
     ],
+    profile: {
+      lines: [
+        { topic: 'Answers', text: 'Wants answers in Chinese, result first', refs: ['mem-zh', 'mem-short'] },
+        { topic: 'Work', text: 'Works at Example Studio in Tokyo', refs: ['mem-job'] },
+      ],
+      builtAt: Date.now() - 3 * 3600_000,
+      version: 2,
+    },
   });
+}
+
+async function openYourMemories(page: Page) {
+  const settings = await openSettings(page, 'Memory');
+  const row = settings.locator('.settings-row').filter({ has: page.getByText('Your memories', { exact: true }) });
+  await row.getByRole('button', { name: 'Manage', exact: true }).click();
+  await expect(settings.getByRole('heading', { level: 1, name: 'Your memories' })).toBeVisible();
+  return settings;
+}
+
+const rowsOf = (group: Locator) => group.locator('.settings-history__title');
+
+test('Your memories lists topics where they apply; a topic shows its summary and each memory; a memory edits, moves and deletes', async ({ page }, info) => {
+  const memory = library();
   await boot(page, memory);
   const settings = await openSettings(page, 'Memory');
-  await expect(settings.getByRole('switch', { name: 'Use memory' })).toBeChecked();
-  const saved = settings.getByRole('list', { name: 'Saved memories' });
-  await expect(saved.getByRole('listitem')).toHaveCount(2);
+  await expect(settings.getByText('6 memories · 4 topics')).toBeVisible();
+  await openYourMemories(page);
 
-  const user = saved.getByRole('listitem', { name: 'Answer in Chinese' });
-  await user.getByRole('button', { name: 'Edit', exact: true }).click();
-  await saved.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: test.info().outputPath('memory-saved.png') });
-  await user.getByRole('textbox', { name: 'Edit memory' }).fill('Answer in Chinese, code comments in English');
-  await user.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(saved.getByText('Answer in Chinese, code comments in English', { exact: true })).toBeVisible();
+  const everywhere = settings.getByRole('region', { name: /^Everywhere/ });
+  await expect(rowsOf(everywhere)).toHaveText(['Answers', 'Work', 'feedback', 'Other']);
+  await expect(rowsOf(settings.getByRole('region', { name: /^Alpha/ }))).toHaveText(['Code style']);
+  await expect(everywhere.getByRole('button', { name: 'Answers', exact: true })).toHaveAccessibleDescription(/2 memories.*Wants answers in Chinese, result first/);
+  await expect(everywhere.getByText('Summaries written 3h ago')).toBeVisible();
+  await page.screenshot({ path: info.outputPath('memory-manage.png') });
 
-  const repo = saved.getByRole('listitem', { name: 'Use 2 spaces in this repo' });
-  await expect(repo).toContainText('Alpha');
-  await repo.getByRole('combobox', { name: 'Scope' }).selectOption({ label: 'Global' });
-  await expect(repo.locator('.memory-item__meta')).toContainText('Global');
-  await repo.getByRole('button', { name: 'Delete', exact: true }).click();
-  await repo.getByRole('button', { name: 'Confirm delete', exact: true }).click();
-  await expect(saved.getByRole('listitem')).toHaveCount(1);
+  // A search lists the memories themselves, by their text, topic or search words.
+  await settings.getByRole('searchbox', { name: 'Search memories' }).fill('工作');
+  await expect(rowsOf(settings)).toHaveText(['I work at Example Studio in Tokyo']);
+  await settings.getByRole('searchbox', { name: 'Search memories' }).fill('');
 
-  expect(memory.writes).toEqual(['PATCH /memories/mem-user', 'PATCH /memories/mem-ws', 'DELETE /memories/mem-ws']);
-  expect(memory.records.map((record) => record.body)).toEqual(['Answer in Chinese, code comments in English']);
+  await everywhere.getByRole('button', { name: 'Answers', exact: true }).click();
+  await expect(settings.getByRole('heading', { level: 1, name: 'Answers' })).toBeFocused();
+  await expect(settings.getByRole('region', { name: 'Summary' })).toContainText('Wants answers in Chinese, result first');
+  const memories = settings.getByRole('region', { name: 'Memories' });
+  await expect(rowsOf(memories)).toHaveText(['Answer in Chinese unless I write in English', 'Lead with the result; no recap at the end']);
+  await page.screenshot({ path: info.outputPath('memory-topic.png') });
+
+  await memories.getByRole('button', { name: 'Answer in Chinese unless I write in English', exact: true }).click();
+  await expect(settings.getByRole('heading', { level: 1, name: 'Answer in Chinese unless I write in English' })).toBeFocused();
+  const details = settings.getByRole('region', { name: 'Details' });
+  await expect(details).toContainText('By you');
+  await expect(details.getByRole('combobox', { name: 'Applies to' })).toHaveValue('user');
+  await expect(details.getByRole('combobox', { name: 'Topic' })).toHaveValue('Answers');
+  await page.screenshot({ path: info.outputPath('memory-detail.png') });
+
+  await settings.getByRole('button', { name: 'Edit', exact: true }).click();
+  await settings.getByRole('textbox', { name: 'Memory' }).fill('Answer in Chinese; code comments in English');
+  await settings.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(settings.getByRole('heading', { level: 1, name: 'Answer in Chinese; code comments in English' })).toBeVisible();
+  await details.getByRole('combobox', { name: 'Applies to' }).selectOption({ label: 'Alpha' });
+  await expect(settings.locator('.settings-history__detail-kind')).toHaveText('Answers · Alpha');
+  const topic = details.getByRole('combobox', { name: 'Topic' });
+  await topic.fill('Language');
+  await topic.press('Enter');
+  await expect(settings.locator('.settings-history__detail-kind')).toHaveText('Language · Alpha');
+
+  // Back returns to the topic it was opened from, which keeps its other memory.
+  await settings.getByRole('button', { name: 'Answers', exact: true }).click();
+  await expect(rowsOf(settings.getByRole('region', { name: 'Memories' }))).toHaveText(['Lead with the result; no recap at the end']);
+  await settings.getByRole('button', { name: 'Lead with the result; no recap at the end', exact: true }).click();
+  await settings.getByRole('button', { name: 'Delete…' }).click();
+  await page.getByRole('dialog', { name: 'Delete this memory?' }).getByRole('button', { name: 'Delete', exact: true }).click();
+  // Its topic went with it: Your memories again.
+  await expect(settings.getByRole('heading', { level: 1, name: 'Your memories' })).toBeVisible();
+  await expect(rowsOf(settings.getByRole('region', { name: /^Everywhere/ }))).toHaveText(['Work', 'feedback', 'Other']);
+  await expect(rowsOf(settings.getByRole('region', { name: /^Alpha/ }))).toHaveText(['Language', 'Code style']);
+
+  expect(memory.writes).toEqual(['PATCH /memories/mem-zh', 'PATCH /memories/mem-zh', 'PATCH /memories/mem-zh', 'DELETE /memories/mem-short']);
+  expect(memory.writeBodies).toEqual([
+    { body: 'Answer in Chinese; code comments in English', expectedVersion: 1 },
+    { scope: { kind: 'workspace', workspaceId: 'a' }, expectedVersion: 2 },
+    { topic: 'Language', expectedVersion: 3 },
+    null,
+  ]);
   // What Settings changed itself shows no "Remembered" notice.
   await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Remembered' })).toHaveCount(0);
 });
 
-test('Settings › Memory is one switch: off keeps saved memories listed and stops adding them', async ({ page }, info) => {
-  const memory = createMemoryMock({ records: [memoryRecord('mem-user', 'Answer in Chinese')] });
+test('a memory says where it came from; a topic is deleted with its memories after asking; Rebuild asks About the user again', async ({ page }) => {
+  const memory = library();
+  await boot(page, memory);
+  const settings = await openYourMemories(page);
+  const everywhere = settings.getByRole('region', { name: /^Everywhere/ });
+
+  await everywhere.getByRole('button', { name: 'feedback', exact: true }).click();
+  await settings.getByRole('button', { name: 'Prefers pnpm over npm', exact: true }).click();
+  await expect(settings.getByRole('region', { name: 'Details' })).toContainText('From Claude Code');
+  await expect(settings.getByRole('region', { name: 'Details' })).toContainText('michi/feedback.md');
+  await page.keyboard.press('Escape');
+  await expect(settings.getByRole('heading', { level: 1, name: 'feedback' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(settings.getByRole('heading', { level: 1, name: 'Your memories' })).toBeVisible();
+
+  await everywhere.getByRole('button', { name: 'Work', exact: true }).click();
+  await settings.getByRole('button', { name: 'Delete Work…' }).click();
+  const confirm = page.getByRole('dialog', { name: 'Delete Work?' });
+  await expect(confirm).toContainText('This deletes its 1 memory.');
+  await confirm.getByRole('button', { name: 'Delete 1 memory' }).click();
+  await expect(settings.getByRole('heading', { level: 1, name: 'Your memories' })).toBeVisible();
+  await expect(rowsOf(everywhere)).toHaveText(['Answers', 'feedback', 'Other']);
+
+  await everywhere.getByRole('button', { name: 'Rebuild' }).click();
+  await expect(everywhere.getByRole('button', { name: 'Rebuilding…' })).toBeDisabled();
+  expect(memory.writes).toEqual(['DELETE /memories/mem-job', 'POST /memory-profile/rebuild']);
+});
+
+test('a memory shows the last day it is true where it is listed, and its page sets or clears it', async ({ page }, info) => {
+  const nextWeek = new Date();
+  nextWeek.setHours(0, 0, 0, 0);
+  nextWeek.setDate(nextWeek.getDate() + 7);
+  const memory = createMemoryMock({
+    records: [
+      memoryRecord('mem-trip', 'In Tokyo for the conference this week', { kind: 'fact', origin: 'extracted', topic: 'Travel', validUntil: nextWeek.getTime() }),
+      memoryRecord('mem-freeze', 'Code freeze for the release', { kind: 'fact', topic: 'Travel', createdAt: 1 }),
+    ],
+  });
+  await boot(page, memory);
+  const settings = await openYourMemories(page);
+  await settings.getByRole('region', { name: /^Everywhere/ }).getByRole('button', { name: 'Travel', exact: true }).click();
+  const memories = settings.getByRole('region', { name: 'Memories' });
+  await expect(memories.getByRole('button', { name: 'In Tokyo for the conference this week', exact: true })).toContainText('Until');
+
+  await memories.getByRole('button', { name: 'Code freeze for the release', exact: true }).click();
+  const lastDay = settings.getByRole('region', { name: 'Details' }).getByLabel('Last day it’s true');
+  await lastDay.fill('2030-12-01');
+  await lastDay.press('Enter');
+  await expect(settings.getByRole('button', { name: 'No end date', exact: true })).toBeVisible();
+  await page.screenshot({ path: info.outputPath('memory-until.png') });
+  await settings.getByRole('button', { name: 'Travel', exact: true }).click();
+  await expect(memories.getByRole('button', { name: 'Code freeze for the release', exact: true })).toContainText('Until Dec 1, 2030');
+
+  await memories.getByRole('button', { name: 'In Tokyo for the conference this week', exact: true }).click();
+  await settings.getByRole('button', { name: 'No end date', exact: true }).click();
+  await expect(settings.getByRole('region', { name: 'Details' }).getByLabel('Last day it’s true')).toHaveValue('');
+
+  expect(memory.writes).toEqual(['PATCH /memories/mem-freeze', 'PATCH /memories/mem-trip']);
+  expect(memory.writeBodies).toEqual([
+    { validUntil: new Date(2030, 11, 2).getTime(), expectedVersion: 1 },
+    { validUntil: null, expectedVersion: 1 },
+  ]);
+});
+
+test('Guesses: collapsed until opened; That’s right saves one as a memory, Not true drops one, and nothing asks for attention', async ({ page }, info) => {
+  const memory = createMemoryMock({
+    records: [
+      memoryRecord('mem-hotpot', 'Loves Sichuan hot pot', { origin: 'extracted', createdAt: 2 }),
+      memoryRecord('mem-curry', 'Orders the hottest curry', { origin: 'extracted', createdAt: 1 }),
+    ],
+    guesses: [
+      { id: 'mg-spicy', body: 'Likes spicy food', refs: ['mem-hotpot', 'mem-curry'] },
+      { id: 'mg-lunch', body: 'Eats lunch at the desk', refs: ['mem-hotpot', 'mem-curry'] },
+    ],
+  });
+  await boot(page, memory);
+  // A guess brings no toast and no badge.
+  await expect(page.locator('[data-sonner-toast]')).toHaveCount(0);
+  const settings = await openSettings(page, 'Memory');
+  await expect(settings.getByText('2 memories')).toBeVisible();
+  const guesses = settings.getByRole('region', { name: 'Guesses' });
+  await expect(guesses.getByRole('list', { name: 'Guesses' })).toHaveCount(0);
+  await guesses.getByRole('button', { name: 'Show guesses' }).click();
+  const list = guesses.getByRole('list', { name: 'Guesses' });
+  await expect(list.getByRole('listitem').filter({ hasText: 'Likes spicy food' })).toContainText('Loves Sichuan hot pot');
+  await guesses.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: info.outputPath('memory-guesses.png') });
+
+  await list.getByRole('listitem').filter({ hasText: 'Likes spicy food' }).getByRole('button', { name: 'That’s right' }).click();
+  await expect(settings.getByText('3 memories')).toBeVisible();
+  await list.getByRole('listitem').filter({ hasText: 'Eats lunch at the desk' }).getByRole('button', { name: 'Not true' }).click();
+  await expect(settings.getByRole('region', { name: 'Guesses' })).toHaveCount(0);
+  expect(memory.writes).toEqual(['POST /memory-guesses/mg-spicy/confirm', 'POST /memory-guesses/mg-lunch/reject']);
+  await expect(page.locator('[data-sonner-toast]').filter({ hasText: 'Remembered' })).toHaveCount(0);
+});
+
+test('Settings › Memory is one switch: off keeps memories listed and stops adding them', async ({ page }, info) => {
+  const memory = createMemoryMock({ records: [memoryRecord('mem-user', 'Answer in Chinese', { topic: 'Answers' })] });
   await boot(page, memory);
   const settings = await openSettings(page, 'Memory');
   const toggle = settings.getByRole('switch', { name: 'Use memory' });
@@ -85,65 +247,31 @@ test('Settings › Memory is one switch: off keeps saved memories listed and sto
   await toggle.click();
   await expect(toggle).not.toBeChecked();
   await expect.poll(() => memory.mode).toBe('off');
-  await expect(settings.getByRole('button', { name: 'Add memory', exact: true })).toBeDisabled();
-  await expect(settings.getByRole('list', { name: 'Saved memories' }).getByRole('listitem')).toHaveCount(1);
+  await settings.getByRole('button', { name: 'Manage', exact: true }).click();
+  await expect(rowsOf(settings)).toHaveText(['Answers']);
+  await expect(settings.getByRole('button', { name: 'Add memory' })).toHaveCount(0);
+  await settings.locator('.settings-history__back').click();
 
-  await toggle.click();
-  await expect(toggle).toBeChecked();
+  await settings.getByRole('switch', { name: 'Use memory' }).click();
+  await expect(settings.getByRole('switch', { name: 'Use memory' })).toBeChecked();
   await expect.poll(() => memory.mode).toBe('auto');
-  expect(memory.writes).toEqual(['PUT /memory-settings', 'PUT /memory-settings']);
-});
-
-test('About the user: a line’s memories open under Saved memories, Rebuild asks again, Remove deletes what a line rests on', async ({ page }, info) => {
-  const memory = createMemoryMock({
-    records: [
-      memoryRecord('mem-job', 'I work at Amazon in Tokyo', { origin: 'extracted', kind: 'fact', createdAt: 3 }),
-      memoryRecord('mem-food', 'I only have an air fryer', { origin: 'extracted', kind: 'fact', createdAt: 2 }),
-      memoryRecord('mem-pnpm', 'Prefers pnpm over npm', { origin: 'extracted', createdAt: 1, importSource: 'claude', importRef: 'michi/feedback.md' }),
-    ],
-    profile: {
-      lines: [
-        { topic: 'Work', text: 'Works at Amazon in Tokyo', refs: ['mem-job'] },
-        { topic: 'Home', text: 'Cooks with only an air fryer', refs: ['mem-food'] },
-      ],
-      builtAt: Date.now() - 3 * 3600_000,
-      version: 2,
-    },
-  });
-  await boot(page, memory);
-  const settings = await openSettings(page, 'Memory');
-  const about = settings.getByRole('region', { name: 'About the user' });
-  await expect(about.locator('.settings-section__aside')).toHaveText('Built 3h ago · Rebuild');
-  await expect(about.getByRole('heading', { level: 3 })).toHaveText(['Work', 'Home']);
-  await expect(settings.getByRole('listitem', { name: 'Prefers pnpm over npm' })).toContainText('From Claude Code');
-
-  const work = about.getByRole('listitem').filter({ hasText: 'Works at Amazon in Tokyo' });
-  await work.getByRole('button', { name: 'Based on 1 memory' }).click();
-  await work.getByRole('button', { name: 'I work at Amazon in Tokyo' }).click();
-  await expect(settings.getByRole('listitem', { name: 'I work at Amazon in Tokyo' })).toBeFocused();
-  await about.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: info.outputPath('memory-about-the-user.png') });
-
-  const rebuild = about.getByRole('button', { name: 'Rebuild' });
-  await rebuild.click();
-  await expect(about.getByText('Rebuilding. This can take a minute.')).toBeVisible();
-  await expect(rebuild).toBeDisabled();
-
-  const home = about.getByRole('listitem').filter({ hasText: 'Cooks with only an air fryer' });
-  await home.getByRole('button', { name: 'Remove' }).click();
-  await expect(home).toContainText('Deletes the 1 memory it’s based on.');
-  await home.getByRole('button', { name: 'Confirm remove' }).click();
-  await expect(about.getByText('Cooks with only an air fryer')).toHaveCount(0);
-  expect(memory.records.map((record) => record.id)).toEqual(['mem-job', 'mem-pnpm']);
-  expect(memory.writes).toEqual(['POST /memory-profile/rebuild', 'POST /memory-profile/remove-line']);
-  expect(memory.writeBodies).toEqual([{}, { index: 1, version: 2 }]);
+  await settings.getByRole('button', { name: 'Manage', exact: true }).click();
+  await settings.getByRole('button', { name: 'Add memory' }).click();
+  const add = settings.getByRole('group', { name: 'Add memory' });
+  await add.getByRole('textbox', { name: 'New memory' }).fill('Lives in Tokyo');
+  await add.getByRole('combobox', { name: 'Kind' }).selectOption('fact');
+  await add.getByRole('combobox', { name: 'Topic' }).fill('Home');
+  await add.getByRole('button', { name: 'Save memory' }).click();
+  await expect(rowsOf(settings)).toHaveText(['Home', 'Answers']);
+  expect(memory.writes).toEqual(['PUT /memory-settings', 'PUT /memory-settings', 'POST /memories']);
+  expect(memory.writeBodies[2]).toEqual({ scope: { kind: 'user' }, kind: 'fact', body: 'Lives in Tokyo', topic: 'Home' });
 });
 
 test('Delete all memories asks first, then deletes every memory', async ({ page }) => {
   const memory = createMemoryMock({ records: [memoryRecord('mem-a', 'Answer in Chinese', { createdAt: 2 }), memoryRecord('mem-b', 'Use pnpm', { createdAt: 1 })] });
   await boot(page, memory);
   const settings = await openSettings(page, 'Memory');
-  await expect(settings.getByRole('list', { name: 'Saved memories' }).getByRole('listitem')).toHaveCount(2);
+  await expect(settings.getByText('2 memories', { exact: true })).toBeVisible();
 
   await settings.getByRole('button', { name: 'Delete all…' }).click();
   const confirm = page.getByRole('dialog', { name: 'Delete all memories?' });
@@ -155,7 +283,7 @@ test('Delete all memories asks first, then deletes every memory', async ({ page 
   await settings.getByRole('button', { name: 'Delete all…' }).click();
   await page.getByRole('dialog', { name: 'Delete all memories?' }).getByRole('button', { name: 'Delete all memories' }).click();
   await expect(settings.getByText('Deleted 2 memories.')).toBeVisible();
-  await expect(settings.getByText('No memories yet.')).toBeVisible();
+  await expect(settings.getByText('Nothing yet. See, add, edit or delete what Michi remembers.')).toBeVisible();
   expect(memory.writes).toEqual(['POST /memories/reset']);
   expect(memory.writeBodies).toEqual([{ confirm: true }]);
 });
@@ -180,7 +308,7 @@ test('a temporary chat starts from Home: the ghost changes Home, the first messa
   const ghost = page.getByRole('button', { name: 'Temporary chat', exact: true });
   await expect(ghost).toBeVisible();
   await ghost.click();
-  await expect(page.getByRole('button', { name: 'Turn off temporary chat', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Temporary chat', exact: true, pressed: true })).toBeVisible();
   await expect(home.locator('.michi-home-eyebrow')).toHaveText('Temporary chat');
   await expect(home.getByRole('heading', { level: 1 })).toHaveText('_ Nothing here goes into memory.');
   await expect(home.getByText('Michi won’t use your memories, and other chats can’t read this one. It stays in your history. This can’t be changed after you send.')).toBeVisible();
@@ -189,7 +317,7 @@ test('a temporary chat starts from Home: the ghost changes Home, the first messa
   await expect(homeComposer.locator('.mention-editor-placeholder')).toHaveText('Ask in a temporary chat');
   await page.screenshot({ path: info.outputPath('home-temporary-chat.png') });
   // The ghost turns it back off, and on again.
-  await page.getByRole('button', { name: 'Turn off temporary chat', exact: true }).click();
+  await page.getByRole('button', { name: 'Temporary chat', exact: true, pressed: true }).click();
   await expect(home.getByText('Nothing here goes into memory.')).toHaveCount(0);
   await expect(homeComposer).toHaveCSS('border-top-style', 'solid');
   await ghost.click();
@@ -216,7 +344,7 @@ test('a temporary chat starts from Home: the ghost changes Home, the first messa
   // Home's switch was for that chat only.
   await page.getByRole('button', { name: 'New chat', exact: true }).click();
   await expect(home).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Temporary chat', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Temporary chat', exact: true, pressed: false })).toBeVisible();
   await expect(home.getByText('Nothing here goes into memory.')).toHaveCount(0);
   await expect(page.locator(CONVERSATION_COMPOSER).first().locator('.mention-editor-placeholder')).toHaveText('What would you like to explore?');
 

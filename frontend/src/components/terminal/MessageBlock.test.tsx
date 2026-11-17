@@ -10,10 +10,10 @@ import React from 'react';
 import { act, render, fireEvent, screen, waitFor } from '@testing-library/react';
 import { MessageBlock, TermThoughtBlock, userTextToMarkdown } from './MessageBlock';
 import { kbd } from '../../lib/platform';
-import { AgentBlockStyleOverride } from '../../state/prefs';
 import { recordBackendObservation, resetBackendClocksForTest } from '../../services/backendClock';
 import type { AssistantBlock, ChatMessage } from '../../state/chatTypes';
 import { rememberRuntimeLabels, resetSkillCatalogs } from '../../state/skillCatalog';
+import { MARKDOWN_REINTERPRET_HZ_STORAGE_KEY } from './markdownReinterpretationFlag';
 
 const baseMsg = {
   id: 'm1',
@@ -46,7 +46,6 @@ function renderMessage(
       onEdit={noop}
       copyText={() => ''}
       showThoughts={false}
-      fontFamily={'inherit'}
       density={'comfortable'}
       usageInfo={extraProps?.usageInfo}
       isErrorTail={extraProps?.isErrorTail}
@@ -66,7 +65,6 @@ describe('MessageBlock — role styling', () => {
         onEdit={noop}
         copyText={() => ''}
         showThoughts={false}
-        fontFamily={'inherit'}
         density={'comfortable'}
         onMentionClick={onMentionClick}
       />,
@@ -75,6 +73,24 @@ describe('MessageBlock — role styling', () => {
     expect(marker?.textContent).toBe('From Research notes');
     expect(container.querySelector('.terminal-message-user')?.textContent).toContain('Please review');
     fireEvent.click(getByRole('button', { name: 'Research notes' }));
+    expect(onMentionClick).toHaveBeenCalledWith('Research notes', 'node', 'n-a');
+  });
+
+  it('makes the @mentions of a message that opens them buttons', () => {
+    const onMentionClick = vi.fn();
+    render(
+      <MessageBlock
+        m={{ ...baseMsg, text: 'Ask @Research notes first', mentions: [{ kind: 'node', refId: 'n-a', label: 'Research notes' }] }}
+        index={0}
+        isDark={false}
+        onEdit={noop}
+        copyText={() => ''}
+        showThoughts={false}
+        density={'comfortable'}
+        onMentionClick={onMentionClick}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: '@Research notes' }));
     expect(onMentionClick).toHaveBeenCalledWith('Research notes', 'node', 'n-a');
   });
 
@@ -124,7 +140,7 @@ describe('userTextToMarkdown', () => {
 describe('MessageBlock — answer meta line', () => {
   const answerProps = {
     index: 0, isDark: false, copyText: () => '', onRetry: noop, onBranch: noop, onEdit: noop, showThoughts: false,
-    fontFamily: 'inherit', density: 'comfortable' as const,
+    density: 'comfortable' as const,
   };
   const answer = { ...baseMsg, role: 'assistant' as const, text: 'The answer', createdAt: new Date(2026, 7, 18, 16, 35).getTime() };
   const actionsOf = (container: HTMLElement) => container.querySelector('.t-answer-meta .t-msg-actions') as HTMLElement;
@@ -177,17 +193,15 @@ describe('MessageBlock — answer meta line', () => {
     expect(container.querySelector('.t-answer-meta button[aria-label="copy message"]')).not.toBeNull();
   });
 
-  it('stays shown under the latest answer and waits for a hover under earlier ones', () => {
+  it('stays shown under the latest answer and leaves earlier ones to the hover rule in CSS', () => {
     const latest = render(<MessageBlock {...answerProps} m={answer} pinned />);
-    expect(actionsOf(latest.container).style.opacity).toBe('1');
-    expect(actionsOf(latest.container).style.pointerEvents).toBe('auto');
+    expect(latest.container.querySelector('.t-answer-meta')!.getAttribute('data-msg-actions')).toBe('pinned');
     latest.unmount();
     const earlier = render(<MessageBlock {...answerProps} m={answer} />);
-    const actions = actionsOf(earlier.container);
-    expect(actions.style.opacity).toBe('0');
-    expect(actions.style.pointerEvents).toBe('none');
+    expect(earlier.container.querySelector('.t-answer-meta')!.hasAttribute('data-msg-actions')).toBe(false);
+    // index.css shows the row on hover: a pointer over the message sets nothing.
     fireEvent.mouseOver(earlier.container.querySelector('.terminal-message-assistant')!);
-    expect(actions.style.opacity).toBe('1');
+    expect(actionsOf(earlier.container).getAttribute('style')).not.toMatch(/opacity|pointer-events/);
   });
 
   it('keeps its buttons in the tab order while hidden, so keyboard focus can reveal them (index.css :has(:focus-visible))', () => {
@@ -217,7 +231,6 @@ describe('MessageBlock — actions at rest', () => {
         copyText={() => ''}
         onBranch={noop}
         showThoughts={false}
-        fontFamily={'inherit'}
         density={'comfortable'}
         actionsAtRest={actionsAtRest}
       />,
@@ -227,9 +240,8 @@ describe('MessageBlock — actions at rest', () => {
   it('marks only the latest reply for touch screens to show without a tap', () => {
     const latest = renderReply(true);
     const row = latest.container.querySelector('[data-msg-actions]');
-    expect(row?.getAttribute('data-msg-actions')).toBe('rest');
     // Hidden for a mouse until hover; index.css reveals it on touch.
-    expect((latest.container.querySelector('.t-msg-actions') as HTMLElement).style.opacity).toBe('0');
+    expect(row?.getAttribute('data-msg-actions')).toBe('rest');
     latest.unmount();
 
     const older = renderReply(false);
@@ -263,7 +275,7 @@ describe('MessageBlock — error-tail row', () => {
       <MessageBlock
         m={{ ...baseMsg, role: 'assistant', text: 'cannot connect' }}
         index={0} isDark={false} onEdit={noop} copyText={() => ''} showThoughts={false}
-        fontFamily="inherit" density="comfortable"
+        density="comfortable"
         isErrorTail errorKind="connection"
         onTestConnection={() => new Promise((resolve) => { finish = resolve; })}
       />,
@@ -273,7 +285,7 @@ describe('MessageBlock — error-tail row', () => {
     fireEvent.click(button);
     fireEvent.mouseLeave(button);
     await act(async () => { finish({ ok: false }); });
-    expect(button.textContent).toBe('⚙ Test Connection');
+    expect(button.textContent).toBe('Test Connection');
     expect(button.style.background).not.toContain('danger');
   });
 });
@@ -281,7 +293,7 @@ describe('MessageBlock — error-tail row', () => {
 describe('MessageBlock — highlight frame', () => {
   const props = {
     index: 0, isDark: false, onEdit: noop, copyText: () => '', onRetry: noop, showThoughts: false,
-    fontFamily: 'inherit', density: 'comfortable' as const,
+    density: 'comfortable' as const,
   };
   const reply = { ...baseMsg, role: 'assistant' as const, text: 'The cited reply' };
   const mark = <div data-testid="mark">Referenced by page</div>;
@@ -295,12 +307,6 @@ describe('MessageBlock — highlight frame', () => {
     // Nothing of the reserved actions row sits inside the frame, so its bottom is the message's.
     expect(frame.contains(copy)).toBe(false);
     expect(frame.lastElementChild!.classList.contains('terminal-message-assistant')).toBe(true);
-    const actions = copy.parentElement!;
-    expect(actions.style.opacity).toBe('0');
-    fireEvent.mouseEnter(frame.parentElement!);
-    expect(actions.style.opacity).toBe('1');
-    fireEvent.mouseEnter(copy);
-    expect(actions.style.opacity).toBe('1');
   });
 
   it('leaves a message that is not highlighted as it was', () => {
@@ -317,7 +323,7 @@ describe('MessageBlock — copy', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
   const press = async (copyText: () => string) => {
     const view = render(
-      <MessageBlock m={reply} index={0} isDark={false} copyText={copyText} showThoughts={false} fontFamily="inherit" density="comfortable" />,
+      <MessageBlock m={reply} index={0} isDark={false} copyText={copyText} showThoughts={false} density="comfortable" />,
     );
     const button = view.getByRole('button', { name: 'copy message' });
     await act(async () => { fireEvent.click(button); });
@@ -366,19 +372,14 @@ describe('MessageBlock — user modules', () => {
     expect(container.querySelectorAll('[data-testid="comment-quote"]').length).toBe(2);
   });
 
-  it('floats its action row and lets pointers through it until the message is hovered', () => {
+  it('floats its action row against the message', () => {
     const { container, getByRole } = renderMessage({ role: 'user', text: 'hello' });
     const root = container.firstElementChild as HTMLElement;
     const row = container.querySelector('.t-user-msg-actions') as HTMLElement;
-    // The row is positioned against the message and laid over the next
-    // message's first line, so while hidden it must not take that line's clicks.
+    // Laid over the next message's first line, the row lets that line's
+    // clicks through until it shows (index.css, messageActions.css.test.js).
     expect(root.style.position).toBe('relative');
-    expect(row.style.pointerEvents).toBe('none');
-    fireEvent.mouseEnter(root);
-    expect(row.style.pointerEvents).toBe('');
     expect(row.contains(getByRole('button', { name: 'edit and resend' }))).toBe(true);
-    fireEvent.mouseLeave(root);
-    expect(row.style.pointerEvents).toBe('none');
   });
 });
 
@@ -386,7 +387,7 @@ describe('MessageBlock — editing a sent message', () => {
   it.each([{ isComposing: true }, { keyCode: 229 }])('leaves an Esc that ends an IME composition to it (%o)', (ime) => {
     const onEditCancel = vi.fn();
     const onEditSave = vi.fn();
-    const { container } = render(
+    render(
       <MessageBlock
         m={baseMsg}
         index={0}
@@ -394,14 +395,13 @@ describe('MessageBlock — editing a sent message', () => {
         onEdit={noop}
         copyText={() => ''}
         showThoughts={false}
-        fontFamily={'inherit'}
         density={'comfortable'}
         editing
         onEditCancel={onEditCancel}
         onEditSave={onEditSave}
       />,
     );
-    const area = container.querySelector('textarea.user-edit-area') as HTMLTextAreaElement;
+    const area = screen.getByRole('textbox', { name: 'Edit message' }) as HTMLTextAreaElement;
     fireEvent.change(area, { target: { value: 'hello 修改' } });
     fireEvent.keyDown(area, { key: 'Escape', ...ime });
     expect(onEditCancel).not.toHaveBeenCalled();
@@ -409,6 +409,28 @@ describe('MessageBlock — editing a sent message', () => {
     fireEvent.keyDown(area, { key: 'Escape' });
     expect(onEditCancel).toHaveBeenCalledTimes(1);
     expect(onEditSave).not.toHaveBeenCalled();
+  });
+
+  it('hands the keyboard back to the message\'s Edit button when Esc or Cancel closes the edit', () => {
+    function Editable() {
+      const [editing, setEditing] = React.useState(true);
+      return (
+        <MessageBlock m={baseMsg} index={0} isDark={false} copyText={() => ''} showThoughts={false} density="comfortable"
+          editing={editing} onEdit={editing ? undefined : () => setEditing(true)} onEditCancel={() => setEditing(false)} onEditSave={noop} />
+      );
+    }
+    const { container } = render(<Editable />);
+    const area = () => container.querySelector('textarea.user-edit-area') as HTMLTextAreaElement;
+    area().focus();
+    fireEvent.keyDown(area(), { key: 'Escape' });
+    const edit = screen.getByRole('button', { name: 'edit and resend' });
+    expect(document.activeElement).toBe(edit);
+
+    fireEvent.click(edit);
+    const cancel = screen.getByRole('button', { name: /Cancel/ });
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'edit and resend' }));
   });
 
   it('labels Save with the key that saves', () => {
@@ -421,7 +443,6 @@ describe('MessageBlock — editing a sent message', () => {
         onEdit={noop}
         copyText={() => ''}
         showThoughts={false}
-        fontFamily={'inherit'}
         density={'comfortable'}
         editing
         onEditCancel={noop}
@@ -432,14 +453,14 @@ describe('MessageBlock — editing a sent message', () => {
     fireEvent.change(area, { target: { value: 'hello again' } });
     fireEvent.keyDown(area, { key: 'Enter' });
     expect(onEditSave).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Save/ }).querySelector('kbd')?.textContent).toBe(kbd('mod', 'enter'));
+    expect(screen.getByRole('button', { name: /Resend/ }).querySelector('kbd')?.textContent).toBe(kbd('mod', 'enter'));
     fireEvent.keyDown(area, { key: 'Enter', ctrlKey: true });
     expect(onEditSave).toHaveBeenCalledWith('hello again');
   });
 });
 
 describe('MessageBlock — subagents forwarding', () => {
-  it('renders the SubAgent spine row and now line when matching subagents are passed', () => {
+  it('renders the delegation line with its agent\'s current tool when matching subagents are passed', () => {
     const detail = JSON.stringify({ subagent_type: 'Explore', description: 'Explore Michi' });
     const subagentTool = {
       id: 't1',
@@ -472,7 +493,6 @@ describe('MessageBlock — subagents forwarding', () => {
         isDark={true}
         copyText={() => ''}
         showThoughts={true}
-        fontFamily="monospace"
         density="comfortable"
         subagents={[
           {
@@ -488,33 +508,36 @@ describe('MessageBlock — subagents forwarding', () => {
         ]}
       />,
     );
-    expect(getByTestId('subagent-spine-row')).toBeTruthy();
+    expect(getByTestId('subagent-card')).toBeTruthy();
     expect(container.textContent).toContain('now ❯ Glob');
   });
 });
 
 describe('MessageBlock — collapsed user text', () => {
-  it('fades only the clamped content and keeps the expansion control outside the overlay', () => {
+  it('fades the clamped content with a mask, not a colour over it, and keeps the expansion control outside it', () => {
     const height = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(500);
     const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(400);
     try {
       const { container, getByRole } = renderMessage({ role: 'user', text: 'A long message that overflows the measured preview.' });
       const toggle = getByRole('button', { name: 'Show more' });
       const content = container.querySelector(`[id="${toggle.getAttribute('aria-controls')}"]`) as HTMLElement;
-      const fade = content.querySelector<HTMLElement>('[aria-hidden="true"]');
       expect(content.style.maxHeight).not.toBe('');
       expect(content.style.position).toBe('relative');
-      expect(fade?.parentElement).toBe(content);
+      // The bubble is a translucent lift over whatever it sits on, so there is
+      // no one colour to fade into: the clamp masks the content out instead of
+      // painting a gradient of the bubble's background over it.
+      expect(content.style.maskImage).toContain('linear-gradient');
+      expect(content.querySelector('[aria-hidden="true"]')).toBeNull();
       expect(content.contains(toggle)).toBe(false);
       expect(toggle.classList.contains('t-user-text-toggle')).toBe(true);
       expect(toggle.style.color).toBe('');
       expect(toggle.getAttribute('aria-expanded')).toBe('false');
       fireEvent.click(toggle);
       expect(getByRole('button', { name: 'Show less' }).getAttribute('aria-expanded')).toBe('true');
-      expect(content.querySelector('[aria-hidden="true"]')).toBeNull();
+      expect(content.style.maskImage).toBe('');
       expect(content.style.maxHeight).toBe('');
       fireEvent.click(toggle);
-      expect(content.querySelector('[aria-hidden="true"]')).toBeTruthy();
+      expect(content.style.maskImage).toContain('linear-gradient');
     } finally {
       height.mockRestore();
       width.mockRestore();
@@ -581,7 +604,7 @@ describe('MessageBlock — branch anchors motion', () => {
   const block = (anchors: ReturnType<typeof anchor>[]) => (
     <MessageBlock
       m={reply} index={0} isDark={false} onEdit={noop} copyText={() => ''} showThoughts={false}
-      fontFamily="inherit" density="comfortable" turnAnchors={anchors} onOpenBranch={noop}
+      density="comfortable" turnAnchors={anchors} onOpenBranch={noop}
     />
   );
   const sectionOf = (container: HTMLElement) =>
@@ -635,112 +658,50 @@ describe('MessageBlock — user message markdown', () => {
   });
 });
 
-describe('MessageBlock — expanded activity scroll', () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it.each(['card', 'terminal', 'plain'] as const)('preserves reading position and resumes following at the bottom (%s)', (variant) => {
-    let height = 1000;
-    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => height);
-    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
-    const view = (text: string, streaming = true) => <AgentBlockStyleOverride.Provider value={variant}>
-      <TermThoughtBlock text={text} streaming={streaming} initialMode="expanded" />
-    </AgentBlockStyleOverride.Provider>;
-    const { getByRole, rerender } = render(view('First step'));
-    const activity = getByRole('region', { name: 'Activity details' });
-    expect(activity.tabIndex).toBe(0);
-    expect(activity.style.overflowY).toBe('auto');
-    expect(activity.scrollTop).toBe(1000);
-
-    activity.scrollTop = 120;
-    fireEvent.scroll(activity);
-    height = 1200;
-    rerender(view('First step\nNext step'));
-    expect(activity.scrollTop).toBe(120);
-
-    activity.scrollTop = 900;
-    fireEvent.scroll(activity);
-    height = 1400;
-    rerender(view('First step\nNext step\nLatest step'));
-    expect(activity.scrollTop).toBe(1400);
-
-    activity.scrollTop = 160;
-    fireEvent.scroll(activity);
-    rerender(view('First step\nNext step\nLatest step', false));
-    expect(activity.scrollTop).toBe(160);
-    expect(getByRole('region', { name: 'Activity details' })).toBe(activity);
+describe('MessageBlock — live thought Markdown', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    window.localStorage.removeItem(MARKDOWN_REINTERPRET_HZ_STORAGE_KEY);
   });
 
-  it('opens completed activity from the start without an extra tab stop for short content', () => {
-    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(80);
-    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(80);
-    const { getByText, queryByRole } = render(<TermThoughtBlock text="Earlier reasoning" />);
-    fireEvent.click(getByText('thoughts'));
-    const body = getByText('Earlier reasoning').closest('div[style*="overflow-y"]') as HTMLElement;
-    expect(body).not.toBeNull();
-    expect(body.scrollTop).toBe(0);
-    expect(body.hasAttribute('tabindex')).toBe(false);
-    expect(queryByRole('region')).toBeNull();
-  });
+  it('re-parses a streaming thought segment no faster than the reinterpretation rate', async () => {
+    window.localStorage.setItem(MARKDOWN_REINTERPRET_HZ_STORAGE_KEY, '1');
+    // Loaded up front, so the lazy chunk resolves within one act.
+    await import('./StreamingMarkdownContent');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const view = (text: string, streaming = true) => (
+      <TermThoughtBlock streaming={streaming} phase="thinking" segments={[{ key: 't0', kind: 'text', text }]} />
+    );
+    const { container, rerender } = render(view('Plan:'));
+    fireEvent.click(container.querySelector('button.agent-line')!);
+    // The lazily loaded streaming renderer replaces its fallback.
+    await act(async () => {});
+    expect(container.querySelector('[data-markdown-reinterpret-hz="1"]')).not.toBeNull();
 
-  it('opens and reopens a live activity at its latest content', () => {
-    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(1000);
-    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
-    const { getByText, getByRole } = render(<TermThoughtBlock text="Live reasoning" streaming />);
-    fireEvent.click(getByText('thinking'));
-    const activity = getByRole('region', { name: 'Activity details' });
-    expect(activity.scrollTop).toBe(1000);
-    activity.scrollTop = 100;
-    fireEvent.scroll(activity);
-    fireEvent.click(getByText('thinking'));
-    fireEvent.click(getByText('thinking'));
-    expect(getByRole('region', { name: 'Activity details' }).scrollTop).toBe(1000);
-  });
-});
+    rerender(view('Plan:\n\n- read the logs\n- rerun the tests'));
+    expect(container.textContent).toContain('rerun the tests');
+    act(() => { vi.advanceTimersByTime(900); });
+    expect(container.querySelectorAll('li')).toHaveLength(0);
+    act(() => { vi.advanceTimersByTime(100); });
+    expect(container.querySelectorAll('li')).toHaveLength(2);
 
-describe('MessageBlock — thought block motion', () => {
-  const variants = ['card', 'terminal', 'plain'] as const;
-  const view = (variant: (typeof variants)[number], streaming: boolean) => (
-    <AgentBlockStyleOverride.Provider value={variant}>
-      <TermThoughtBlock text="Some reasoning" streaming={streaming} />
-    </AgentBlockStyleOverride.Provider>
-  );
-  afterEach(() => vi.restoreAllMocks());
-
-  it.each(variants)('%s: the live header leaves hidden and unclickable as the block finishes', (variant) => {
-    const { container, rerender } = render(view(variant, true));
-    rerender(view(variant, false));
-    const leaving = container.querySelector('.term-shimmer')!.closest('[aria-hidden="true"]') as HTMLElement;
-    expect(leaving).not.toBeNull();
-    expect(leaving.style.pointerEvents).toBe('none');
-  });
-
-  it.each(variants)('%s: a body the user toggles opens from 1px and closes from 1px under its height', (variant) => {
-    const { container, getByText } = render(view(variant, false));
-    const header = () => container.querySelector('[data-agent-block] [style*="cursor: pointer"]') as HTMLElement;
-    fireEvent.click(header());
-    const body = getByText('Some reasoning').closest('[data-reveal="disclosure"]') as HTMLElement;
-    expect(body.style.height).toBe('1px');
-
-    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40);
-    fireEvent.click(header());
-    expect(body.style.height).toBe('39px');
+    // The finished segment is one full parse, at once.
+    rerender(view('Plan:\n\n- read the logs\n- rerun the tests\n- ship it', false));
+    expect(container.querySelectorAll('li')).toHaveLength(3);
   });
 });
 
 describe('MessageBlock — thought activity sync', () => {
-  function renderCardMessage(m: ChatMessage) {
+  function renderTurn(m: ChatMessage) {
     return render(
-      <AgentBlockStyleOverride.Provider value="card">
-        <MessageBlock
-          m={m}
-          index={0}
-          isDark={false}
-          copyText={() => ''}
-          showThoughts
-          fontFamily="inherit"
-          density="comfortable"
-        />
-      </AgentBlockStyleOverride.Provider>,
+      <MessageBlock
+        m={m}
+        index={0}
+        isDark={false}
+        copyText={() => ''}
+        showThoughts
+        density="comfortable"
+      />,
     );
   }
 
@@ -763,7 +724,7 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { getByText, queryByText } = renderTurn(m);
 
     expect(getByText('Working…')).not.toBeNull();
     expect(queryByText(/Thought for/)).toBeNull();
@@ -788,41 +749,11 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { container, queryByText } = renderTurn(m);
 
-    expect(getByText('Ran 1 command')).not.toBeNull();
+    expect(container.querySelector('.agent-line-run--thought')).not.toBeNull();
+    expect(container.querySelector('.agent-line-run[data-live]')).toBeNull();
     expect(queryByText('Working…')).toBeNull();
-  });
-
-  it('heads a finished block with what it did, the duration at the right and failures apart', () => {
-    const m: ChatMessage = {
-      ...baseMsg,
-      role: 'assistant',
-      text: 'Done',
-      streaming: false,
-      toolCalls: [
-        { id: 't1', title: 'Read a.ts', kind: 'read', status: 'completed', startedAt: 1_000, endedAt: 2_000 },
-        { id: 't2', title: 'Edit a.ts', kind: 'edit', status: 'completed', startedAt: 2_000, endedAt: 3_000 },
-        { id: 't3', title: 'Bash npm test', kind: 'bash', status: 'error', startedAt: 3_000, endedAt: 13_000 },
-      ],
-      blocks: [
-        { id: 'b1', kind: 'thinking', rawText: 'Fixing', streaming: false },
-        { id: 'b2', kind: 'tool', toolCallId: 't1', section: 'thinking', rawOffset: 6 },
-        { id: 'b3', kind: 'tool', toolCallId: 't2', section: 'thinking', rawOffset: 6 },
-        { id: 'b4', kind: 'tool', toolCallId: 't3', section: 'thinking', rawOffset: 6 },
-        { id: 'b5', kind: 'answer', rawText: 'Done', streaming: false },
-      ],
-    };
-
-    const { getByText, queryByText } = renderCardMessage(m);
-
-    const summary = getByText('Edited 1 file, ran 1 command, read 1 file');
-    expect(summary.getAttribute('title')).toBe('Edited 1 file, ran 1 command, read 1 file');
-    expect(getByText('· 1 failed')).not.toBeNull();
-    const duration = getByText('12s');
-    expect(summary.compareDocumentPosition(duration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(queryByText(/Worked/)).toBeNull();
-    expect(queryByText(/tool calls/)).toBeNull();
   });
 
   it('moves tools that close a prose run into the thought block that follows', () => {
@@ -845,11 +776,13 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { container, getByText } = renderTurn(m);
 
     expect(getByText('Checking first:')).not.toBeNull();
-    expect(getByText('Edited 1 file, ran 1 command, read 1 file')).not.toBeNull();
-    expect(queryByText('ran 1 command, read 1 file')).toBeNull();
+    // No tool group of its own under the prose: all three calls are the thought run's.
+    expect(container.querySelectorAll('.agent-line-run--group')).toHaveLength(0);
+    fireEvent.click(container.querySelector('.agent-line-run--thought button.agent-line')!);
+    expect(container.querySelectorAll('.agent-line-run--thought .agent-line-steps > li:not(.agent-line-steps__thought)')).toHaveLength(3);
   });
 
   it('moves tools that open a prose run into the thought block before it', () => {
@@ -870,11 +803,12 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { container, getByText } = renderTurn(m);
 
     expect(getByText('Done')).not.toBeNull();
-    expect(getByText('Ran 1 command, read 1 file')).not.toBeNull();
-    expect(queryByText('Bash npm test')).toBeNull();
+    expect(container.querySelectorAll('.agent-line-run--group')).toHaveLength(0);
+    fireEvent.click(container.querySelector('.agent-line-run--thought button.agent-line')!);
+    expect(container.querySelectorAll('.agent-line-run--thought .agent-line-steps > li:not(.agent-line-steps__thought)')).toHaveLength(2);
   });
 
   it('leaves hidden metadata tools with the prose run', () => {
@@ -891,45 +825,9 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { getByText, queryByText } = renderTurn(m);
 
     expect(getByText(/^Thoughts$/)).not.toBeNull();
-    expect(queryByText(/Worked/)).toBeNull();
-  });
-
-  it.each(['terminal', 'plain'] as const)('counts only the calls a thought block shows (%s)', (variant) => {
-    const m: ChatMessage = {
-      ...baseMsg,
-      role: 'assistant',
-      text: 'Done',
-      streaming: false,
-      toolCalls: [
-        { id: 't1', title: 'Read a.ts', kind: 'read', status: 'completed' },
-        { id: 't2', title: 'set_branch_overview', status: 'completed' },
-      ],
-      blocks: [
-        { id: 'b1', kind: 'thinking', rawText: 'Reading', streaming: false },
-        { id: 'b2', kind: 'tool', toolCallId: 't1', section: 'thinking', rawOffset: 7 },
-        { id: 'b3', kind: 'tool', toolCallId: 't2', section: 'thinking', rawOffset: 7 },
-        { id: 'b4', kind: 'answer', rawText: 'Done', streaming: false },
-      ],
-    };
-    const { container } = render(
-      <AgentBlockStyleOverride.Provider value={variant}>
-        <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
-      </AgentBlockStyleOverride.Provider>,
-    );
-    expect(container.textContent).toMatch(/1 tool(?!s)/);
-    expect(container.textContent).not.toMatch(/2 tool/);
-  });
-
-  it('keeps Thought for when a duration is known but there were no tools', () => {
-    const { getByText, queryByText } = render(
-      <AgentBlockStyleOverride.Provider value="card">
-        <TermThoughtBlock text="Just reasoning" durationMs={7_000} />
-      </AgentBlockStyleOverride.Provider>,
-    );
-    expect(getByText('Thought for 7.0s')).not.toBeNull();
     expect(queryByText(/Worked/)).toBeNull();
   });
 
@@ -944,7 +842,7 @@ describe('MessageBlock — thought activity sync', () => {
       ],
     };
 
-    const { getByText, queryByText } = renderCardMessage(m);
+    const { getByText, queryByText } = renderTurn(m);
 
     expect(getByText(/^Thoughts$/)).not.toBeNull();
     expect(queryByText(/Worked/)).toBeNull();
@@ -977,11 +875,9 @@ describe('MessageBlock — durable agent timer', () => {
     resetBackendClocksForTest();
   });
 
-  function renderCard(m: ChatMessage) {
+  function renderTurn(m: ChatMessage) {
     return render(
-      <AgentBlockStyleOverride.Provider value="card">
-        <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />
-      </AgentBlockStyleOverride.Provider>,
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts density="comfortable" />,
     );
   }
 
@@ -1007,15 +903,15 @@ describe('MessageBlock — durable agent timer', () => {
     vi.setSystemTime(100_000);
     const m = workingMessage('a-live');
 
-    const first = renderCard(m);
+    const first = renderTurn(m);
     expect(first.getByText('Working…')).not.toBeNull();
     expect(first.getByText('50s')).not.toBeNull();
     first.unmount();
 
     vi.setSystemTime(106_000);
-    const second = renderCard(m);
+    const second = renderTurn(m);
     expect(second.getByText('56s')).not.toBeNull();
-    act(() => { vi.advanceTimersByTime(1_000); });
+    act(() => { vi.advanceTimersByTime(1_010); });
     expect(second.getByText('57s')).not.toBeNull();
   });
 
@@ -1026,7 +922,7 @@ describe('MessageBlock — durable agent timer', () => {
     recordBackendObservation('a-remote', 99_000, 159_000);
     recordBackendObservation('a-remote', 100_000, 160_000);
 
-    const { getByText, queryByText } = renderCard(workingMessage('a-remote'));
+    const { getByText, queryByText } = renderTurn(workingMessage('a-remote'));
     expect(getByText('50s')).not.toBeNull();
     expect(queryByText('110s')).toBeNull();
   });
@@ -1038,128 +934,9 @@ describe('MessageBlock — durable agent timer', () => {
       { id: 'a-done-b-2', kind: 'answer', rawText: 'Here is the answer', streaming: true, startedAt: 104_000 },
     ]);
 
-    const { getByText, queryByText } = renderCard(m);
-    expect(getByText('Ran 1 command')).not.toBeNull();
+    const { container, getByText, queryByText } = renderTurn(m);
+    expect(container.querySelector('.agent-line-run[data-live]')).toBeNull();
     expect(getByText('54s')).not.toBeNull();
     expect(queryByText('Working…')).toBeNull();
-  });
-});
-
-describe('MessageBlock — thought block motion', () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  const card = (node: React.ReactNode) => <AgentBlockStyleOverride.Provider value="card">{node}</AgentBlockStyleOverride.Provider>;
-  const block = (container: HTMLElement) => container.querySelector('[data-agent-block]') as HTMLElement;
-
-  it('finishes in place: the live label leaves unannounced while the summary arrives and the body closes', async () => {
-    const view = (streaming: boolean) => card(<TermThoughtBlock text="Weighing the options" streaming={streaming} />);
-    const { getByText, queryByText, rerender } = render(view(true));
-    expect(getByText('Weighing the options')).not.toBeNull();
-
-    rerender(view(false));
-    expect(getByText(/^Thought for /)).not.toBeNull();
-    expect(getByText('Thinking…').closest('[aria-hidden="true"]')).not.toBeNull();
-    await waitFor(() => expect(queryByText('Thinking…')).toBeNull());
-    await waitFor(() => expect(queryByText('Weighing the options')).toBeNull());
-  });
-
-  it('turns one chevron and opens/closes the body, reversing when clicked mid-way', async () => {
-    const { container, getByText, queryByText } = render(card(<TermThoughtBlock text="Earlier reasoning" durationMs={2_000} />));
-    expect(queryByText('Earlier reasoning')).toBeNull();
-    const chevron = () => Array.from(container.querySelectorAll('span')).find((s) => s.textContent === '▸')!;
-    expect(container.textContent).not.toContain('▾');
-
-    fireEvent.click(getByText('Thought for 2.0s'));
-    expect(getByText('Earlier reasoning')).not.toBeNull();
-    await waitFor(() => expect(chevron().style.transform).toContain('rotate(90deg)'));
-
-    // Close, then reopen before the close finishes: the same body comes back.
-    fireEvent.click(getByText('Thought for 2.0s'));
-    fireEvent.click(getByText('Thought for 2.0s'));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(getByText('Earlier reasoning')).not.toBeNull();
-
-    fireEvent.click(getByText('Thought for 2.0s'));
-    await waitFor(() => expect(queryByText('Earlier reasoning')).toBeNull());
-    await waitFor(() => expect(chevron().style.transform).not.toContain('90deg'));
-  });
-
-  it('grows a block that arrives while its message is on screen from the dots it replaces', async () => {
-    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(28);
-    const pending: ChatMessage = { ...baseMsg, id: 'a1', role: 'assistant', text: '', streaming: true, blocks: [] };
-    const view = (m: ChatMessage) => card(
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />,
-    );
-    const { container, getByRole, queryByRole, rerender } = render(view(pending));
-    expect(getByRole('status', { name: 'loading' })).not.toBeNull();
-
-    // Every inline style the arriving block goes through.
-    const styles: string[] = [];
-    const observer = new MutationObserver((records) => {
-      for (const record of records) {
-        if ((record.target as HTMLElement).matches?.('[data-agent-block]')) styles.push(record.oldValue ?? '');
-      }
-    });
-    observer.observe(container, { subtree: true, attributes: true, attributeFilter: ['style'], attributeOldValue: true });
-    rerender(view({ ...pending, blocks: [{ id: 'a1-b-0', kind: 'thinking', rawText: 'First thought', streaming: true }] }));
-    // The leaving dots stop being a status at once.
-    expect(queryByRole('status', { name: 'loading' })).toBeNull();
-    // It starts clipped at the dots' height, then releases its height entirely.
-    await waitFor(() => expect(styles.some((style) => /height: 28px/.test(style) && /overflow: hidden/.test(style))).toBe(true));
-    await waitFor(() => expect(block(container).style.height).toBe(''));
-    expect(block(container).style.overflow).toBe('');
-    observer.disconnect();
-    await waitFor(() => expect(container.querySelector('.typing-dot')).toBeNull());
-  });
-
-  it('keeps the tail pinned while its content resizes after the render (a tool row growing in)', () => {
-    const observers: Array<{ callback: ResizeObserverCallback; targets: Element[] }> = [];
-    vi.stubGlobal('ResizeObserver', class {
-      private entry: { callback: ResizeObserverCallback; targets: Element[] };
-      constructor(callback: ResizeObserverCallback) {
-        this.entry = { callback, targets: [] };
-        observers.push(this.entry);
-      }
-      observe(target: Element) { this.entry.targets.push(target); }
-      unobserve() {}
-      disconnect() { this.entry.targets = []; }
-    });
-    let height = 300;
-    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(() => height);
-    const { getByText } = render(card(<TermThoughtBlock text="Running the tests" streaming />));
-    const tail = getByText('Running the tests').closest('div[style*="max-height"]') as HTMLElement;
-    expect(tail.scrollTop).toBe(300);
-
-    // No re-render: the content only grows (a row animating in).
-    height = 360;
-    const watcher = observers.find((o) => o.targets.some((t) => tail.contains(t) && t !== tail))!;
-    act(() => watcher.callback([], {} as ResizeObserver));
-    expect(tail.scrollTop).toBe(360);
-    vi.unstubAllGlobals();
-  });
-
-  it('leaves a body present at mount unclipped, and takes a leaving body out of reach', async () => {
-    const view = (streaming: boolean) => card(<TermThoughtBlock text="Live reasoning" streaming={streaming} />);
-    const { getByText, queryByText, rerender } = render(view(true));
-    const reveal = () => getByText('Live reasoning').closest('div[style*="max-height"]')!.parentElement as HTMLElement;
-    // Present with its block: settled, so nothing clips its focus ring.
-    expect(reveal().style.overflow).toBe('visible');
-
-    rerender(view(false));
-    expect(reveal().getAttribute('aria-hidden')).toBe('true');
-    expect(reveal().hasAttribute('inert')).toBe(true);
-    await waitFor(() => expect(queryByText('Live reasoning')).toBeNull());
-  });
-
-  it('renders blocks that were there when the message mounted settled', () => {
-    const m: ChatMessage = {
-      ...baseMsg, id: 'a1', role: 'assistant', text: '', streaming: true,
-      blocks: [{ id: 'a1-b-0', kind: 'thinking', rawText: 'Resumed thought', streaming: true }],
-    };
-    const { container } = render(card(
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" />,
-    ));
-    expect(block(container).style.height).toBe('');
-    expect(block(container).style.opacity).toBe('');
   });
 });

@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import {
   MULTI_MODEL_LIMITS,
   MULTI_MODEL_STEP_IN_FLIGHT,
@@ -11,7 +11,8 @@ import {
   type WorkflowApprovalDto,
   type WorkflowRunDtoV1,
 } from 'michi-shared';
-import { useChatNode, useOptionalChatActions } from '../../../state/chatStore';
+import { useOptionalChatActions, useStructuralSelector } from '../../../state/chatStore';
+import type { ChatNodeState } from '../../../state/chatTypes';
 import type { WorkflowPendingKind } from '../../../state/workflowDomain';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
 import { workspaceBackendApiBase } from '../../../config/backendConnections';
@@ -19,6 +20,7 @@ import { effectiveChatPermissionChoice, usePermissionPreferences } from '../../.
 import { formatMessageTime } from '../../../lib/messageTime';
 import { useNow } from '../../../hooks/useNow';
 import { cardClickOpens } from '../../../lib/cardClick';
+import { firstControlIn, useFocusAfterAction } from '../../../hooks/useFocusAfterAction';
 import {
   addendumOutcome,
   approvalForRow,
@@ -47,7 +49,7 @@ import {
   type StepState,
 } from './multiModelPresentation';
 import { ModelGlyph, MultiModelModelPicker, useReadyModels } from './MultiModelModelPicker';
-import { ColumnsIcon, ForkIcon } from '../icons';
+import { CheckIcon, ChevronRightIcon, CloseIcon, ColumnsIcon, ForkIcon, StopIcon, type IconComponent } from '../icons';
 import { useMultiModelCommands, type MultiModelCommands } from './useMultiModelCommands';
 import '../workflows/runChip.css';
 import '../workflows/WorkflowRunCard.css';
@@ -75,13 +77,21 @@ const REVIEW_BODY = 'Each branch reads the other answers and may revise its conc
 const threadLabel = (thread: Pick<MultiModelThreadView, 'runtimeLabel' | 'modelLabel'>) => `${thread.runtimeLabel} · ${thread.modelLabel}`;
 const threadPick = (thread: MultiModelThreadView): MultiModelModelPick => ({ runtimeId: thread.runtimeId, providerId: thread.providerId, modelId: thread.modelId });
 
+type CallerPermission = Pick<ChatNodeState, 'projectId' | 'permissionMode' | 'permissionApproveForMe'>;
+const sameCallerPermission = (a: CallerPermission | undefined, b: CallerPermission | undefined) => a === b
+  || (!!a && !!b && a.projectId === b.projectId && a.permissionMode === b.permissionMode && a.permissionApproveForMe === b.permissionApproveForMe);
+
 /** The caller's permission as it would run now, global setting first (the backend resolves it again at each branch's creation). */
 function LivePermissionText({ nodeId, view }: { nodeId: string; view: MultiModelRunView }) {
-  const node = useChatNode(nodeId);
-  const preferences = usePermissionPreferences(node ? workspaceBackendApiBase(node.projectId) : undefined);
+  // Structural fields only, so the caller's streaming reply leaves the line alone.
+  const caller = useStructuralSelector(useCallback((nodes: Record<string, ChatNodeState>) => {
+    const node = nodes[nodeId];
+    return node && { projectId: node.projectId, permissionMode: node.permissionMode, permissionApproveForMe: node.permissionApproveForMe };
+  }, [nodeId]), sameCallerPermission);
+  const preferences = usePermissionPreferences(caller ? workspaceBackendApiBase(caller.projectId) : undefined);
   // Until a remote backend's settings arrive, the mode it resolved for the plan.
-  if (!node || preferences.loading) return <>{permissionText(view)}</>;
-  const { mode, approveForMe } = chatPermissionChoiceParts(effectiveChatPermissionChoice(preferences, node));
+  if (!caller || preferences.loading) return <>{permissionText(view)}</>;
+  const { mode, approveForMe } = chatPermissionChoiceParts(effectiveChatPermissionChoice(preferences, caller));
   return <>{permissionText({ permissionMode: mode, approveForMe: approveForMe || undefined })}</>;
 }
 
@@ -113,6 +123,10 @@ function PlanRow({ thread, controls, pending, pickerOpen, picker, onTogglePicker
 }) {
   const [explain, setExplain] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
+  // × and Undo swap for each other once the edit lands; focus follows to whichever shows.
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const focusAfter = useFocusAfterAction(pending);
+  const edit = (change: MultiModelPlanEdit) => { focusAfter(() => toggleRef.current); onEdit(change); };
   const label = threadLabel(thread);
   if (thread.removed) {
     return (
@@ -121,7 +135,7 @@ function PlanRow({ thread, controls, pending, pickerOpen, picker, onTogglePicker
           <ModelGlyph runtimeId={thread.runtimeId} label={thread.runtimeLabel} />
           <Who thread={thread} />
           {controls && (
-            <button type="button" className="linkbtn" disabled={pending} aria-label={`Undo removing ${label}`} onClick={() => onEdit({ op: 'restore', key: thread.key })}>Undo</button>
+            <button ref={toggleRef} type="button" className="linkbtn" disabled={pending} aria-label={`Undo removing ${label}`} onClick={() => edit({ op: 'restore', key: thread.key })}>Undo</button>
           )}
         </div>
       </div>
@@ -139,7 +153,7 @@ function PlanRow({ thread, controls, pending, pickerOpen, picker, onTogglePicker
         {controls && (
           <span className="acts2">
             <button type="button" className="ibtn" title="Replace model" aria-label={`Replace ${label}`} aria-expanded={pickerOpen} data-picker-toggle disabled={pending} onClick={onTogglePicker}>⇄</button>
-            <button type="button" className="ibtn" title="Remove" aria-label={`Remove ${label}`} disabled={pending} onClick={() => onEdit({ op: 'remove', key: thread.key })}>×</button>
+            <button ref={toggleRef} type="button" className="ibtn" title="Remove" aria-label={`Remove ${label}`} disabled={pending} onClick={() => edit({ op: 'remove', key: thread.key })}><CloseIcon size="sm" /></button>
           </span>
         )}
       </div>
@@ -162,13 +176,16 @@ function PlanRow({ thread, controls, pending, pickerOpen, picker, onTogglePicker
   );
 }
 
-function PlanCard({ run, view, identity, pending, error, controls }: {
+function PlanCard({ run, view, identity, pending, error, controls, cardRef, focusAfter }: {
   run: WorkflowRunDtoV1;
   view: MultiModelRunView;
   identity: AgentResourceIdentity;
   pending?: WorkflowPendingKind;
   error?: string;
   controls: MultiModelCommands | null;
+  cardRef: React.RefObject<HTMLElement | null>;
+  /** Start and Cancel replace this card: focus goes to the pressed control while it stays, else the next card. */
+  focusAfter: (find: () => HTMLElement | null | undefined) => void;
 }) {
   const chat = useOptionalChatActions();
   const ready = useReadyModels(identity.backendConnectionId, run.workspaceId);
@@ -178,6 +195,7 @@ function PlanCard({ run, view, identity, pending, error, controls }: {
   const busy = !!pending;
   const addDisabled = busy || live.length >= MULTI_MODEL_LIMITS.threads || view.threads.length >= MULTI_MODEL_LIMITS.rows;
   const caller = { runtimeId: view.callerRuntimeId, label: view.callerRuntimeLabel };
+  const swapFocus = (pressed: HTMLElement) => focusAfter(() => (pressed.isConnected ? pressed : firstControlIn(cardRef.current)));
   const pickerFor = (target: Exclude<PickerTarget, null>) => {
     const replacing = target === 'add' ? undefined : view.threads.find((thread) => thread.key === target.key);
     return (
@@ -196,7 +214,7 @@ function PlanCard({ run, view, identity, pending, error, controls }: {
     );
   };
   return (
-    <article className="workflow-run-card mm-card is-plan" data-testid="multi-model-card" data-phase="proposed" aria-label={`Multi-model plan ${view.title}, needs you`}>
+    <article ref={cardRef} className="workflow-run-card mm-card is-plan" data-testid="multi-model-card" data-phase="proposed" aria-label={`Multi-model plan ${view.title}, needs you`}>
       <div className="top">
         <span className="eb"><span className="ic"><ForkIcon /></span>Multi-model plan</span>
         <span className="run-chip" style={{ color: RUN_CHIP_COLOR.wait.color, background: RUN_CHIP_COLOR.wait.fill }}><span className="dot" />Needs you</span>
@@ -247,10 +265,11 @@ function PlanCard({ run, view, identity, pending, error, controls }: {
       </div>
       {controls && (
         <div className="btns">
-          <button type="button" className="qbtn pri" disabled={live.length === 0 || busy} title={live.length === 0 ? 'Add a model first' : undefined} onClick={controls.start}>
+          <button type="button" className="qbtn pri" disabled={live.length === 0 || busy} title={live.length === 0 ? 'Add a model first' : undefined}
+            onClick={(event) => { swapFocus(event.currentTarget); controls.start(); }}>
             {pending === 'start' ? 'Starting…' : `Start ${branches(live.length)}`}
           </button>
-          <button type="button" className="qbtn" disabled={busy} onClick={controls.cancel}>Cancel</button>
+          <button type="button" className="qbtn" disabled={busy} onClick={(event) => { swapFocus(event.currentTarget); controls.cancel(); }}>Cancel</button>
         </div>
       )}
       {error && <div role="alert" className="alert">{error}</div>}
@@ -371,7 +390,7 @@ function ProgressRow({ run, view, thread, step, now, pending, controls, onAnswer
       <ModelGlyph runtimeId={thread.runtimeId} label={thread.runtimeLabel} />
       <Who thread={thread} />
       <span className={`st ${icon.tone}`}>
-        {icon.icon === 'dot' ? <span className={icon.tone === 'run' ? 'dot term-dot-i--run' : 'dot'} /> : icon.icon} {label}
+        {icon.icon === 'dot' ? <span className={icon.tone === 'run' ? 'dot term-dot-i--run' : 'dot'} /> : typeof icon.icon === 'string' ? icon.icon : <icon.icon size="sm" />} {label}
       </span>
       <span className="t">{elapsed === undefined ? '—' : formatDuration(elapsed)}</span>
     </>
@@ -408,11 +427,12 @@ function ProgressRow({ run, view, thread, step, now, pending, controls, onAnswer
 }
 
 const STEP_CLASS: Record<StepState, string> = { done: 'ok', running: 'run', idle: 'idle', failed: 'fail', stopped: 'stop' };
-/** A failure is a red ✕; a stop is neutral, as the rows' ■. */
-const STEP_MARK: Partial<Record<StepState, string>> = { done: '✓', failed: '✕', stopped: '■' };
+/** A failure is a red CloseIcon; a stop is neutral, as the rows' StopIcon. */
+const STEP_MARK: Partial<Record<StepState, IconComponent>> = { done: CheckIcon, failed: CloseIcon, stopped: StopIcon };
 
 function StepMark({ state, n }: { state: StepState; n: number }) {
-  return <span className={`n ${STEP_CLASS[state]}`}>{STEP_MARK[state] ?? n}</span>;
+  const Mark = STEP_MARK[state];
+  return <span className={`n ${STEP_CLASS[state]}`}>{Mark ? <Mark size="sm" /> : n}</span>;
 }
 
 function SummaryLine({ view, step }: { view: MultiModelRunView; step: number }) {
@@ -434,7 +454,7 @@ function scrollToMessage(nodeId: string, messageId: string): void {
   window.dispatchEvent(new CustomEvent('michi:scroll-to-message', { detail: { nodeId, messageId } }));
 }
 
-function ProgressCard({ run, view, identity, pending, error, controls, onAnswer, onOpenDrawer }: {
+function ProgressCard({ run, view, identity, pending, error, controls, onAnswer, onOpenDrawer, cardRef }: {
   run: WorkflowRunDtoV1;
   view: MultiModelRunView;
   identity: AgentResourceIdentity;
@@ -443,6 +463,7 @@ function ProgressCard({ run, view, identity, pending, error, controls, onAnswer,
   controls: MultiModelCommands | null;
   onAnswer?: MultiModelCommands['answer'];
   onOpenDrawer?: (focus?: DrawerFocus) => void;
+  cardRef: React.RefObject<HTMLElement | null>;
 }) {
   const chat = useOptionalChatActions();
   const ready = useReadyModels(identity.backendConnectionId, run.workspaceId);
@@ -501,7 +522,7 @@ function ProgressCard({ run, view, identity, pending, error, controls, onAnswer,
       <li key={step} className={`step ${STEP_CLASS[states[step]]}`}>
         <StepMark state={states[step]} n={step + 1} />
         <button type="button" className="sh tog" aria-expanded={isOpen} onClick={() => setStepOpen((open) => ({ ...open, [step]: !isOpen }))}>
-          {title}<span className="sub">{sub}</span><span className="chev" aria-hidden>{isOpen ? '⌃' : '⌄'}</span>
+          {title}<span className="sub">{sub}</span><span className="chev" aria-hidden><ChevronRightIcon /></span>
         </button>
         {isOpen ? (
           <div className="list2">
@@ -540,7 +561,7 @@ function ProgressCard({ run, view, identity, pending, error, controls, onAnswer,
     synthesisBody = (
       <>
         <p className="sd">
-          <span className="c-ok">✓</span>{' '}
+          <CheckIcon size="sm" className="c-ok" style={{ verticalAlign: -1 }} />{' '}
           {writtenId
             ? <button type="button" className="linkbtn" onClick={() => scrollToMessage(view.callerNodeId, writtenId)}>Written below ↓</button>
             : 'Written below'}
@@ -573,10 +594,12 @@ function ProgressCard({ run, view, identity, pending, error, controls, onAnswer,
         </div>
       )}
       <article
+        ref={cardRef}
+        tabIndex={-1}
         className={onOpenDrawer ? 'workflow-run-card workflow-run-card--opens mm-card' : 'workflow-run-card mm-card'}
         data-testid="multi-model-card"
         data-phase={view.phase}
-        // A tap here opens the drawer; it does not reveal the message's actions (MessageBlock's TAP_CONTROL).
+        // A tap here opens the drawer; it does not reveal the message's actions (index.css's touch rule for them).
         data-tap-target={onOpenDrawer ? 'true' : undefined}
         aria-label={`Multi-model ${view.title}, ${chip.label.toLowerCase()}`}
         onClick={onOpenDrawer ? (event) => { if (cardClickOpens(event)) onOpenDrawer(); } : undefined}
@@ -628,10 +651,10 @@ function ProgressCard({ run, view, identity, pending, error, controls, onAnswer,
 }
 
 /** A proposal that was cancelled or replaced before Start: one line. */
-function CancelledPlanCard({ run, view }: { run: WorkflowRunDtoV1; view: MultiModelRunView }) {
+function CancelledPlanCard({ run, view, cardRef }: { run: WorkflowRunDtoV1; view: MultiModelRunView; cardRef: React.RefObject<HTMLElement | null> }) {
   const replaced = run.statusDetail === 'Replaced by a newer plan';
   return (
-    <article className="workflow-run-card mm-card is-compact" data-testid="multi-model-card" data-phase="cancelled" aria-label={`Multi-model plan ${view.title}, ${replaced ? 'replaced' : 'cancelled'}`}>
+    <article ref={cardRef} tabIndex={-1} className="workflow-run-card mm-card is-compact" data-testid="multi-model-card" data-phase="cancelled" aria-label={`Multi-model plan ${view.title}, ${replaced ? 'replaced' : 'cancelled'}`}>
       <span className="eb"><span className="ic"><ForkIcon /></span>Multi-model plan</span>
       <h3 className="title">{view.title}</h3>
       <span className="gone">{replaced ? 'Replaced by a newer plan' : 'Plan cancelled'}</span>
@@ -650,12 +673,14 @@ export function MultiModelRunCard({ run, identity, pending, error, readOnly, onO
   onOpenDrawer?: (focus?: DrawerFocus) => void;
 }) {
   const commands = useMultiModelCommands(identity);
+  const cardRef = useRef<HTMLElement>(null);
+  const focusAfter = useFocusAfterAction(!!pending);
   const view = run.multiModel;
   if (!view) return null;
   const controls = readOnly ? null : commands;
   if (view.phase === 'proposed') {
-    return <PlanCard run={run} view={view} identity={identity} pending={pending} error={error} controls={controls} />;
+    return <PlanCard run={run} view={view} identity={identity} pending={pending} error={error} controls={controls} cardRef={cardRef} focusAfter={focusAfter} />;
   }
-  if (view.phase === 'cancelled' && view.startedAt === undefined) return <CancelledPlanCard run={run} view={view} />;
-  return <ProgressCard run={run} view={view} identity={identity} pending={pending} error={error} controls={controls} onAnswer={commands?.answer} onOpenDrawer={onOpenDrawer} />;
+  if (view.phase === 'cancelled' && view.startedAt === undefined) return <CancelledPlanCard run={run} view={view} cardRef={cardRef} />;
+  return <ProgressCard run={run} view={view} identity={identity} pending={pending} error={error} controls={controls} onAnswer={commands?.answer} onOpenDrawer={onOpenDrawer} cardRef={cardRef} />;
 }

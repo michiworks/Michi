@@ -1,6 +1,6 @@
 # Phone access with Tailscale
 
-Open Settings → General → Phone access to use this machine's Michi from your
+Open Settings → Machines → Phone access to use this machine's Michi from your
 phone. You can also select a saved remote machine. Chats, agents and files
 continue to live on the selected machine.
 

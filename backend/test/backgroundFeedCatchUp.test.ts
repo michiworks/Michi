@@ -7,6 +7,8 @@ import { after, before, describe, test } from 'node:test';
 import express from 'express';
 import { NO_APPLIED_TURN_CURSOR } from 'michi-shared';
 import { chatHub } from '../src/agents/chatHub';
+import { trackSessionState, untrackSessionState } from '../src/agents/sessionStateFeed';
+import type { AgentSession } from '../src/agents/types';
 import { setupMichiRoutes } from '../src/routes/michi';
 import type { ChatManager } from '../src/services/chatManager';
 import { closeDb, initDb } from '../src/services/db';
@@ -77,6 +79,35 @@ test('the background feed keeps a multi-megabyte opening replay over a real sock
   const { frames, ended } = await readFrames(response, (read) => chunks(read) === 100);
   assert.equal(ended, false, 'the subscription is still open');
   assert.equal(chunks(frames), 100, 'every replayed frame arrived');
+});
+
+test('the feed sends each session\'s state without prompts or skill descriptions', async (t) => {
+  const session = {
+    id: 'n-state', runtimeId: 'claude', getHistory: () => [], getPendingAssistant: () => undefined,
+    send: () => { throw new Error('not sent'); }, cancel: () => {},
+    getSessionState: () => ({ runtimeId: 'claude', modelId: 'opus', commands: [
+      { name: 'status', description: 'Show the session', kind: 'command' },
+      { name: 'review', description: 'Review a change in depth', kind: 'skill', argumentHint: '<pr>' },
+      { name: 'notes', description: 'A saved prompt', kind: 'prompt' },
+    ] }),
+  } as AgentSession;
+  trackSessionState(session, null);
+  t.after(() => untrackSessionState('n-state'));
+  const base = await listen(t);
+  const response = await fetch(`${base}/chats/background/subscribe`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cursors: {} }),
+  });
+  const isState = (frame: string) => frame.startsWith('event: session_state\n') && frame.includes('"n-state"');
+  const { frames } = await readFrames(response, (read) => read.some(isState));
+  const data = JSON.parse(frames.find(isState)!.split('\ndata: ')[1]);
+  assert.deepEqual(data, {
+    runtimeId: 'claude', modelId: 'opus', nodeId: 'n-state', chatId: 'n-state',
+    commands: [
+      { name: 'status', description: 'Show the session', kind: 'command' },
+      { name: 'review', kind: 'skill', argumentHint: '<pr>' },
+    ],
+  });
+  assert.equal(session.getSessionState!().commands?.length, 3, 'in-process subscribers keep the whole state');
 });
 
 test('a no-applied-turn cursor is answered with a gap when SQLite holds a turn', () => {

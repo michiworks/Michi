@@ -17,7 +17,7 @@ const SRC = join(__dirname, '..', 'src');
 
 /** The shared modules runtime/src imports names from. */
 const RUNTIME_IMPORTS = [
-  'agentRuns', 'chatPermissions', 'chatStreamEvents', 'crew', 'harness', 'kiroSteering',
+  'agentRuns', 'chatPermissions', 'chatStreamEvents', 'crew', 'formField', 'harness', 'kiroSteering',
   'reasoning', 'runtimeContracts', 'sessionState', 'skills', 'subagents', 'toolPurpose', 'workflowRuns',
 ];
 

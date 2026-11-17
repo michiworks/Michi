@@ -5,4 +5,25 @@
 .desk-form-foot,.desk-poll-foot{display:flex;align-items:center;margin-top:2px}
 
 .desk-poll-options{display:flex;flex-direction:column;gap:10px}
+/* Michi: on touch each choice's target reaches 12px past its row (michiMantine.css), so the rows part by 24px and the targets meet without overlapping (ST-21). */
+@media (hover:none) and (pointer:coarse){.desk-poll-options{gap:24px}}
 .desk-poll-foot{margin-top:14px}
+
+/* Michi: a submitted block keeps its controls, disabled, inside this; the note says when it was sent. */
+.desk-submission-lock{border:0;margin:0;padding:0;min-width:0}
+.desk-submitted{margin:0;font-size:var(--fs-xs,13px);color:var(--term-muted)}
+.desk-submit-failed{margin:8px 0 0;font-size:var(--fs-xs,13px);color:var(--term-danger-text)}
+/* A record of what was sent stays readable: the answers keep the text colour, only the controls show they are locked. */
+.desk-submission-lock:disabled .mantine-Input-input{opacity:1;color:var(--term-fg);cursor:default}
+.desk-submission-lock:disabled :is(.mantine-Radio-label,.mantine-Checkbox-label){color:var(--term-fg);cursor:default}
+/* Michi: a submitted form's answers, as text (ST-31). */
+.desk-form-answers{margin:0 0 10px;display:grid;grid-template-columns:minmax(0,max-content) minmax(0,1fr);gap:6px 16px;font-size:var(--fs-md,14px)}
+.desk-form-answer{display:contents}
+.desk-form-answer dt{color:var(--term-muted)}
+.desk-form-answer dd{margin:0;color:var(--term-fg);white-space:pre-wrap;overflow-wrap:anywhere}
+/* Michi: what a press sends in the user's name, where it sends at once (a chat reply). */
+.desk-sends{margin:-4px 0 12px;font-size:var(--fs-sm,13px);color:var(--term-muted);overflow-wrap:anywhere}
+.desk-sends-list{margin:8px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:var(--fs-sm,13px);color:var(--term-muted);overflow-wrap:anywhere}
+.desk-sends-list b{font-weight:500;color:var(--term-mid)}
+.desk-actions-answer{margin:0 0 4px;display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-md,14px);color:var(--term-fg)}
+.desk-actions-answer svg{color:var(--term-mid)}

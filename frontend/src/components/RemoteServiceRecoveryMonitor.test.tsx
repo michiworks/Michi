@@ -1,9 +1,9 @@
-import { act, render } from '@testing-library/react';
+import { act, render, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RemoteServiceRecoveryMonitor } from './RemoteServiceRecoveryMonitor';
 import { setKnownBackendConnections } from '../config/backendConnections';
 import { clearRemoteRecoveryIssue, getRemoteRecoveryIssues, REMOTE_WORKSPACE_RETRY_EVENT, reportRemoteRecoveryFailure } from '../state/remoteRecovery';
-import { closeRemoteAuthentication, completeRemoteAuthentication, getRemoteAuthentication } from '../state/remoteAuthentication';
+import { closeRemoteAuthentication, completeRemoteAuthentication, getRemoteAuthentication, usePendingRemoteAuthentications } from '../state/remoteAuthentication';
 import { formatRemoteDiagnostic } from 'michi-shared';
 import { RemoteServiceRecoveryError } from '../services/api/remoteRecovery';
 
@@ -31,7 +31,9 @@ it('retains failure diagnostics and clears a post-hydration issue only after met
   const view = render(<RemoteServiceRecoveryMonitor />);
   await act(async () => {});
   expect(getRemoteRecoveryIssues()[0].diagnostic.log).toContain('Actual SSH startup output');
-  expect(getRemoteAuthentication()?.target.scope).toBe('remote'); closeRemoteAuthentication();
+  // A poll never opens the sign-in dialog: the request waits in the notice corner.
+  expect(getRemoteAuthentication()).toBeNull();
+  expect(renderHook(() => usePendingRemoteAuthentications()).result.current.map(item => item.target.scope)).toEqual(['remote']);
   await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
   expect(getRemoteRecoveryIssues()).toHaveLength(1);
   expect(mocks.metadata).toHaveBeenCalledWith(connection.id, expect.any(AbortSignal));

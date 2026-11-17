@@ -128,15 +128,16 @@ function setup(request: OpenBackgroundWorkDetail, initialRuns: WorkflowRunDtoV1[
     }),
   };
   const onClose = vi.fn();
+  const closeAtOnce = vi.fn();
   const ui = (detail: OpenBackgroundWorkDetail, seq: number) => (
     <ChatNodeStoreContext.Provider value={store.value}>
       <WorkflowDomainProvider api={api}>
-        <BackgroundWorkDrawer open motion="instant" onClose={onClose} request={detail} requestSeq={seq} />
+        <BackgroundWorkDrawer open motion="instant" onClose={onClose} closeAtOnce={closeAtOnce} request={detail} requestSeq={seq} />
       </WorkflowDomainProvider>
     </ChatNodeStoreContext.Provider>
   );
   const result = render(ui(request, 1));
-  return { ...result, store, api, handlers, onClose, reopen: (detail: OpenBackgroundWorkDetail, seq: number) => result.rerender(ui(detail, seq)) };
+  return { ...result, store, api, handlers, onClose, closeAtOnce, reopen: (detail: OpenBackgroundWorkDetail, seq: number) => result.rerender(ui(detail, seq)) };
 }
 
 const scrollIntoView = vi.fn();
@@ -339,7 +340,7 @@ describe('BackgroundWorkDrawer', () => {
     expect(workflow.getAttribute('data-active')).toBeNull();
     expect(within(workflow).getByTestId('workflow-result').textContent).toContain('All read.');
     // The chat card's word for it: Done, with a check.
-    expect(within(workflow).getByTestId('background-workflow-status').textContent).toMatch(/^✓Done/);
+    expect(within(workflow).getByTestId('background-workflow-status').textContent).toMatch(/^Done/);
     expect(workflow.getAttribute('aria-label')).toMatch(/, done$/);
     expect(workflowToggle().getAttribute('aria-expanded')).toBe('true');
     expect(within(workflow).getByTestId('background-workflow-agents')).toBeTruthy();
@@ -351,6 +352,55 @@ describe('BackgroundWorkDrawer', () => {
     reopen({ nodeId: 'root' }, 2);
     expect(rowIds()).toEqual(['latest-running', 'latest-done']);
     expect(screen.queryByTestId('background-workflow-row')).toBeNull();
+  });
+
+  it('mounts the cards past the first screen as they scroll into view, and reads a summary whole once its card is on screen', async () => {
+    // jsdom has no viewport: the test says when an element is on screen.
+    const watched = new Map<Element, IntersectionObserverCallback>();
+    const original = globalThis.IntersectionObserver;
+    globalThis.IntersectionObserver = class {
+      readonly root = null;
+      readonly rootMargin = '0px';
+      readonly thresholds = [0];
+      constructor(private readonly callback: IntersectionObserverCallback) {}
+      observe(target: Element) { watched.set(target, this.callback); }
+      unobserve(target: Element) { watched.delete(target); }
+      disconnect() { for (const [target, callback] of watched) if (callback === this.callback) watched.delete(target); }
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+    } as unknown as typeof IntersectionObserver;
+    const show = (target: Element) => act(() => watched.get(target)?.([{ target, isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver));
+    try {
+      const calls = Array.from({ length: 6 }, (_, i) => `tool-wf${i}`);
+      const latest = nodes();
+      latest.root = chat('root', 'Root chat', latest.root.messages.map((message) => (message.id === 'a2'
+        ? { ...message, toolCalls: calls.map((id) => ({ id, title: 'Workflow', status: 'completed' as const })) }
+        : message)), { status: 'streaming' });
+      const whole = (i: number) => run({ id: `wfr_${i}`, nativeId: `wf_${i}`, name: `probe-${i}`, parentToolCallId: calls[i], status: 'completed', actions: [], nodes: [], startedAt: 100 + i, endedAt: 200, result: JSON.stringify({ docs: [{ file: `doc-${i}.md`, rules: i }] }) });
+      // The snapshot's summaries: a preview that leaves the doc out.
+      const { api, reopen } = setup({ nodeId: 'root' }, calls.map((_, i) => ({ ...whole(i), partial: true as const, result: '{"docs":["… 1 more"]}' })), latest);
+      vi.mocked(api.get).mockImplementation(async (_backend, id) => whole(Number(id.split('_')[1])));
+      const cards = () => screen.getAllByTestId('background-workflow-row');
+      expect(cards().map((card) => card.getAttribute('aria-label'))).toEqual([0, 1, 2, 3].map((i) => `Workflow probe-${i}, done`));
+      const placeholders = screen.getAllByTestId('background-workflow-placeholder');
+      expect(placeholders.map((placeholder) => placeholder.textContent)).toEqual(['Workflow · Kiro CLIProbe 4', 'Workflow · Kiro CLIProbe 5']);
+
+      // A summary says what it leaves out is still there, then shows it once on screen.
+      expect(within(cards()[0]).getByTestId('result-omitted').textContent).toBe('⋯ 1 more');
+      await act(async () => { show(cards()[0]); });
+      expect(api.get).toHaveBeenCalledTimes(1);
+      expect(api.get).toHaveBeenCalledWith('local', 'wfr_0');
+      expect(within(cards()[0]).getByTestId('result-value').textContent).toContain('doc-0.md');
+
+      // A placeholder that scrolls into view mounts its card for good.
+      show(placeholders[0]);
+      expect(cards()).toHaveLength(5);
+      // Opened on the last card, every card above it mounts at once.
+      reopen({ nodeId: 'root', focus: { kind: 'workflow', runKey: JSON.stringify(['local', 'wfr_5']) } }, 2);
+      expect(cards()).toHaveLength(6);
+      expect(screen.queryByTestId('background-workflow-placeholder')).toBeNull();
+    } finally {
+      globalThis.IntersectionObserver = original;
+    }
   });
 
   it('keeps finished earlier-turn work listed across a scope switch', () => {
@@ -649,9 +699,9 @@ describe('BackgroundWorkDrawer', () => {
       });
     }
 
-    it('is a multi-model card, opened on the row the card was clicked at, whose pane actions close the drawer', () => {
+    it('is a multi-model card, opened on the row the card was clicked at, whose pane actions close the drawer at once', () => {
       project.actions = { revealNode: vi.fn(() => true), openPanesSideBySide: vi.fn() };
-      const { onClose } = setup({ nodeId: 'root', focus: { kind: 'workflow', runKey, threadKey: 't2', step: 0 } }, [planRun()]);
+      const { onClose, closeAtOnce } = setup({ nodeId: 'root', focus: { kind: 'workflow', runKey, threadKey: 't2', step: 0 } }, [planRun()]);
       const card = screen.getByTestId('background-workflow-row');
       expect(card.textContent).toContain('Multi-model · 2 branches');
       expect(card.getAttribute('data-background-work-key')).toBe(JSON.stringify(['root', 'workflow', runKey]));
@@ -661,10 +711,11 @@ describe('BackgroundWorkDrawer', () => {
 
       fireEvent.click(within(rows[1]).getByRole('button', { name: 'Open branch →' }));
       expect(project.actions.revealNode).toHaveBeenCalledWith('child', { messageId: undefined });
-      expect(onClose).toHaveBeenCalledTimes(1);
+      expect(closeAtOnce).toHaveBeenCalledTimes(1);
       fireEvent.click(within(card).getByRole('button', { name: 'Side by side' }));
       expect(project.actions.openPanesSideBySide).toHaveBeenCalledWith('root', ['child', 'child']);
-      expect(onClose).toHaveBeenCalledTimes(2);
+      expect(closeAtOnce).toHaveBeenCalledTimes(2);
+      expect(onClose).not.toHaveBeenCalled();
     });
 
     it('closes the Replace model picker on Escape without closing the drawer', async () => {
@@ -759,7 +810,7 @@ describe('BackgroundWorkDrawer', () => {
       expect(within(card()).getByTestId('background-workflow-title').getAttribute('title')).toBe('claude-runtime-ultracode-feasibility');
       expect(card().textContent).toContain('Investigate session-level Ultracode, then verify each slice');
       expect(within(card()).getAllByTestId('background-workflow-phase').map((phase) => [phase.textContent, phase.getAttribute('data-phase-state')]))
-        .toEqual([['1Investigate1/3 · 10m 1s▾', 'running'], ['2Verifyqueued', 'queued']]);
+        .toEqual([['1Investigate1/3 · 10m 1s›', 'running'], ['2Verifyqueued', 'queued']]);
       // A failure while the run goes on is said on the card, not only on its line.
       expect(card().textContent).toContain('× 1 agent failed');
       expect(card().textContent).toContain('risks · 429 rate_limit_error');
@@ -806,7 +857,19 @@ describe('BackgroundWorkDrawer', () => {
       expect(detail.textContent).toContain('Read probe.log');
     });
 
-    it('keeps a JSON result off its row and shows it indented in the detail, cut short as Claude previews it', () => {
+    it('lays out a JSON result by its shape, with the stored text behind JSON', () => {
+      setup({ nodeId: 'root', focus: { kind: 'workflow', runKey } }, [claudeRun({ status: 'completed', actions: [], result: '{"docs": [{"file": "/tmp/out/tokens.md", "rules": 34}, {"file": "/tmp/out/mot…' })]);
+      const result = within(card()).getByTestId('workflow-result');
+      expect(within(result).getAllByRole('row').map((row) => row.textContent)).toEqual(['FileRules', '/tmp/out/tokens.md34', '/tmp/out/mot…—']);
+      expect(within(result).getByTestId('result-cut').textContent).toContain('The run keeps the first 32,000 characters of its result.');
+      const toggle = within(card()).getByRole('button', { name: 'JSON' });
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute('aria-pressed')).toBe('true');
+      expect(within(result).queryByTestId('result-value')).toBeNull();
+      expect(result.textContent).toContain('"rules": 34');
+    });
+
+    it('keeps a JSON result off its row and lays it out in the detail, cut short as Claude previews it', () => {
       setup({ nodeId: 'root', focus: { kind: 'workflow', runKey } }, [claudeRun({
         nodes: [
           { id: 'phase:0', kind: 'phase', title: 'Integrate', status: 'running' },
@@ -818,8 +881,10 @@ describe('BackgroundWorkDrawer', () => {
       expect(row.getAttribute('aria-label')).toBe('frontend, done');
       expect(leaf('agent:1').textContent).not.toContain('{');
       fireEvent.click(row);
-      expect(within(leaf('agent:1')).getByTestId('workflow-node-detail').querySelector('pre')?.textContent)
-        .toBe('{\n  "area": "frontend",\n  "changed": [\n    {\n      "path": "a.ts",\n      "why": "Item {1}, in …');
+      const value = within(within(leaf('agent:1')).getByTestId('workflow-node-detail')).getByTestId('result-value');
+      expect(value.textContent).toMatch(/^frontendChanged · 1\+a\.ts/);
+      expect(within(value).getByText('Why').nextElementSibling?.textContent).toBe('Item {1}, in …');
+      expect(within(value).getByTestId('result-cut').textContent).toContain("Claude shares a preview of each agent's result.");
     });
 
     it("gives a phase's one agent, named as the phase, its line alone", () => {

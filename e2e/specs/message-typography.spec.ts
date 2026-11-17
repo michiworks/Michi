@@ -112,7 +112,7 @@ test('streamed blocks keep the same gaps when the answer settles', async ({ page
       return originalFetch(input, init);
     };
   });
-  await bootTypography(page, { terminalDensity: 'compact', terminalPalette: 'bone' });
+  await bootTypography(page, { terminalPalette: 'bone' });
   await page.locator('[contenteditable="true"]').first().fill('请展示排版');
   await page.getByRole('button', { name: 'Send (Enter)', exact: true }).click();
   await expect.poll(() => page.evaluate(() => !!window.typographyStream)).toBe(true);

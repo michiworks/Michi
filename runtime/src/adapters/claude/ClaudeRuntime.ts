@@ -11,6 +11,7 @@ import type {
   AgentSession,
   ForkAgentSessionOptions,
   GenerateTitleOptions,
+  IdleReleaseVerdict,
   ListRuntimeSkillsOptions,
   LoadAgentSessionOptions,
   ModelInfo,
@@ -275,6 +276,10 @@ export class ClaudeRuntime implements AgentRuntime {
         cwd: opts.cwd, sourceNativeSessionId: opts.sourceNativeSessionId,
         nativeMessageId, ownerUserId: opts.ownerUserId,
       });
+      // After the copy: the SDK stamps its last entry with the fork's time.
+      this.host.bindings.forkAnchors.saveClaudeForkBoundary({
+        nodeId: opts.sessionId, nativeSessionId: forkId, boundaryAt: new Date().toISOString(),
+      });
       return this.createSession({ ...opts, branchContext: undefined }, undefined, forkId);
     }
     const file = getClaudeJsonlPath(this.options, opts.cwd, opts.sourceNativeSessionId, opts.ownerUserId);
@@ -418,6 +423,19 @@ export class ClaudeRuntime implements AgentRuntime {
 
   async releaseSession(sessionId: string, expectedOwner?: RuntimeSessionOwner): Promise<void> {
     await this.manager.releaseSession(sessionId, expectedOwner);
+  }
+
+  /**
+   * AgentRuntime contract: an idle chat's CLI may go once nothing has used
+   * it for limits.sessionIdleTtlMs and nothing runs in it: no turn, open
+   * question or approval, queued steer, or background agent, workflow,
+   * shell or Monitor. Releasing it keeps the node's native binding, so the
+   * next message resumes the session. Background work is never stopped for
+   * this: its session stays until the work ends or the concurrency cap
+   * reclaims it (BACKGROUND_RECLAIM_PROTECT_MS).
+   */
+  idleRelease(sessionId: string, now: number): IdleReleaseVerdict {
+    return this.manager.idleRelease(sessionId, now);
   }
 
   /**

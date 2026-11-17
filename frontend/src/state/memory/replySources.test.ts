@@ -24,7 +24,6 @@ import { readReplySources, refreshReplySources, removeReplySource, requestReplyS
 const LOCAL = { apiBase: API_BASE_URL, nodeId: 'n-1' };
 const REMOTE = { apiBase: `${API_BASE_URL}/backend-connections/r-1/proxy`, nodeId: 'n-9' };
 const memory = (id: string): ReplyMemorySource => ({ kind: 'memory', memoryId: id, text: id, savedBy: 'michi', at: 1, from: null });
-const chat = (docId: number): ReplyMemorySource => ({ kind: 'conversation', docId, text: 'x', at: 1, from: { nodeId: 'n-2', messageId: null, title: null } });
 
 function answerWith(byMessage: Record<string, ReplyMemorySource[]>) {
   api.fetchReplyMemorySources.mockImplementation(async (_apiBase: string, _nodeId: string, ids: string[]) => ({
@@ -51,7 +50,7 @@ afterEach(() => vi.useRealTimers());
 
 describe('reply sources store', () => {
   it('asks once for the replies of a conversation that ask together, and caches every answer, an empty one too', async () => {
-    answerWith({ 'a-1': [memory('mem-1')], 'a-2': [chat(7)] });
+    answerWith({ 'a-1': [memory('mem-1')], 'a-2': [memory('mem-2')] });
     for (const id of ['a-1', 'a-2', 'a-3', 'a-1']) requestReplySources(LOCAL, id);
     await settle();
     expect(api.fetchReplyMemorySources).toHaveBeenCalledTimes(1);
@@ -80,37 +79,37 @@ describe('reply sources store', () => {
     expect(readReplySources({ ...LOCAL, nodeId: 'n-new' }, 'a-1')).toEqual([]);
   });
 
-  it('this machine\'s change feed: a deleted memory leaves every answer, its past chats stay; an updated or put-away one asks again; a created one changes nothing', async () => {
-    answerWith({ 'a-1': [memory('mem-1'), chat(7)], 'a-2': [memory('mem-1')], 'a-3': [memory('mem-2')], 'a-4': [memory('mem-3')] });
+  it('this machine\'s change feed: a deleted memory leaves every answer, the rest stays; an updated or put-away one asks again; a created one changes nothing', async () => {
+    answerWith({ 'a-1': [memory('mem-1'), memory('mem-4')], 'a-2': [memory('mem-1')], 'a-3': [memory('mem-2')], 'a-4': [memory('mem-3')] });
     for (const id of ['a-1', 'a-2', 'a-3', 'a-4']) requestReplySources(LOCAL, id);
     requestReplySources(REMOTE, 'a-1');
     await settle();
     const told = vi.fn();
     subscribeReplySources(LOCAL, 'a-2', told);
     for (const listener of feeds.changed) listener(event('mem-1', 'deleted'));
-    // Deleting a memory leaves chat history as it is: an answer's past chats stay without asking again.
-    expect(readReplySources(LOCAL, 'a-1')).toEqual([chat(7)]);
+    // The answer's other memories stay without asking again.
+    expect(readReplySources(LOCAL, 'a-1')).toEqual([memory('mem-4')]);
     expect(readReplySources(LOCAL, 'a-2')).toEqual([]);
     expect(told).toHaveBeenCalled();
     // Another backend's memories are not this machine's: its answer stays as it was.
-    expect(readReplySources(REMOTE, 'a-1')).toEqual([memory('mem-1'), chat(7)]);
+    expect(readReplySources(REMOTE, 'a-1')).toEqual([memory('mem-1'), memory('mem-4')]);
     // An answer asked again never brings the deleted memory back.
     requestReplySources(LOCAL, 'a-1');
     await settle();
-    expect(readReplySources(LOCAL, 'a-1')).toEqual([chat(7)]);
+    expect(readReplySources(LOCAL, 'a-1')).toEqual([memory('mem-4')]);
     for (const listener of feeds.changed) listener(event('mem-2', 'superseded'));
     expect(readReplySources(LOCAL, 'a-3')).toBeUndefined();
     for (const listener of feeds.changed) listener(event('mem-9', 'created'));
     expect(readReplySources(LOCAL, 'a-4')).toEqual([memory('mem-3')]);
   });
 
-  it('a past chat no longer recalled leaves every answer of that backend; opening asks again', async () => {
-    const fromN2 = chat(7);
-    answerWith({ 'a-1': [fromN2], 'a-2': [fromN2, memory('mem-1')] });
+  it('a memory forgotten from a footer leaves every answer of that backend; opening asks again', async () => {
+    const forgotten = memory('mem-7');
+    answerWith({ 'a-1': [forgotten], 'a-2': [forgotten, memory('mem-1')] });
     requestReplySources(LOCAL, 'a-1');
     requestReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2');
     await settle();
-    removeReplySource(LOCAL, 'a-1', fromN2);
+    removeReplySource(LOCAL, 'a-1', forgotten);
     expect(readReplySources(LOCAL, 'a-1')).toEqual([]);
     // The other conversation's reply too.
     expect(readReplySources({ ...LOCAL, nodeId: 'n-5' }, 'a-2')).toEqual([memory('mem-1')]);
@@ -124,13 +123,12 @@ describe('reply sources store', () => {
   });
 
   it('memory turned on or off drops what was cached; the footer\'s own removal is at once', async () => {
-    answerWith({ 'a-1': [memory('mem-1'), chat(7)], 'a-2': [memory('mem-1')] });
+    answerWith({ 'a-1': [memory('mem-1'), memory('mem-4')], 'a-2': [memory('mem-1')] });
     requestReplySources(LOCAL, 'a-1');
     requestReplySources(LOCAL, 'a-2');
     await settle();
-    removeReplySource(LOCAL, 'a-1', chat(7));
-    expect(readReplySources(LOCAL, 'a-1')).toEqual([memory('mem-1')]);
     removeReplySource(LOCAL, 'a-1', memory('mem-1'));
+    expect(readReplySources(LOCAL, 'a-1')).toEqual([memory('mem-4')]);
     // A forgotten memory leaves the conversation's other replies too.
     expect(readReplySources(LOCAL, 'a-2')).toEqual([]);
     for (const listener of feeds.on) listener(API_BASE_URL, false);

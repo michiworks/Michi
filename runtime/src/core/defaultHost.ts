@@ -87,6 +87,8 @@ export interface DefaultHostOptions {
   workflows?: boolean | ((runtimeId: string, userId?: string | null) => boolean);
   /** A chat's Ultracode choice (RuntimeConfigPort.features.ultracode); default off. */
   ultracode?: boolean | ((owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null) => boolean);
+  /** A chat's speed tier (RuntimeConfigPort.features.serviceTier); default none. */
+  serviceTier?: (owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null) => string | null | undefined;
   /** Chat permission mode; default 'ask'. */
   permissionMode?: ChatPermissionMode | ((owner: RuntimeSessionOwner | undefined, ownerUserId?: string | null) => ChatPermissionMode);
   /** Approve for me on top of Ask (PermissionPolicyPort.approveForMe); default off. */
@@ -188,6 +190,7 @@ function defaultConfig(options: DefaultHostOptions): RuntimeConfigPort {
     features: {
       workflows: (runtimeId, userId) => typeof workflows === 'function' ? workflows(runtimeId, userId) : workflows === true,
       ultracode: (owner, ownerUserId) => typeof ultracode === 'function' ? ultracode(owner, ownerUserId) : ultracode === true,
+      ...(options.serviceTier ? { serviceTier: options.serviceTier } : {}),
     },
     dataDir: () => options.dataDir ?? path.join(os.homedir(), '.agent-runtime'),
   };
@@ -317,11 +320,15 @@ function defaultBindings(host: RuntimeHost, options: DefaultHostOptions): Native
 function memoryForkAnchors(host: RuntimeHost): ForkAnchorStore {
   const kiro = new Map<string, KiroForkAnchor>();
   const claude = new Map<string, string>();
+  const claudeBoundaries = new Map<string, string>();
   const key = (...parts: string[]) => parts.join('\u0000');
-  const boundChat = (nodeId: string, nativeSessionId: string): HostNodeRecord | null => {
+  const liveChat = (nodeId: string): HostNodeRecord | null => {
     const node = host.bindings.nodeBinding(nodeId);
-    if (!node || node.kind !== 'chat' || node.deleted_at || node.purged_at) return null;
-    return (node.external_session_id ?? node.acp_session_id) === nativeSessionId ? node : null;
+    return node && node.kind === 'chat' && !node.deleted_at && !node.purged_at ? node : null;
+  };
+  const boundChat = (nodeId: string, nativeSessionId: string): HostNodeRecord | null => {
+    const node = liveChat(nodeId);
+    return node && (node.external_session_id ?? node.acp_session_id) === nativeSessionId ? node : null;
   };
   return {
     saveKiroForkAnchor: (input) => {
@@ -353,6 +360,11 @@ function memoryForkAnchors(host: RuntimeHost): ForkAnchorStore {
       if (!host.principal.workspaceOwnerMatches(workspace.owner_user_id ?? null, principal)) return null;
       return nativeMessageId ?? null;
     },
+    saveClaudeForkBoundary: (input) => {
+      if (liveChat(input.nodeId)) claudeBoundaries.set(key(input.nodeId, input.nativeSessionId), input.boundaryAt);
+    },
+    readClaudeForkBoundary: (nodeId, nativeSessionId) =>
+      (liveChat(nodeId) && claudeBoundaries.get(key(nodeId, nativeSessionId))) || null,
   };
 }
 

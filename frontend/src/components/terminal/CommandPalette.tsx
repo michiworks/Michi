@@ -5,7 +5,7 @@ import { threadDisplayTitle } from '../../state/displayTitle';
 import { buildCommands, filterCommands, matchRange, selectRecentThreads, startNewCompanionConversation, Command, CommandGroup, PageId, type CompanionCommands } from '../../state/commands';
 import { addToHomeDraft } from '../../state/homeDraft';
 import { useNodeSearch } from '../../state/useNodeSearch';
-import { type NodeGroupedResult } from '../../services/api';
+import { type NodeGroupedResult, type NodeGroupedSnippet } from '../../services/api';
 import { relativeTime } from '../../lib/relativeTime';
 import { requestDigest } from '../../lib/digestPrompt';
 import { usePrefs } from '../../state/prefs';
@@ -14,6 +14,7 @@ import { MenuItem } from '../ui/Popover';
 import { kbd } from '../../lib/platform';
 import { TreePrefetchContext, TREE_PREFETCH_INTENT_MS } from '../../state/treePrefetch';
 import { CommandIconGlyph } from './commandIcons';
+import { RetryIcon, SearchIcon } from './icons';
 import { isSystemWorkspace, systemWorkspaceIds, withoutSystemWorkspaces } from '../../state/assistant/systemWorkspace';
 import { adoptCompanionSnapshot, useCompanion, useCompanionAssistant } from '../../state/companion/companionStore';
 import { openCompanionPanel } from '../../state/companion/companionPanel';
@@ -157,11 +158,9 @@ function renderHtmlSnippet(html: string): React.ReactNode {
   return parts;
 }
 
-// Multi-line menu row: breadcrumb line stacked over its snippets.
+// A message result's own row: its breadcrumb and time. Its snippets follow
+// as rows of their own (.palette-snippet).
 const NODE_ROW_STYLE: React.CSSProperties = {
-  flexDirection: 'column',
-  alignItems: 'stretch',
-  gap: 5,
   fontWeight: 400,
 };
 
@@ -184,28 +183,20 @@ const NODE_TIME_STYLE: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
-const SNIPPET_ROW_STYLE: React.CSSProperties = {
-  fontSize: 'var(--fs-sm)',
-  lineHeight: '1.55',
-  color: 'var(--term-mid)',
-  padding: '2px 0',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-};
-
 const SNIPPET_ROLE_STYLE: React.CSSProperties = {
   color: 'var(--term-muted)',
-  fontSize: 'var(--fs-2xs)',
-  marginRight: 4,
+  flexShrink: 0,
 };
 
 const OVERFLOW_HINT_STYLE: React.CSSProperties = {
   fontSize: 'var(--fs-xs)',
   color: 'var(--term-muted)',
-  padding: '2px 0 0 0',
+  padding: '2px var(--m-rowX) 4px',
   fontStyle: 'italic',
 };
+
+/** A row of the message results: a result itself, or one of its snippets. */
+type MessageRow = { result: NodeGroupedResult; snippet?: NodeGroupedSnippet };
 
 export function openWorkspaceFromPalette(
   projectId: string,
@@ -283,13 +274,28 @@ export default function CommandPalette({
   // Every backend whose workspaces this window shows is asked, the remote
   // ones only while connected (useNodeSearch).
   const searchBackends = useMemo(() => projects.map((p) => backendConnectionIdForWorkspace(p.id)), [projects]);
-  const nodeSearch = useNodeSearch(debouncedQuery, searchBackends);
+  const [searchAttempt, setSearchAttempt] = useState(0);
+  const retrySearch = useCallback(() => setSearchAttempt((attempt) => attempt + 1), []);
+  const nodeSearch = useNodeSearch(debouncedQuery, searchBackends, searchAttempt);
   const nodeResults = useMemo(
     () => nodeSearch.nodes.filter((r) => !hiddenWorkspaceIds.has(r.workspaceId) && isVisibleConversationNode(nodesSnapshot[r.nodeId])),
     [nodeSearch.nodes, hiddenWorkspaceIds, nodesSnapshot],
   );
 
-  /** Navigate to a node-grouped search result (goes to the node, not a specific message). */
+  // ↑/↓ reach every match: a result's own row opens its node, and each of
+  // its snippets is a row of its own that opens that message.
+  const { messageRows, resultRowStart } = useMemo(() => {
+    const rows: MessageRow[] = [];
+    const starts: number[] = [];
+    for (const result of nodeResults) {
+      starts.push(rows.length);
+      rows.push({ result });
+      for (const snippet of result.snippets) rows.push({ result, snippet });
+    }
+    return { messageRows: rows, resultRowStart: starts };
+  }, [nodeResults]);
+
+  /** Navigate to a node-grouped search result: its node, or one message in it. */
   const navigateToNodeResult = useCallback((r: NodeGroupedResult, messageId?: string) => {
     if (query.trim()) setSearchHighlightTerm({ term: query.trim(), nodeId: r.nodeId });
     revealNode(r.nodeId, { workspaceId: r.workspaceId, messageId });
@@ -462,6 +468,9 @@ export default function CommandPalette({
   // Messages are searched once typing pauses; until they answer, nothing is known not to match.
   const searching = debouncedQuery !== query || nodeSearch.status === 'loading';
   const nothingFound = !showRecents && matched.length === 0 && nodeResults.length === 0 && !searching;
+  // A failed message search is not "no matches": it says so where the
+  // messages would be, with a Retry row after every other row.
+  const searchFailed = !showRecents && !searching && nodeSearch.status === 'error';
   // Words that found nothing can still start something: a thread, or a
   // question to the agent, with the words left in the composer to review.
   const hasActiveProject = !!activeProject;
@@ -481,12 +490,12 @@ export default function CommandPalette({
   }, [nothingFound, query, hasActiveProject, companion, setPage]);
   const visible = fallbackRows.length > 0 ? fallbackRows : matched;
 
-  const totalRows = visible.length + (showRecents ? 0 : nodeResults.length);
+  const totalRows = visible.length + (showRecents ? 0 : messageRows.length);
   const prefetchTree = React.useContext(TreePrefetchContext);
   const activeCommand = visible[active];
   const prefetchNodeId = activeCommand
     ? activeCommand.prefetchNodeId ?? (activeCommand.group === 'chat' ? activeCommand.id.slice('chat.'.length) : undefined)
-    : !showRecents && active >= visible.length ? nodeResults[active - visible.length]?.nodeId : undefined;
+    : !showRecents && active >= visible.length ? messageRows[active - visible.length]?.result.nodeId : undefined;
   useEffect(() => {
     if (!prefetchNodeId) return;
     const timer = setTimeout(() => prefetchTree(prefetchNodeId), TREE_PREFETCH_INTENT_MS);
@@ -512,9 +521,11 @@ export default function CommandPalette({
     setActive(workspaceIdx >= 0 ? workspaceIdx : openingIdx);
   }, [query, workspaceIdx, openingIdx]);
 
+  const retryRow = searchFailed ? totalRows : -1;
+  const rowCount = totalRows + (searchFailed ? 1 : 0);
   useEffect(() => {
-    if (active >= totalRows) setActive(0);
-  }, [totalRows, active]);
+    if (active >= rowCount) setActive(0);
+  }, [rowCount, active]);
 
   const listRef = useRef<HTMLDivElement>(null);
   // The highlight follows a pointer that moves. One lying still also gets
@@ -551,7 +562,7 @@ export default function CommandPalette({
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>('[data-active="true"]');
     el?.scrollIntoView({ block: 'nearest' });
-  }, [totalRows]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [totalRows]);
 
   const runRowAtIndex = useCallback(
     (idx: number) => {
@@ -564,16 +575,16 @@ export default function CommandPalette({
         }
         return;
       }
-      const matchIdx = idx - visible.length;
-      const nr = nodeResults[matchIdx];
-      if (nr) navigateToNodeResult(nr);
+      const row = messageRows[idx - visible.length];
+      if (row) navigateToNodeResult(row.result, row.snippet?.messageId);
     },
-    [visible, nodeResults, totalRows, onClose, navigateToNodeResult],
+    [visible, messageRows, totalRows, onClose, navigateToNodeResult],
   );
 
   const runActiveRow = useCallback(() => {
-    runRowAtIndex(active);
-  }, [runRowAtIndex, active]);
+    if (active === retryRow) retrySearch();
+    else runRowAtIndex(active);
+  }, [runRowAtIndex, active, retryRow, retrySearch]);
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (isImeComposing(e)) return;
@@ -592,7 +603,7 @@ export default function CommandPalette({
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setActive((i) => Math.min(totalRows - 1, i + 1));
+      setActive((i) => Math.min(rowCount - 1, i + 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setActive((i) => Math.max(0, i - 1));
@@ -634,11 +645,10 @@ export default function CommandPalette({
           data-menu="palette"
           onScroll={syncClipped}
         >
-          {matched.length === 0 && nodeResults.length === 0 && (
+          {matched.length === 0 && nodeResults.length === 0 && !searchFailed && (
             <div className="palette-empty" role="status">
               {showRecents ? 'No commands available'
-                : searching ? 'Searching…'
-                  : nodeSearch.status === 'error' ? 'Couldn’t search messages' : `No matches for “${query.trim()}”`}
+                : searching ? 'Searching…' : `No matches for “${query.trim()}”`}
             </div>
           )}
           {SECTIONS.map(([g, label]) => {
@@ -683,62 +693,74 @@ export default function CommandPalette({
                 Messages · {nodeResults.length} node{nodeResults.length !== 1 ? 's' : ''}
               </li>
               {nodeResults.map((nr, ni) => {
-                const rowIdx = visible.length + ni;
+                const rowIdx = visible.length + resultRowStart[ni];
                 const overflow = nr.totalMatches - nr.snippets.length;
                 return (
-                  <MenuItem
-                    key={nr.nodeId}
-                    active={rowIdx === active}
-                    onMouseMove={(e) => pointerSetActive(rowIdx, e)}
-                    onClick={() => navigateToNodeResult(nr)}
-                    style={NODE_ROW_STYLE}
-                  >
-                    {/* Breadcrumb + timestamp row */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 20 }}>
-                      <div style={BREADCRUMB_STYLE}>
-                        <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', letterSpacing: 'var(--ls-wide)' }}>
-                          {nr.workspaceName}
-                        </span>
-                        {nr.breadcrumb.length > 0 && (
-                          <span style={{ color: 'var(--term-line-s)', margin: '0 5px', fontSize: 'var(--fs-xs)' }}>›</span>
-                        )}
-                        {nr.breadcrumb.map((seg, si) => {
-                          const isLast = si === nr.breadcrumb.length - 1;
-                          return (
-                            <React.Fragment key={si}>
-                              {si > 0 && (
-                                <span style={{ color: 'var(--term-faint)', margin: '0 3px', fontSize: 'var(--fs-xs)' }}>/</span>
-                              )}
-                              <span style={isLast ? { color: 'var(--term-fg)', fontWeight: 500 } : { color: 'var(--term-muted)' }}>
-                                {seg}
-                              </span>
-                            </React.Fragment>
-                          );
-                        })}
-                      </div>
-                      <span style={NODE_TIME_STYLE}>{relativeTime(nr.lastMessageAt)}</span>
-                    </div>
-                    {/* Snippets */}
-                    <div>
-                      {nr.snippets.map((s, si) => (
-                        <div
-                          key={si}
-                          style={SNIPPET_ROW_STYLE}
-                          onClick={(e) => { e.stopPropagation(); navigateToNodeResult(nr, s.messageId); }}
-                        >
-                          <span style={SNIPPET_ROLE_STYLE}>⌕</span>
-                          <span>{renderHtmlSnippet(s.snippet)}</span>
+                  <React.Fragment key={nr.nodeId}>
+                    <MenuItem
+                      active={rowIdx === active}
+                      onMouseMove={(e) => pointerSetActive(rowIdx, e)}
+                      onClick={() => navigateToNodeResult(nr)}
+                      style={NODE_ROW_STYLE}
+                    >
+                      {/* Breadcrumb + timestamp row */}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, minHeight: 20, flex: 1, minWidth: 0 }}>
+                        <div style={BREADCRUMB_STYLE}>
+                          <span style={{ color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', letterSpacing: 'var(--ls-wide)' }}>
+                            {nr.workspaceName}
+                          </span>
+                          {nr.breadcrumb.length > 0 && (
+                            <span style={{ color: 'var(--term-line-s)', margin: '0 5px', fontSize: 'var(--fs-xs)' }}>›</span>
+                          )}
+                          {nr.breadcrumb.map((seg, si) => {
+                            const isLast = si === nr.breadcrumb.length - 1;
+                            return (
+                              <React.Fragment key={si}>
+                                {si > 0 && (
+                                  <span style={{ color: 'var(--term-faint)', margin: '0 3px', fontSize: 'var(--fs-xs)' }}>/</span>
+                                )}
+                                <span style={isLast ? { color: 'var(--term-fg)', fontWeight: 500 } : { color: 'var(--term-muted)' }}>
+                                  {seg}
+                                </span>
+                              </React.Fragment>
+                            );
+                          })}
                         </div>
-                      ))}
-                      {overflow > 0 && (
-                        <div style={OVERFLOW_HINT_STYLE}>+ {overflow} more match{overflow !== 1 ? 'es' : ''}</div>
-                      )}
-                    </div>
-                  </MenuItem>
+                        <span style={NODE_TIME_STYLE}>{relativeTime(nr.lastMessageAt)}</span>
+                      </div>
+                    </MenuItem>
+                    {nr.snippets.map((s, si) => {
+                      const snippetIdx = rowIdx + 1 + si;
+                      return (
+                        <MenuItem
+                          key={si}
+                          className="palette-snippet"
+                          active={snippetIdx === active}
+                          onMouseMove={(e) => pointerSetActive(snippetIdx, e)}
+                          onClick={() => navigateToNodeResult(nr, s.messageId)}
+                        >
+                          <SearchIcon size="sm" style={SNIPPET_ROLE_STYLE} />
+                          <span className="michi-menu-label">{renderHtmlSnippet(s.snippet)}</span>
+                        </MenuItem>
+                      );
+                    })}
+                    {overflow > 0 && (
+                      <li style={OVERFLOW_HINT_STYLE}>+ {overflow} more match{overflow !== 1 ? 'es' : ''}</li>
+                    )}
+                  </React.Fragment>
                 );
               })}
             </ul>
           )}
+          {searchFailed && <>
+            <div className="palette-empty" role="alert">Couldn’t search messages</div>
+            <ul className="michi-menu-list" aria-label="Messages">
+              <MenuItem active={retryRow === active} onMouseMove={(e) => pointerSetActive(retryRow, e)} onClick={retrySearch}>
+                <span className="michi-menu-glyph" aria-hidden="true"><RetryIcon size="md" /></span>
+                <span className="michi-menu-label">Retry</span>
+              </MenuItem>
+            </ul>
+          </>}
         </div>
         <div className="palette-hints" style={HINT_ROW}>
           {PALETTE_HINTS.map(([keys, label]) => (

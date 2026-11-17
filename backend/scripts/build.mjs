@@ -125,6 +125,8 @@ const bundles = [
     restartKey: "sdk", format: "esm", banner: { js: 'import { createRequire as michiCreateRequire } from "node:module"; const require = michiCreateRequire(import.meta.url);' } },
   // Meta agent metrics worker thread, loaded by name like the database worker.
   { entry: "src/services/metaAgentMetricsWorker.ts", outfile: resolve(dist, "metaAgentMetricsWorker.js") },
+  // Message search worker thread (services/searchReader.ts), loaded by name.
+  { entry: "src/services/searchWorker.ts", outfile: resolve(dist, "searchWorker.js") },
   // Database worker thread, loaded by `new Worker('dist/dbWorkerThread.js')`.
   { entry: "src/services/dbWorkerThread.ts", outfile: resolve(dist, "dbWorkerThread.js") },
   // Crew ACP adapter — its own process, launched by the `crew` runtime as

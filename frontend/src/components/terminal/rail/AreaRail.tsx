@@ -1,7 +1,7 @@
 import React from 'react';
-import { Clock, Layers, MessageSquare, Settings } from 'lucide-react';
 import { HoverTip } from '../../ui/Popover';
 import type { ShellArea } from '../../../state/shellArea';
+import { ChatIcon, ClockIcon, PagesIcon, SettingsIcon, type IconComponent } from '../icons';
 import './rail.css';
 
 export const AREA_RAIL_WIDTH = 48;
@@ -19,11 +19,11 @@ export interface RailBadges {
 
 export const NO_RAIL_BADGES: RailBadges = { spacesWaiting: 0, scheduledRunning: false, conversationsDone: false, settingsAlert: false };
 
-const ITEMS: ReadonlyArray<{ area: ShellArea; label: string; short: string; Icon: typeof Clock }> = [
-  { area: 'conversations', label: 'Conversations', short: 'Chats', Icon: MessageSquare },
-  { area: 'spaces', label: 'Pages', short: 'Pages', Icon: Layers },
-  { area: 'scheduled', label: 'Scheduled', short: 'Scheduled', Icon: Clock },
-  { area: 'settings', label: 'Settings', short: 'Settings', Icon: Settings },
+const ITEMS: ReadonlyArray<{ area: ShellArea; label: string; short: string; Icon: IconComponent }> = [
+  { area: 'conversations', label: 'Conversations', short: 'Chats', Icon: ChatIcon },
+  { area: 'spaces', label: 'Pages', short: 'Pages', Icon: PagesIcon },
+  { area: 'scheduled', label: 'Scheduled', short: 'Scheduled', Icon: ClockIcon },
+  { area: 'settings', label: 'Settings', short: 'Settings', Icon: SettingsIcon },
 ];
 
 function describe(area: ShellArea, label: string, badges: RailBadges): { name: string; badge: React.ReactNode } {
@@ -58,7 +58,7 @@ export function AreaRail({ area, onSelect, badges = NO_RAIL_BADGES, settingsOpen
                 aria-expanded={id === 'settings' ? settingsOpen : undefined}
                 onClick={() => onSelect(id)}
               >
-                <Icon size={17} strokeWidth={1.5} aria-hidden="true" />
+                <Icon size="lg" />
                 {badge}
               </button>
             </HoverTip>
@@ -93,7 +93,7 @@ export function AreaTabs({ area, onSelect, badges = NO_RAIL_BADGES, settingsOpen
             onClick={() => onSelect(id)}
           >
             <span className="area-tabs__icon">
-              <Icon size={18} strokeWidth={1.5} aria-hidden="true" />
+              <Icon size="lg" />
               {badge}
             </span>
             <span aria-hidden="true">{short}</span>

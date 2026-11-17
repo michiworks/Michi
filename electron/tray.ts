@@ -154,7 +154,6 @@ export interface TrayCompanionDto {
   badge: number;
   needsYou: TrayItem[];
   needsYouTotal: number;
-  briefReady: boolean;
   revision: number;
 }
 
@@ -223,7 +222,6 @@ export function parseCompanionTrayDto(value: unknown): TrayCompanionDto | null {
     badge,
     needsYou,
     needsYouTotal: Math.max(needsYou.length, isCount(value.needsYouTotal) ? value.needsYouTotal : 0),
-    briefReady: value.briefReady === true,
     revision,
   };
 }
@@ -279,8 +277,8 @@ function item(label: string, action: TrayAction | null, enabled = action !== nul
 }
 
 /**
- * The menu (DESIGN-v2 §5.1), top to bottom: the status row; Needs you (≤5),
- * View all in Today and Today's brief; Chat with <name>, Check now, Turn
+ * The menu (DESIGN-v2 §5.1), top to bottom: the status row; Needs you (≤5)
+ * and View all in Today; Chat with <name>, Check now, Turn
  * <name> off; Open Michi, Settings…, Quit Michi. While the agent is off
  * (Pause Michi until resumed, Q29/Q30) it offers none of its own entries,
  * only Turn <name> on. It names the agent by its display name and marks no
@@ -323,7 +321,6 @@ export function trayMenuModel(data: TrayData, env: TrayMenuEnv): TrayMenuEntry[]
       }
       menu.push(item('View all in Today', { kind: 'open', target: TODAY }));
     }
-    if (dto.briefReady) menu.push(item("Today's brief", { kind: 'open', target: TODAY }));
   }
   if (menu.length > 0) menu.push({ type: 'separator' });
 

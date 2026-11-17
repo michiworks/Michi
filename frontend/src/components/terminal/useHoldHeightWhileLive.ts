@@ -1,8 +1,9 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react';
+import { DUR, EASE, cssBezier } from '../../motion/tokens';
 
-/** = DUR.collapse-ish on EASE.drawer: the held room gives way like a panel closing. */
-const RELEASE_MS = 220;
-const RELEASE_EASE = 'cubic-bezier(.32, .72, 0, 1)';
+/** A layout settle on EASE.drawer: the held room gives way like a panel closing. */
+const RELEASE_MS = DUR.move * 1000;
+const RELEASE_EASE = cssBezier(EASE.drawer);
 
 /**
  * While `live`, the element never gets shorter. A live turn folds its own

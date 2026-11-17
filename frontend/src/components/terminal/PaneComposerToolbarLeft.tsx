@@ -1,10 +1,18 @@
-import { AtSign, Plus } from 'lucide-react';
+import type { MouseEvent } from 'react';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import type { AgentStatus, SessionMode } from '../../services/api';
-import { AgentIcon, ChevronRightIcon } from './icons';
+import { HoverTip } from '../ui/Popover';
+import { AgentIcon, AtSignIcon, ChevronRightIcon, PlusIcon } from './icons';
 
-/** Icon-only toolbar buttons: 16px on desktop, 18px on a phone, one 1.6px stroke. */
-export const COMPOSER_ICON_STROKE = 1.6;
+/**
+ * A pointer press on + or @ leaves focus where it is, as the click-only chips
+ * did: focus moving onto a chip would open the phone's resting composer under
+ * the pointer before the click lands, and @ goes in at the field's caret. The
+ * keyboard still reaches them with Tab.
+ */
+const keepFocus = (e: MouseEvent) => e.preventDefault();
+
+/** Icon-only toolbar buttons: 16px on desktop, 18px on a phone. */
 export const composerIconSize = (phone: boolean) => (phone ? 18 : 16);
 
 export const REASONING_LABELS: Record<string, string> = {
@@ -86,27 +94,36 @@ export function PaneComposerToolbarLeft({
     <>
       {contextTools && (
         <>
-          <span
-            className="t-toolbar-chip composer-attach"
-            title={canAttach ? 'Attach file' : 'Open a workspace to attach files'}
-            aria-disabled={!canAttach || undefined}
-            onClick={(e) => {
-              e.stopPropagation();
-              if (canAttach) onPickFile();
-            }}
-            style={{ flexShrink: 0, padding: 0, width: 'var(--composer-chip-height, 30px)', justifyContent: 'center', lineHeight: 1 }}
-          >
-            <Plus size={iconSize} strokeWidth={COMPOSER_ICON_STROKE} absoluteStrokeWidth aria-hidden="true" />
-          </span>
+          {/* Without a workspace the chip stays focusable and says why on hover and on focus (ST-12). */}
+          <HoverTip label={canAttach ? 'Attach file' : 'Open a workspace to attach files'}>
+            <button
+              type="button"
+              className="t-toolbar-chip composer-attach"
+              aria-label="Attach file"
+              aria-disabled={!canAttach || undefined}
+              onMouseDown={keepFocus}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (canAttach) onPickFile();
+              }}
+              style={{ flexShrink: 0, padding: 0, width: 'var(--composer-chip-height, 30px)', justifyContent: 'center', lineHeight: 1 }}
+            >
+              <PlusIcon size={iconSize} />
+            </button>
+          </HoverTip>
 
-          <span
-            className="t-toolbar-chip composer-mention"
-            title="Mention context or node"
-            onClick={onInsertMentionTrigger}
-            style={{ flexShrink: 0, padding: 0, width: 'var(--composer-chip-height, 30px)', justifyContent: 'center', lineHeight: 1 }}
-          >
-            <AtSign size={iconSize} strokeWidth={COMPOSER_ICON_STROKE} absoluteStrokeWidth aria-hidden="true" />
-          </span>
+          <HoverTip label="Mention context or node">
+            <button
+              type="button"
+              className="t-toolbar-chip composer-mention"
+              aria-label="Mention context or node"
+              onMouseDown={keepFocus}
+              onClick={onInsertMentionTrigger}
+              style={{ flexShrink: 0, padding: 0, width: 'var(--composer-chip-height, 30px)', justifyContent: 'center', lineHeight: 1 }}
+            >
+              <AtSignIcon size={iconSize} />
+            </button>
+          </HoverTip>
         </>
       )}
 
@@ -125,9 +142,9 @@ export function PaneComposerToolbarLeft({
           }}
         >
           {/* Chip icons follow the 11px label (14px); ⌄ marks it as a picker, like the model chip. */}
-          <AgentIcon size={14} />
+          <AgentIcon />
           <span className="t-chip-label">{currentMode?.name ?? currentModeId ?? 'agent'}</span>
-          <ChevronRightIcon size={12} className="composer-agent-chevron" />
+          <ChevronRightIcon className="composer-agent-chevron" />
         </button>
       )}
     </>

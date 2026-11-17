@@ -20,7 +20,7 @@
   display: inline-block;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: currentColor;
   flex-shrink: 0;
 }
@@ -41,6 +41,11 @@
   font: 600 10px/1 var(--font-mono);
   color: var(--term-mid);
   background: var(--term-surface);
+}
+/* A card takes focus when Start or Cancel replaced the plan card it was pressed on. */
+.mm-card:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
 .mm-card .qbtn {
   border: 1px solid var(--term-line-s);
@@ -65,7 +70,7 @@
 }
 .mm-card .qbtn:disabled {
   opacity: 0.5;
-  cursor: default;
+  cursor: not-allowed;
 }
 @media (hover: hover) {
   .mm-card .qbtn:not(:disabled):hover { border-color: var(--term-muted); }
@@ -99,11 +104,11 @@
 }
 .mm-card .linkbtn:disabled {
   color: var(--term-muted);
-  cursor: default;
+  cursor: not-allowed;
 }
 .mm-card .c-ok { color: var(--term-digest); }
 .mm-card .c-run { color: var(--term-run); }
-.mm-card .c-wait { color: var(--term-select); }
+.mm-card .c-wait { color: var(--term-waiting-text); }
 .mm-card .c-fail { color: var(--term-danger-text); }
 
 /* card shell */
@@ -184,7 +189,7 @@
   display: grid;
   place-items: center;
   border: 1px solid var(--term-line-s);
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   font: 500 9px/1 var(--font-mono);
   color: var(--term-mid);
   background: var(--workflow-card-bg);
@@ -229,11 +234,13 @@
 }
 .mm-card .sh.tog { cursor: pointer; }
 .mm-card .sh .chev {
+  display: inline-flex;
+  align-self: center;
   margin-left: auto;
-  font-size: var(--fs-sm);
   color: var(--term-muted);
-  font-weight: 400;
 }
+.mm-card .sh .chev svg { transition: transform var(--t-soft) var(--t-ease); }
+.mm-card .sh[aria-expanded='true'] .chev svg { transform: rotate(90deg); }
 @media (hover: hover) {
   .mm-card .sh.tog:hover .chev { color: var(--term-fg); }
 }
@@ -247,7 +254,7 @@
 .mm-card .sd .glyph {
   width: 15px;
   height: 15px;
-  font-size: 8.5px;
+  font-size: var(--fs-2xs);
   vertical-align: -3px;
   margin-right: 4px;
 }
@@ -259,7 +266,7 @@
 .mm-card .gstack .glyph {
   width: 15px;
   height: 15px;
-  font-size: 8.5px;
+  font-size: var(--fs-2xs);
 }
 
 /* plan rows */
@@ -319,7 +326,7 @@
 .mm-card .acts2 .ibtn { opacity: 0.6; }
 @media (hover: hover) {
   .mm-card .acts2 .ibtn { opacity: 0.35; }
-  .mm-card .prow2:hover .acts2 .ibtn { opacity: 1; }
+  .mm-card .prow2:is(:hover, :has(:focus-visible)) .acts2 .ibtn { opacity: 1; }
 }
 .mm-card .pp2 {
   margin: 3px 0 0 26px;
@@ -355,7 +362,7 @@
 }
 .mm-card .addlink:disabled {
   color: var(--term-faint);
-  cursor: default;
+  cursor: not-allowed;
 }
 @media (hover: hover) {
   .mm-card .addlink:not(:disabled):hover { color: var(--term-fg); }
@@ -410,7 +417,7 @@
 .mm-card .trow .st.run { color: var(--term-run); }
 .mm-card .trow .st.ok { color: var(--term-digest); }
 .mm-card .trow .st.fail { color: var(--term-danger-text); }
-.mm-card .trow .st.wait { color: var(--term-select); }
+.mm-card .trow .st.wait { color: var(--term-waiting-text); }
 .mm-card .trow .st.skip,
 .mm-card .trow .st.stop,
 .mm-card .trow .st.idle { color: var(--term-muted); }
@@ -437,12 +444,12 @@
 .mm-card .trow .line.now .k { color: var(--term-run); }
 .mm-card .trow .line.err { color: var(--term-danger-text); }
 .mm-card .trow .line.quiet { color: var(--term-muted); }
-.mm-card .trow .line.wait { color: var(--term-select); }
+.mm-card .trow .line.wait { color: var(--term-waiting-text); }
 /* How the step went, though it did not fail (an approval the runtime denied after waiting). */
 .mm-card .trow .line.notice {
   margin-top: 1px;
   font-size: var(--fs-xs);
-  color: var(--term-select);
+  color: var(--term-waiting-text);
 }
 .mm-card .fixl { cursor: auto; }
 .mm-card .fixl .linkbtn { font-size: var(--fs-sm); }
@@ -459,7 +466,7 @@
 }
 .mm-card .apl .ak {
   font-size: var(--fs-xs);
-  color: var(--term-select);
+  color: var(--term-waiting-text);
   font-weight: 500;
 }
 .mm-card .apl code {
@@ -587,8 +594,9 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 6px;
 }
+/* Inside the body's Reveal, so the space opens and shuts with it. */
+.mm-plan-result__body { margin-top: 6px; }
 .mm-plan-result__line {
   display: inline-flex;
   align-items: center;

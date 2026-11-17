@@ -2,7 +2,7 @@ import { sessionModeCatalog } from '../../state/sessionModeCatalog';
 import { turnErrorAction } from '../../state/turnErrorRecovery';
 import { ChatCommandResult } from './ChatCommandResult';
 import { effectiveChatPermissionChoice, usePermissionPreferences } from '../../hooks/usePermissionPreferences';
-import { backendConnectionIdForWorkspace, LOCAL_BACKEND_CONNECTION_ID, workspaceBackendApiBase } from '../../config/backendConnections';
+import { backendConnectionIdForWorkspace, workspaceBackendApiBase } from '../../config/backendConnections';
 import { ComposerPermissionControl } from './ComposerPermissionControl';
 import { TemporaryChatNote } from './TemporaryChat';
 import { approveForMeRuntimeIds } from '../../lib/chatPermissionModes';
@@ -12,7 +12,9 @@ import { AnimatePresence, motion, useIsPresent } from 'motion/react';
 import { DUR, EASE, KEYBOARD_MOVE } from '../../motion/tokens';
 import { useChatActions, useChatNode, useChatPanes, useChatProjects, useStructuralSelector, shallowArrayEqual, chatLabel } from '../../state/chatStore';
 import type { ChatNodeState, ArtifactEntry, ProjectEdge } from '../../state/chatStore';
+import { useSendPreview, withSendPreview } from '../../state/sendPreview';
 import { usePrefs } from '../../state/prefs';
+import { messageDensity } from '../../state/density';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { stripBranchPrefix, parseFanoutCommand, shouldBranchOnSubmit } from '../nodes/chatNodeUtils';
 import SelectionActions, { findMessageIdForRange } from '../SelectionActions';
@@ -23,7 +25,7 @@ import { spaceBeforeMention } from '../mentionSpacing';
 import type { MentionRecord } from '../mentions';
 import { expandMentions } from '../mentions';
 import { findTreeIdForNode } from '../../state/tree';
-import { collectCrossTreeGroups, EMPTY_CROSS_TREE_GROUPS as EMPTY_CROSS_TREE_NODES } from '../crossTreeMentions';
+import { paneMentionCandidates, useMentionCandidates } from '../mentionCandidates';
 import { ATTACHED_QUOTE_SOURCE, formatQuotedMessage, type AnyQuoteSource } from '../../lib/quoteFormat';
 import { buildAnchorMap, type ChildAnchor } from '../../state/branchAnchors';
 import { formatCommentsBlock, joinMessageParts } from '../../lib/commentFormat';
@@ -37,23 +39,26 @@ import { fetchAssistant, updateAssistantSettings, type AssistantSettingsPatch } 
 import { adoptCompanionAssistant, getCompanionAssistant } from '../../state/companion/companionStore';
 import { appendAttachmentsSentinel } from '../../lib/composerAttachments';
 import { checkRuntimeHealth } from '../../services/api';
-import { companionPostRunId, shouldSteerInsteadOfQueue } from 'michi-shared';
+import { companionPostRunId, shouldSteerInsteadOfQueue, type BlockAnswerSource } from 'michi-shared';
 import { useRuntimeCatalog } from '../../hooks/useRuntimeCatalog';
 import { resolveNodeBinding, type PendingNodeBindingOverride } from '../../state/nodeBindingResolution';
 import { useRuntimeLabel, useSkillCatalog } from '../../state/skillCatalog';
 import { buildSlashEntries, keepsSlashPick, liveSlashCommands, pickedSlashEntry, resolveSlashRun, type SlashPick } from '../../state/slashEntries';
-import type { CreateChildChatOptions, PendingComment, SendBindingMeta, UserSendMeta } from '../../state/chatTypes';
+import type { ChatMessage, CreateChildChatOptions, PendingComment, SendBindingMeta, UserSendMeta } from '../../state/chatTypes';
+import { isCountedReply } from '../../state/completionFacts';
 import { appendComposerLine, mergeComposerDraft, prependToDraft } from '../../state/composerDraft';
 import UploadProgressBar from '../UploadProgressBar';
 import PermissionBanner from './PermissionBanner';
 import MergeBanner from './MergeBanner';
 import PaneFind from './PaneFind';
+import { useProgressiveMount } from './progressiveMount';
 import { flashMatchOverlay } from './paneFindMatches';
 import { ComposerShell, type ComposerShellHandle } from './ComposerShell';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { useHoldScrollOnKeyboard } from '../../hooks/useHoldScrollOnKeyboard';
 import { blurWithin, useDismissKeyboardOnDrag } from '../../hooks/useDismissKeyboardOnDrag';
 import { PaneMessageList } from './PaneMessageList';
+import { ChatBlocksHostContext, type ChatBlocksHost } from './ChatBlocksView';
 import { failedPlanStep, useMultiModelBranch } from './multiModelBranch';
 import { TranscriptScrubber } from './TranscriptScrubber';
 import { PaneComposerPreBlocks, type PanePendingAttachment } from './PaneComposerPreBlocks';
@@ -66,7 +71,7 @@ import { FileDropOverlay, PaneDropIndicator } from './PaneDragOverlays';
 import { nextFollowScrollTop } from './scrollPinning';
 import { glideToTail } from './sendScroll';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
-import { claimSourceJump, useSourceJump } from '../../state/sourceNav/sourceNav';
+import { claimSourceJump, requestMessageJump, useSourceJump } from '../../state/sourceNav/sourceNav';
 import { useRunningClaudeWorkflow } from '../../state/workflowDomain';
 import { DARK_PALETTES } from './tokens';
 import { focusIsTaken } from './escapeLayers';
@@ -82,6 +87,8 @@ import { useCompanionAssistantInfo } from '../../state/companion/companionStore'
 import { noteCompanionPostReply } from '../../state/companion/companionReply';
 import type { AssistantConversationSource } from '../../state/assistant/assistantSource';
 import * as perf from '../../services/perf';
+import { BranchIcon } from './icons';
+import { focusPaneComposer } from './paneFocus';
 
 // Shared module-level flag flipped by the Sidebar's `michi:sidebar-animating`
 // event. While true, every pane skips ResizeObserver-driven reflow work so
@@ -93,6 +100,12 @@ const PROGRAMMATIC_SCROLL_WINDOW_MS = 800;
 const USER_SCROLL_INTENT_WINDOW_MS = 1200;
 /** How close to the top of the loaded page, in viewport heights, the next older page loads. */
 const OLDER_PREFETCH_VIEWPORTS = 1.5;
+/** Older pages (up to 50 messages each) a jump reads to reach its message before it asks. */
+const JUMP_HISTORY_PAGES = 10;
+/** Older pages find reads each time it reads, up to about 1,000 messages. */
+const FIND_HISTORY_PAGES = 20;
+/** Older pages an opening pane reads to reach the first of its unread replies. */
+const UNREAD_HISTORY_PAGES = 5;
 /** A send's message lands within this of the send; a glide later than that is not the keyboard send's. */
 const KEYBOARD_SEND_WINDOW_MS = 1000;
 /** How long a click in the transcript may still turn out to open or close something. */
@@ -168,12 +181,16 @@ export interface PaneScrollEntry {
  * missed starts high enough to read on from.
  */
 const UNSEEN_TOP_FRACTION = 0.3;
+/** However long the question above it, an unread reply starts no lower than this fraction of the viewport. */
+const UNREAD_REPLY_MAX_FRACTION = 0.5;
 
 export interface PaneRestoreTarget {
   /**
-   * unseen — anchorId is the first message newer than the saved lastSeen
-   *          horizon; park it at UNSEEN_TOP_FRACTION of the viewport height
-   *          (offset is unused and 0).
+   * unseen — anchorId is the first message the reader has not seen: the
+   *          question of the first unread reply (replyId) when the backend
+   *          keeps completion facts, else the first message newer than the
+   *          saved lastSeen horizon; park it at UNSEEN_TOP_FRACTION of the
+   *          viewport height (offset is unused and 0).
    * anchor — anchorId is the message that topped the viewport when the pane
    *          was left mid-history; put its top back at the saved offset.
    * bottom — pin to the bottom (first visit on this device, left at the
@@ -181,7 +198,46 @@ export interface PaneRestoreTarget {
    */
   kind: 'unseen' | 'anchor' | 'bottom';
   anchorId?: string;
+  /** unseen only: the unread reply anchorId's question opens, kept in view below it. */
+  replyId?: string;
   offset: number;
+}
+
+/** The first reply the reader has not seen, and the question its turn opens on. */
+export interface UnreadTurn {
+  /** The user message(s) just before the reply, else the reply itself. */
+  openerId: string;
+  replyId: string;
+  /** The first unread reply is older than the loaded page, which opens on its first message. */
+  pastPage?: true;
+}
+
+/**
+ * Counts back `unread` replies of the kind the server counts as completions
+ * (isCountedReply) and returns the first of them with its question. A page
+ * holding fewer, with older history still to load, is unread all through: it
+ * opens on its first message (pastPage). A full history holding fewer opens
+ * on its oldest counted reply. Null when nothing is unread or no reply counts.
+ */
+export function firstUnreadTurn(
+  messages: readonly ChatMessage[],
+  unread: number,
+  olderToLoad: boolean,
+): UnreadTurn | null {
+  if (unread <= 0 || messages.length === 0) return null;
+  let reply = -1;
+  let counted = 0;
+  for (let i = messages.length - 1; i >= 0 && counted < unread; i--) {
+    if (isCountedReply(messages[i])) {
+      reply = i;
+      counted += 1;
+    }
+  }
+  if (counted < unread && olderToLoad) return { openerId: messages[0].id, replyId: messages[0].id, pastPage: true };
+  if (reply < 0) return null;
+  let opener = reply;
+  while (opener > 0 && messages[opener - 1].role === 'user') opener -= 1;
+  return { openerId: messages[opener].id, replyId: messages[reply].id };
 }
 
 /**
@@ -189,16 +245,21 @@ export interface PaneRestoreTarget {
  * entry saved when it was last left and the node's current messages.
  * Returns null when there is nothing to position over (no messages).
  *
- * In order: unseen (messages arrived after the user last saw this pane →
- * park at the first unseen), anchor (left mid-history → back where they
- * were reading), bottom (everything else).
+ * In order: unseen (replies the reader has not seen → park at the first
+ * one's question; without server completion facts, messages that arrived
+ * after the user last saw this pane), anchor (left mid-history → back where
+ * they were reading), bottom (everything else). When the server decides
+ * unread, nothing unread means the saved place: messages newer than the
+ * horizon were seen elsewhere.
  */
 export function resolvePaneRestore(
   saved: PaneScrollEntry | undefined,
   messages: readonly { id: string; createdAt?: number }[],
+  { unread = null, serverDecidesUnread = false }: { unread?: UnreadTurn | null; serverDecidesUnread?: boolean } = {},
 ): PaneRestoreTarget | null {
   if (messages.length === 0) return null;
-  if (saved && saved.lastSeen > 0) {
+  if (unread) return { kind: 'unseen', anchorId: unread.openerId, replyId: unread.replyId, offset: 0 };
+  if (!serverDecidesUnread && saved && saved.lastSeen > 0) {
     const firstUnseen = messages.find((m) => (m.createdAt ?? 0) > saved.lastSeen);
     if (firstUnseen) return { kind: 'unseen', anchorId: firstUnseen.id, offset: 0 };
   }
@@ -256,6 +317,25 @@ const paneScrollCache = (() => {
     },
   };
 })();
+
+/**
+ * Replies a pane showing `node` now has to show: those marked seen as its
+ * thread opened (unreadOnOpen) and those not marked yet.
+ */
+function unreadToShow(node: ChatNodeState): number {
+  const unmarked = node.completionSeq === undefined ? 0 : Math.max(0, node.completionSeq - (node.seenCompletionSeq ?? 0));
+  return (node.unreadOnOpen ?? 0) + unmarked;
+}
+
+/** Where a pane showing `node` lands; a live one only on an unread reply, follow mode keeps the rest. */
+function paneRestoreFor(nodeId: string, node: ChatNodeState, unread: number, live: boolean): PaneRestoreTarget | null {
+  const turn = firstUnreadTurn(node.messages, unread, !!node.historyBefore);
+  if (live && !turn) return null;
+  return resolvePaneRestore(paneScrollCache.get(nodeId), node.messages, {
+    unread: turn,
+    serverDecidesUnread: node.completionSeq !== undefined,
+  });
+}
 const PANE_PERF_SLOW_COMMIT_MS = 16;
 // The floating composer card is pinned this far above the pane's bottom edge
 // (ComposerShell's `bottom: 12` on the absolute position style).
@@ -269,11 +349,13 @@ const COMPOSER_CLEARANCE = COMPOSER_BOTTOM_INSET + COMPOSER_TAIL_GAP;
 // Phone: the opaque strip under the card fades out this far above its top.
 // Kept below COMPOSER_TAIL_GAP so content at rest at the end is never dimmed.
 const COMPOSER_TOP_FADE = 24;
+/** The soft fade at the pane's top, where content scrolls under the title area (px). */
+const PANE_TOP_FADE = 30;
 const EMPTY_CONTEXTS: ArtifactEntry[] = [];
 const EMPTY_EDGES: readonly ProjectEdge[] = [];
-const EMPTY_SAME_TREE_NODES: ChatNodeState[] = [];
 const EMPTY_MERGE_SOURCE_LABELS: string[] = [];
 const EMPTY_CONTEXT_NAMES: ReadonlySet<string> = new Set();
+const NO_MESSAGES: ChatNodeState['messages'] = [];
 
 function anchorEqual(a: ChildAnchor, b: ChildAnchor): boolean {
   return (
@@ -375,10 +457,12 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     sendMessage,
     retryLastTurn,
     rerunLastTurn,
+    resumeLastTurn,
     editAndResend,
     cancelStream,
     setChatPermissionMode,
     setChatUltracode,
+    setChatServiceTier,
     createChildChat,
     createBlankChild,
     fanoutBranches,
@@ -392,11 +476,14 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     queueMessage,
     steerMessage,
     dequeueMessage,
+    sendQueuedNow,
     setComposerDraft,
     reorderPane,
     openArtifactPane,
     revealNode,
     loadOlderMessages,
+    loadOlderUntil,
+    ensureCompleteHistory,
     catchUpNodes,
     dispatch,
   } = useChatActions();
@@ -418,8 +505,11 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   const { focusedPane } = useChatPanes();
   const { prefs } = usePrefs();
   // Never dimmed as an unfocused pane when embedded: it isn't one of the grid's panes.
-  const paneShellStyle = usePaneShellStyle(nodeId, { dim: !embedded });
+  const { style: paneShellStyle, recede, surface: paneSurface } = usePaneShellStyle(nodeId, { dim: !embedded });
   const n = useChatNode(nodeId);
+  const sendPreview = useSendPreview(nodeId);
+  // What the transcript shows: a send still on its way included (sendPreview.ts).
+  const shownNode = useMemo(() => withSendPreview(n, sendPreview), [n, sendPreview]);
   const activeProject = embedded && n
     ? projects?.find((project) => project.id === n.projectId) ?? shellActiveProject
     : shellActiveProject;
@@ -617,6 +707,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   const liveSessionState = n?.sessionState?.runtimeId === resolvedBinding.runtime ? n.sessionState : undefined;
   const ultracode = n && !isAssistantConversation && !n.maintenanceJobId && !(liveSessionState && !liveSessionState.ultracode)
     ? { enabled: n.ultracode === true, available: liveSessionState?.ultracode?.available } : undefined;
+  // A speed tier is any chat's but the assistant's and a maintenance transcript's;
+  // the picker offers the tiers the chat's model lists (Codex: Ultrafast).
+  const serviceTier = n && !isAssistantConversation && !n.maintenanceJobId ? n.serviceTier ?? null : undefined;
   // Memory learns from the user's own chats and from the agent's current
   // conversation V (in its panel or as a pane), never from a page's, a Meta
   // agent run's, a Scheduled-only run's, a check-in's or an earlier V's, so
@@ -859,6 +952,30 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // successfully positioned the viewport. When mount fires with no messages
   // (lazy-loaded tree), this stays false so the retry effect can run.
   const didRestoreRef = useRef(false);
+  // The unread replies this pane opened on (unreadToShow at mount), kept for
+  // a history that only arrives after it; null before the pane has mounted.
+  const openUnreadRef = useRef<number | null>(null);
+  // A long transcript mounts its newest messages first and the rest in idle
+  // batches above them (progressiveMount): the first window reaches the
+  // message the restore below lands on.
+  const adjustMountScroll = useCallback((delta: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
+    el.scrollTop += delta;
+    prevScrollTopRef.current = el.scrollTop;
+  }, []);
+  const mount = useProgressiveMount({
+    nodeId,
+    messages: n?.messages ?? NO_MESSAGES,
+    scrollRef,
+    initialTarget: () => (n
+      ? paneRestoreFor(nodeId, n, openUnreadRef.current ?? unreadToShow(n), n.status === 'streaming' || !!n.followUpsGenerating)?.anchorId
+      : undefined),
+    paused: () => restoreInFlightRef.current || loadingOlderRef.current || olderAnchorRef.current !== null,
+    following: () => followRef.current,
+    adjustScroll: adjustMountScroll,
+  });
   // Capture where the user is in this pane as a message anchor plus the
   // newest message timestamp (see PaneScrollEntry). Runs on unmount,
   // debounced while scrolling, and on beforeunload so a refresh keeps it
@@ -910,23 +1027,32 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // the content) until the layout goes quiet, the hard cap elapses, or the
   // user scrolls. The first pass runs synchronously, so a caller in a layout
   // effect positions the pre-paint frame. Only refs are read, so the mount
-  // effect's first-render closure stays valid.
-  const holdPaneRestore = useCallback((el: HTMLDivElement, restore: PaneRestoreTarget) => {
+  // effect's first-render closure stays valid. While `until` (older pages
+  // being read) is pending, a quiet layout does not end the hold: the pages
+  // it prepends must not move the view.
+  const holdPaneRestore = useCallback((el: HTMLDivElement, restore: PaneRestoreTarget, until?: Promise<unknown>) => {
     // Follow mode stays on only when we land at the bottom — otherwise the
     // streaming-follow / resize pins would yank the restored position back
     // down (this is what previously sent every followUps-bearing pane to
     // the bottom on open). The bottom case keeps follow ON, so the
     // existing follow pins take over once this restore finishes.
     followRef.current = restore.kind === 'bottom';
+    const topOf = (id: string): number | null => {
+      const msgEl = el.querySelector<HTMLElement>(`[data-msg-id="${id}"]`);
+      return msgEl ? msgEl.getBoundingClientRect().top - el.getBoundingClientRect().top : null;
+    };
     const targetFor = (): number => {
       if (restore.kind !== 'bottom' && restore.anchorId) {
-        const msgEl = el.querySelector<HTMLElement>(`[data-msg-id="${restore.anchorId}"]`);
-        if (msgEl) {
+        const delta = topOf(restore.anchorId);
+        if (delta !== null) {
           const wanted = restore.kind === 'unseen'
             ? el.clientHeight * UNSEEN_TOP_FRACTION
             : restore.offset;
-          const delta = msgEl.getBoundingClientRect().top - el.getBoundingClientRect().top;
-          return Math.max(0, el.scrollTop + delta - wanted);
+          let target = el.scrollTop + delta - wanted;
+          // However long the question, the unread reply below it starts in view.
+          const replyDelta = restore.replyId && restore.replyId !== restore.anchorId ? topOf(restore.replyId) : null;
+          if (replyDelta !== null) target = Math.max(target, el.scrollTop + replyDelta - el.clientHeight * UNREAD_REPLY_MAX_FRACTION);
+          return Math.max(0, target);
         }
         // Anchor message gone (deleted/trimmed) — fall through to bottom.
       }
@@ -949,10 +1075,16 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       el.removeEventListener('pointerdown', finish);
     };
     cancelScrollRestoreRef.current = finish;
+    let waiting = !!until;
     const armQuiet = () => {
       if (quietTimer != null) clearTimeout(quietTimer);
-      quietTimer = setTimeout(finish, RESTORE_QUIET_MS);
+      quietTimer = waiting ? null : setTimeout(finish, RESTORE_QUIET_MS);
     };
+    const settled = () => {
+      waiting = false;
+      if (!done) armQuiet();
+    };
+    void until?.then(settled, settled);
     const apply = () => {
       if (done) return;
       const target = targetFor();
@@ -978,20 +1110,83 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     el.addEventListener('pointerdown', finish);
   }, []);
 
+  // Land an opening pane on `restore`. When its unread replies reach past
+  // the loaded page (pastPage), the view holds on the oldest loaded message
+  // while older pages are read, UNREAD_HISTORY_PAGES at most, until the
+  // first unread reply is there; then it lands on that reply's question.
+  // Whatever else moves the view first ends the read and keeps its place:
+  // the reader's input on the transcript, or anything that cancels the
+  // restore (a jump, a scrub, Load older, another landing).
+  const unreadReadRef = useRef<AbortController | null>(null);
+  const ensureMountedFor = mount.ensure;
+  const releaseMountHold = mount.release;
+  const landPane = useCallback((el: HTMLDivElement, restore: PaneRestoreTarget, unread: number) => {
+    const node = nLatestRef.current;
+    const pastPage = (current: ChatNodeState) => !!firstUnreadTurn(current.messages, unread, !!current.historyBefore)?.pastPage;
+    if (restore.kind !== 'unseen' || !node || !pastPage(node)) {
+      holdPaneRestore(el, restore);
+      return;
+    }
+    unreadReadRef.current?.abort();
+    const reading = new AbortController();
+    unreadReadRef.current = reading;
+    const inputs = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const;
+    const stop = () => reading.abort();
+    for (const input of inputs) el.addEventListener(input, stop, { passive: true });
+    let frame = 0;
+    reading.signal.addEventListener('abort', () => {
+      cancelAnimationFrame(frame);
+      for (const input of inputs) el.removeEventListener(input, stop);
+    }, { once: true });
+    // The node as the read leaves it, which this pane renders a commit later.
+    let latest = node;
+    const read = loadOlderUntil(nodeId, (current) => { latest = current; return !pastPage(current); },
+      { maxPages: UNREAD_HISTORY_PAGES, signal: reading.signal });
+    holdPaneRestore(el, restore, read);
+    const finishHold = cancelScrollRestoreRef.current;
+    cancelScrollRestoreRef.current = () => { reading.abort(); finishHold?.(); };
+    // `reading` is aborted however the landing ends, which detaches its listeners.
+    read.then(({ pages }) => {
+      const next = !reading.signal.aborted && pages > 0
+        ? paneRestoreFor(nodeId, latest, unread, latest.status === 'streaming' || !!latest.followUpsGenerating)
+        : null;
+      if (next?.kind !== 'unseen' || !next.anchorId) { reading.abort(); return; }
+      const anchorId = next.anchorId;
+      ensureMountedFor(anchorId);
+      let tries = 0;
+      // What the read brought mounts with a later commit; a reply that never
+      // does leaves the view where it is.
+      const land = () => {
+        if (reading.signal.aborted) return;
+        if (!el.querySelector(`[data-msg-id="${anchorId.replace(/["\\]/g, '\\$&')}"]`)) {
+          if (++tries < 60) frame = requestAnimationFrame(land);
+          else reading.abort();
+          return;
+        }
+        reading.abort();
+        finishHold?.();
+        releaseMountHold();
+        holdPaneRestore(el, next);
+      };
+      land();
+    }, () => reading.abort());
+  }, [holdPaneRestore, loadOlderUntil, nodeId, ensureMountedFor, releaseMountHold]);
+
   // Position the viewport on mount. Streaming panes are handled by follow
-  // mode; idle panes land on the target picked by resolvePaneRestore()
-  // (unseen message → saved anchor → bottom), held by holdPaneRestore.
+  // mode unless they have unread replies; idle panes land on the target
+  // picked by resolvePaneRestore() (unread reply → saved anchor → bottom),
+  // held by holdPaneRestore.
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     let liveTrustRaf: number | null = null;
     const live = n?.status === 'streaming' || !!n?.followUpsGenerating;
-    const restore = live
-      ? null
-      : resolvePaneRestore(paneScrollCache.get(nodeId), n?.messages ?? []);
+    openUnreadRef.current = n ? unreadToShow(n) : 0;
+    if (n?.unreadOnOpen !== undefined) dispatch({ type: 'unread-on-open-shown', nodeId });
+    const restore = n ? paneRestoreFor(nodeId, n, openUnreadRef.current, live) : null;
     if (restore) {
       didRestoreRef.current = true;
-      holdPaneRestore(el, restore);
+      landPane(el, restore, openUnreadRef.current);
     } else {
       // Live pane (streaming / follow-ups generating) or no messages yet:
       // there is no restore pass, but StrictMode's dev double-mount still
@@ -1049,9 +1244,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     const el = scrollRef.current;
     if (!el) return;
     const live = n.status === 'streaming' || !!n.followUpsGenerating;
-    if (live) return; // follow-mode handles live panes
-    const restore = resolvePaneRestore(paneScrollCache.get(nodeId), n.messages);
-    if (restore) holdPaneRestore(el, restore);
+    const restore = paneRestoreFor(nodeId, n, openUnreadRef.current ?? 0, live);
+    if (restore) landPane(el, restore, openUnreadRef.current ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messagesLoaded, messagesLen]);
 
@@ -1107,6 +1301,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // 2 = hide the agent chip; model settings remain reachable.
   const [toolbarTier, setToolbarTier] = useState<0 | 1 | 2>(0);
   const [findOpen, setFindOpen] = useState(false);
+  // Find walks the DOM: every message is mounted while it is open.
+  const mountAllMessages = mount.mountAll;
+  useEffect(() => { if (findOpen) mountAllMessages(); }, [findOpen, mountAllMessages]);
   const [findFocusNonce, setFindFocusNonce] = useState(0);
   const isFocused = focusedPane === nodeId;
   // When another pane is being dragged over us, show a drop indicator on the
@@ -1292,43 +1489,10 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     nodeId, workspaceId: n?.projectId, runId: n?.multiModelRunId, parentNodeId: n?.parentNodeId,
   });
 
-  // Compute same-tree nodes for @mention popup at structural cadence. Streaming
-  // chunks do not change titles, deletion, kind, tree placement, or message
-  // count, so every open pane can skip this selector while another pane is
-  // receiving tokens.
-  const sameTreeNodes = useStructuralSelector(useCallback((nodesMap) => {
-    if (!activeProject) return EMPTY_SAME_TREE_NODES;
-    const treeId = findTreeIdForNode(nodeId, activeProject);
-    if (!treeId) return EMPTY_SAME_TREE_NODES;
-    const out: ChatNodeState[] = [];
-    for (const nid of activeProject.chatIds) {
-      const nd = nodesMap[nid];
-      if (!nd || nd.deletedAt || nd.kind !== 'chat') continue;
-      if (findTreeIdForNode(nid, activeProject) !== treeId) continue;
-      out.push(nd);
-    }
-    return out.length > 0 ? out : EMPTY_SAME_TREE_NODES;
-  }, [activeProject, nodeId]), shallowArrayEqual);
-
-  // Cross-tree nodes for @mention popup: nodes from OTHER threads in the same
-  // workspace, grouped by thread title. See collectCrossTreeGroups for the
-  // ordering/cap rules (shared with the Home composer).
-  const crossTreeNodes = useStructuralSelector(useCallback((nodesMap) => {
-    if (spacesAssistant) {
-      const groups = projects.filter(project => !project.system && !project.deletedAt && !project.archivedAt && backendConnectionIdForWorkspace(project.id) === LOCAL_BACKEND_CONNECTION_ID)
-        .flatMap(project => collectCrossTreeGroups(nodesMap, project, null).map(group => ({ ...group, treeTitle: `${project.name} · ${group.treeTitle}` })));
-      let count = 0;
-      return groups.flatMap(group => {
-        const nodes = group.nodes.slice(0, Math.max(0, 50 - count));
-        count += nodes.length;
-        return nodes.length ? [{ ...group, nodes }] : [];
-      });
-    }
-    if (!activeProject) return EMPTY_CROSS_TREE_NODES;
-    const currentTreeId = findTreeIdForNode(nodeId, activeProject);
-    if (!currentTreeId) return EMPTY_CROSS_TREE_NODES;
-    return collectCrossTreeGroups(nodesMap, activeProject, currentTreeId);
-  }, [activeProject, nodeId, projects, spacesAssistant]), shallowArrayEqual);
+  // The @ menu's conversations, built when it opens (useMentionCandidates).
+  const getMentionCandidates = useMentionCandidates((nodesMap) => paneMentionCandidates(nodesMap, {
+    nodeId, project: activeProject, projects: projects ?? [], assistant: !!spacesAssistant,
+  }));
 
   const mergeSourceLabels = useStructuralSelector(useCallback((nodesMap) => {
     const node = nodesMap[nodeId];
@@ -1358,7 +1522,14 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     anchorMapEqual,
   );
 
-  const lastMsg = n?.messages[n ? n.messages.length - 1 : 0];
+  // The phone scrubber's questions change only when the user sends: streamed
+  // chunks leave user messages as they are (MO-17).
+  const userMessages = useStructuralSelector(useCallback(
+    (nodesMap) => (nodesMap[nodeId]?.messages ?? NO_MESSAGES).filter((m) => m.role === 'user'),
+    [nodeId],
+  ), shallowArrayEqual);
+
+  const lastMsg = shownNode?.messages[shownNode ? shownNode.messages.length - 1 : 0];
   // Tool calls and thinking streams grow without touching `text`, so include
   // them in the deps — otherwise the viewport stays put while a tool chip or
   // reasoning chunk pushes content below the fold.
@@ -1368,7 +1539,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   const lastPlanSig = lastMsg?.plan
     ?.map((p) => `${p.status}:${p.priority}:${p.content.length}`)
     .join('|');
-  const subagentSig = n?.subagents
+  const subagentSig = shownNode?.subagents
     ?.map((s) => `${s.sessionId}:${s.status}:${s.currentTool?.length ?? 0}:${s.statusMessage?.length ?? 0}`)
     .join('|');
   // Streaming assistant content lands in `blocks` (via
@@ -1381,6 +1552,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         ? `t:${b.toolCallId}`
         : b.kind === 'image'
           ? `i:${b.path}`
+          : b.kind === 'blocks'
+            ? `k:${b.id}`
           : b.kind === 'user-input'
             ? `u:${b.requestId}`
             : `${b.kind[0]}:${b.rawText.length}`,
@@ -1403,15 +1576,17 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     // Backward scan (no array copy): this effect re-runs on nearly every
     // stream chunk, so a full [...messages].reverse() per chunk is wasteful.
     let latestUser: NonNullable<typeof n>['messages'][number] | undefined;
-    if (n?.messages) {
-      for (let i = n.messages.length - 1; i >= 0; i--) {
-        if (n.messages[i].role === 'user') { latestUser = n.messages[i]; break; }
+    if (shownNode?.messages) {
+      for (let i = shownNode.messages.length - 1; i >= 0; i--) {
+        if (shownNode.messages[i].role === 'user') { latestUser = shownNode.messages[i]; break; }
       }
     }
     if (latestUser && sentMessageKey(latestUser) !== prevSentMsgIdRef.current) {
       prevSentMsgIdRef.current = sentMessageKey(latestUser);
       followRef.current = true;
       sendGlideRef.current?.();
+      // A send takes the reader to the tail; an unread landing still reading must not pull the view back up.
+      unreadReadRef.current?.abort();
       // Follow-pinning waits for the glide; the cap only matters if the glide
       // never ends (a background tab pauses its frames).
       userMsgPinUntilRef.current = performance.now() + 1500;
@@ -1492,14 +1667,14 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     // follow-up tool often lands after text streaming has already flipped
     // the node back to idle; if we stop pinning at that boundary, the final
     // question can render underneath the floating composer.
-    const streaming = n?.status === 'streaming';
+    const streaming = shownNode?.status === 'streaming';
     // The answer itself can reach its full height a frame or two after the
     // node goes idle (a stream whose last chunk and end arrive together), so
     // following outlasts the stream by TAIL_SETTLE_MS. Without it the end of
     // a long answer stays below the fold (send-scroll.spec.ts).
     if (followSawStreamingRef.current && !streaming) tailSettleUntilRef.current = performance.now() + TAIL_SETTLE_MS;
     followSawStreamingRef.current = streaming;
-    const pinsLive = streaming || !!n?.followUpsGenerating || (n?.followUps.length ?? 0) > 0;
+    const pinsLive = streaming || !!shownNode?.followUpsGenerating || (shownNode?.followUps.length ?? 0) > 0;
     const settling = !pinsLive && performance.now() < tailSettleUntilRef.current;
     const shouldPinTail = pinsLive || settling;
     // The settling pin checks its window when the ResizeObserver runs it, so it
@@ -1514,12 +1689,12 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       requestAnimationFrame(pinFollow);
     }
   }, [
-    n?.messages.length,
-    n?.status,
-    n?.followUpsGenerating,
-    n?.followUps.length,
-    !!n?.mcpServerError,
-    n?.subagents?.length,
+    shownNode?.messages.length,
+    shownNode?.status,
+    shownNode?.followUpsGenerating,
+    shownNode?.followUps.length,
+    !!shownNode?.mcpServerError,
+    shownNode?.subagents?.length,
     subagentSig,
     lastMsg?.id,
     lastMsg?.role,
@@ -1578,7 +1753,9 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // to a focused pane. We skip the focus pull when the user is already
   // typing somewhere else (another input/textarea/contenteditable) so we
   // don't yank focus mid-keystroke.
-  const streaming = n?.status === 'streaming';
+  //
+  // A send still on its way runs as a turn here: Stop withdraws it, Enter queues behind it.
+  const streaming = shownNode?.status === 'streaming';
 
   // Blur the composer once when streaming starts, removing the distracting
   // blinking cursor while the user is reading the AI response. We only blur
@@ -1597,7 +1774,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   // are off — goes out like one: the pending assistant context as its quote (framed as
   // attached context), the pane's runtime binding, queued while the node
   // answers. The user's draft and quote stay as they are.
-  const sendBesideComposer = (prompt: string, selectionQuote: string | null, queue = false): void => {
+  const sendBesideComposer = (prompt: string, selectionQuote: string | null, queue = false, blockAnswer?: BlockAnswerSource): void => {
     const text = prompt.trim();
     if (!text) return;
     const context = pendingAssistantContext(nodeId);
@@ -1612,6 +1789,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         attachments: [],
         ...(quote ? { quotedText: quote } : {}),
         ...(quote && quoteSource ? { quoteSource } : {}),
+        ...(blockAnswer ? { blockAnswer } : {}),
         queuedAt: Date.now(),
       });
       return;
@@ -1619,6 +1797,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     sendMessage(nodeId, joinMessageParts(null, quote, text, quoteSource), {
       ...(quote ? { quotedText: quote } : {}),
       ...(quote && quoteSource ? { quoteSource } : {}),
+      ...(blockAnswer ? { blockAnswer } : {}),
       displayText: text,
       // Not the composer's send: its draft stays as the user left it.
       keepDraft: true,
@@ -1627,6 +1806,27 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
   };
   const sendBesideComposerRef = useRef(sendBesideComposer);
   sendBesideComposerRef.current = sendBesideComposer;
+  // A reply's blocks (show_blocks) answer in this thread, as the user's next
+  // message, through the same send as a follow-up. A thread that cannot take
+  // one (read-only, archived, its composer disabled) draws them disabled.
+  const nodeProject = useMemo(() => projects?.find((project) => project.id === nodeProjectId), [projects, nodeProjectId]);
+  const nodeArchived = useMemo(() => {
+    if (!nodeProject) return false;
+    if (nodeProject.archivedAt) return true;
+    const treeId = findTreeIdForNode(nodeId, nodeProject);
+    return !!treeId && !!nodeProject.trees?.find((tree) => tree.id === treeId)?.archivedAt;
+  }, [nodeProject, nodeId]);
+  const blocksCanAnswer = !readOnly && !composerDisabled && !nodeArchived;
+  const sendBlockAnswer = useCallback((text: string, answer?: BlockAnswerSource): boolean => {
+    if (!text.trim()) return false;
+    sendBesideComposerRef.current(text, null, false, answer);
+    return true;
+  }, []);
+  const chatBlocksHost = useMemo<ChatBlocksHost>(() => ({
+    nodeId,
+    ...(nodeProjectId ? { workspaceId: nodeProjectId, connectionId: backendConnectionIdForWorkspace(nodeProjectId) } : {}),
+    ...(blocksCanAnswer ? { send: sendBlockAnswer } : {}),
+  }), [blocksCanAnswer, nodeId, nodeProjectId, sendBlockAnswer]);
   // A branch that isn't the composer's (a follow-up's, a selection's) runs
   // on the composer's runtime binding, as its Branch button's does, and
   // leaves the user on this pane.
@@ -1655,6 +1855,32 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_WINDOW_MS;
   });
   useDismissKeyboardOnDrag(scrollRef, phone, () => composerHandle.current?.el);
+  // On a phone every open pane stays mounted and only the focused one shows:
+  // switching to one is its opening, so it lands on its unread replies.
+  const shownOnPhone = phone && isFocused;
+  const wasShownOnPhoneRef = useRef(shownOnPhone);
+  const ensureMountedForUnread = mount.ensure;
+  useLayoutEffect(() => {
+    const was = wasShownOnPhoneRef.current;
+    wasShownOnPhoneRef.current = shownOnPhone;
+    const el = scrollRef.current;
+    const node = nLatestRef.current;
+    if (!shownOnPhone || was || !el || !node) return;
+    const live = node.status === 'streaming' || !!node.followUpsGenerating;
+    const unread = unreadToShow(node);
+    const restore = paneRestoreFor(nodeId, node, unread, live);
+    if (restore?.kind !== 'unseen' || !restore.replyId || !restore.anchorId) return;
+    ensureMountedForUnread(restore.anchorId);
+    cancelScrollRestoreRef.current?.();
+    landPane(el, restore, unread);
+  }, [shownOnPhone, nodeId, landPane, ensureMountedForUnread]);
+  // A pane on screen shows what is marked seen as it lands: nothing is left
+  // for its next opening to land on.
+  const unreadOnOpen = n?.unreadOnOpen;
+  const onScreen = !phone || isFocused;
+  useEffect(() => {
+    if (unreadOnOpen !== undefined && onScreen) dispatch({ type: 'unread-on-open-shown', nodeId });
+  }, [unreadOnOpen, onScreen, dispatch, nodeId]);
   // A focus pull that lands while the permission banner still holds the slot
   // (a turn that ends as its request is withdrawn) waits for the composer.
   const composerFocusPendingRef = useRef(false);
@@ -1695,6 +1921,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     return () => cancelAnimationFrame(frame);
   }, [composerMounted, isFocused]);
 
+  const ensureMounted = mount.ensure;
+  const releaseMount = mount.release;
   // The pane's one way to scroll to a message. The message may still be
   // loading, so it is looked for over a few seconds. The mount restore and
   // follow mode stand down, or they would pull the view back to the tail.
@@ -1709,17 +1937,19 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     let tries = 0;
     let cancelFlash: (() => void) | null = null;
     const done = () => options.onDone?.();
+    if (messageId) ensureMounted(messageId);
     const step = () => {
       const target = messageId ? scrollRef.current?.querySelector<HTMLElement>(`[data-msg-id="${messageId.replace(/["\\]/g, '\\$&')}"]`) : null;
       if (messageId && !target && ++tries < 300) { frame = requestAnimationFrame(step); return; }
       if (!target) { frame = requestAnimationFrame(() => { frame = requestAnimationFrame(done); }); return; }
       cancelScrollRestoreRef.current?.();
+      releaseMount();
       followRef.current = false;
       let anchor = target;
       const flash = options.flash;
       if (flash === 'message') {
         target.classList.add('t-msg-flash');
-        window.setTimeout(() => target.classList.remove('t-msg-flash'), 600);
+        window.setTimeout(() => target.classList.remove('t-msg-flash'), DUR.slow * 1000);
       } else if (flash) {
         // Find flashes only its match.
         anchor = flash.range.startContainer.parentElement ?? target;
@@ -1740,15 +1970,22 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     };
     frame = requestAnimationFrame(step);
     return () => { cancelAnimationFrame(frame); cancelFlash?.(); };
-  }, []);
+  }, [ensureMounted, releaseMount]);
 
   // A jump asked for from outside the pane (a page's source, search, the ask
   // bar): scroll to the message once, then put the cursor in the composer
   // (Continue), keep it out (Open full chat) or leave focus where it is.
   const sourceJump = useSourceJump(nodeId);
+  // A jump waits for the conversation's first page; to a message older than
+  // what is loaded it reads older pages until the message is there.
+  const historyReady = !!n && (n.messagesLoaded !== false || n.historyBefore !== undefined);
   useEffect(() => {
-    if (!sourceJump) return;
+    if (!sourceJump || !historyReady) return;
+    // A jump outranks an unread landing still reading back to its reply.
+    unreadReadRef.current?.abort();
     const { token, messageId, focus, flash } = sourceJump;
+    const reading = new AbortController();
+    let cancelJump = () => {};
     let frame = 0;
     let composerTries = 0;
     const finish = () => {
@@ -1765,9 +2002,62 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       if (focus === 'composer') editor?.commands.focus('end', { scrollIntoView: false });
       else if (focus === 'message' && composer && document.activeElement instanceof HTMLElement && composer.contains(document.activeElement)) document.activeElement.blur();
     };
-    const cancel = jumpToMessage(messageId, { flash: flash ? 'message' : undefined, onDone: finish });
-    return () => { cancel(); cancelAnimationFrame(frame); };
-  }, [sourceJump, jumpToMessage]);
+    const jump = () => { cancelJump = jumpToMessage(messageId, { flash: flash ? 'message' : undefined, onDone: finish }); };
+    const loaded = nLatestRef.current;
+    if (!messageId || !loaded?.historyBefore || loaded.messages.some((m) => m.id === messageId)) jump();
+    else {
+      loadOlderUntil(nodeId, (node) => node.messages.some((m) => m.id === messageId), { maxPages: JUMP_HISTORY_PAGES, signal: reading.signal })
+        .then(({ found, pages, more }) => {
+          if (reading.signal.aborted) return;
+          // Found, or nothing older to read: the jump looks, as the pane mounts it.
+          if (found || pages === 0) { jump(); return; }
+          claimSourceJump(token);
+          if (more) {
+            toast("That message is further back than this pane has read.", {
+              action: { label: 'Load all', onClick: () => {
+                ensureCompleteHistory([nodeId]).then(
+                  () => requestMessageJump(nodeId, messageId),
+                  () => toast.error("Couldn't load this conversation's history."),
+                );
+              } },
+            });
+          } else toast("Couldn't find that message. It may have been deleted.");
+        }, () => {
+          if (reading.signal.aborted) return;
+          claimSourceJump(token);
+          toast.error("Couldn't load the older messages to reach that one.", {
+            action: { label: 'Retry', onClick: () => requestMessageJump(nodeId, messageId) },
+          });
+        });
+    }
+    return () => { reading.abort(); cancelJump(); cancelAnimationFrame(frame); };
+  }, [sourceJump, historyReady, jumpToMessage, loadOlderUntil, ensureCompleteHistory, nodeId]);
+
+  // Find searches what is loaded. Where older pages are unread it reads them
+  // as it opens (on a phone, when asked), FIND_HISTORY_PAGES at a time.
+  const hasOlderHistory = !!n?.historyBefore;
+  const [findOlder, setFindOlder] = useState<'reading' | 'more' | 'failed' | undefined>();
+  const findReadRef = useRef<AbortController | null>(null);
+  const readOlderForFind = useCallback(() => {
+    findReadRef.current?.abort();
+    const reading = new AbortController();
+    findReadRef.current = reading;
+    setFindOlder('reading');
+    loadOlderUntil(nodeId, () => false, { maxPages: FIND_HISTORY_PAGES, signal: reading.signal }).then(
+      ({ more }) => { if (!reading.signal.aborted) setFindOlder(more ? 'more' : undefined); },
+      () => { if (!reading.signal.aborted) setFindOlder('failed'); },
+    );
+  }, [loadOlderUntil, nodeId]);
+  useEffect(() => {
+    if (!findOpen || !hasOlderHistory) return;
+    if (phone) setFindOlder('more');
+    else readOlderForFind();
+    return () => {
+      findReadRef.current?.abort();
+      findReadRef.current = null;
+      setFindOlder(undefined);
+    };
+  }, [findOpen, hasOlderHistory, phone, readOlderForFind]);
 
   const insertMentionTrigger = useCallback(() => inputRef.current?.startMention(), []);
 
@@ -1841,6 +2131,10 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     rerunLastTurn(nodeId, userIdx, consumeBindingMetaRef.current());
   }, [nodeId, rerunLastTurn]);
 
+  const handleContinueTurn = useCallback(() => {
+    resumeLastTurn(nodeId, consumeBindingMetaRef.current());
+  }, [nodeId, resumeLastTurn]);
+
   const handleEditUserMessage = useCallback((text: string) => {
     // Past messages contain wire-format tokens; reset mentions metadata
     // since we can't reconstruct chip anchors from just the text.
@@ -1859,10 +2153,20 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     setEditingMessageId(null);
   }, []);
 
+  // A save resends from the edited message, so its Edit button stays away
+  // while the turn runs: the composer takes focus in the commit that closes
+  // the field (ST-10). Esc and Cancel go back to Edit (MessageBlock).
+  const editSavedRef = useRef(false);
   const handleEditSave = useCallback((messageIndex: number, newText: string) => {
+    editSavedRef.current = true;
     setEditingMessageId(null);
     editAndResend(nodeId, messageIndex, newText, consumeBindingMetaRef.current());
   }, [nodeId, editAndResend]);
+  useLayoutEffect(() => {
+    if (editingMessageId || !editSavedRef.current) return;
+    editSavedRef.current = false;
+    focusPaneComposer(scrollRef.current);
+  }, [editingMessageId]);
 
   // DESIGN-v2 §2.8 T3: chips a check-in's post offered are check-in material. One only fills the
   // composer for the user to read and send (never sends, never branches), and the message then
@@ -2205,12 +2509,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
     e.preventDefault();
     reorderPane(fromId, nodeId);
   };
+  const bottomRoom = `calc(${composerMounted ? composerHeight + COMPOSER_CLEARANCE : COMPOSER_BOTTOM_INSET}px + var(${DOCK_ROOM_VAR}, 0px))`;
 
   return (
     <div
       data-node-id={nodeId}
       className="terminal-pane"
-      data-density={prefs.terminalDensity}
+      data-density={messageDensity(prefs.sidebarDensity)}
       onMouseDown={embedded ? undefined : () => {
         focusPane(nodeId);
         setFocusedNodeId(nodeId);
@@ -2257,7 +2562,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
             flexShrink: 0,
           }}
         >
-          <span style={{ fontWeight: 700 }}>⎇</span>
+          <BranchIcon size="sm" style={{ flexShrink: 0 }} />
           <span style={{ letterSpacing: 'var(--ls-wide)', flex: 1, minWidth: 0 }}>
             {n.multiModelRunId
               ? n.freshContext ? 'multi-model branch · fresh context, prompt only' : `multi-model branch${parentTitle ? ` · inherits ${parentTitle}` : ''}`
@@ -2266,7 +2571,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           {n.multiModelRunId && multiModelBranch && (
             <button
               type="button"
-              className="t-hover-fg"
+              className="t-hover-fg t-rest-ink"
               data-testid="pane-open-plan"
               onClick={multiModelBranch.openPlan}
               style={{
@@ -2275,14 +2580,13 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
                 padding: phone ? '8px 10px' : '2px 6px',
                 margin: phone ? '-8px -10px' : '-2px -6px',
                 border: 'none',
-                background: 'none',
-                color: 'var(--term-mauve)',
+                '--rest-ink': 'var(--term-mauve)',
                 font: 'inherit',
                 fontWeight: 600,
                 letterSpacing: 'var(--ls-wide)',
                 cursor: 'pointer',
                 whiteSpace: 'nowrap',
-              }}
+              } as React.CSSProperties}
             >
               Open plan
             </button>
@@ -2315,13 +2619,18 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         />}
       <div
         aria-hidden
+        data-pane-band="top"
         style={{
           position: 'absolute',
           top: 0,
           left: 0,
           right: 0,
-          height: prefs.paneTopFadeHeight,
-          background: 'var(--term-pane-bg)',
+          height: PANE_TOP_FADE,
+          // The pane's surface as its recede leaves it: the band hides
+          // content behind the pane's own colour, so it sinks with the body
+          // instead of standing out as a lighter strip (usePaneShellStyle).
+          background: paneSurface,
+          transition: 'background-color var(--t-soft) var(--t-ease)',
           maskImage: 'linear-gradient(to bottom, black, transparent)',
           WebkitMaskImage: 'linear-gradient(to bottom, black, transparent)',
           pointerEvents: 'none',
@@ -2372,14 +2681,15 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           // Reading upward toward the start of the loaded page fetches the
           // previous one before the reader reaches it. Only the reader's own
           // scrolling counts: mount positioning starts at the top for a frame.
-          if (userInitiated && cur < prev && cur < el.clientHeight * OLDER_PREFETCH_VIEWPORTS
-            && nLatestRef.current?.historyBefore) {
-            void loadOlder();
+          if (userInitiated && cur < prev && cur < el.clientHeight * OLDER_PREFETCH_VIEWPORTS) {
+            // Messages already here but not mounted come first.
+            if (mount.from > 0) mount.mountMore();
+            else if (nLatestRef.current?.historyBefore) void loadOlder();
           }
           prevScrollTopRef.current = cur;
         }}
         className="term-scrollbar terminal-pane__transcript"
-        data-density={prefs.terminalDensity}
+        data-density={messageDensity(prefs.sidebarDensity)}
         style={{
           flex: 1,
           overflowY: 'auto',
@@ -2390,25 +2700,27 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           // above the card instead of being trapped behind it.
           // The top also clears the pane-top fade overlay, so the first
           // message is not drawn under it while the pane is scrolled to top.
-          paddingTop: `calc(${prefs.paneTopFadeHeight || 0}px + var(--pane-pad-top))`,
+          paddingTop: `calc(${PANE_TOP_FADE}px + var(--pane-pad-top))`,
           paddingLeft: 'var(--pane-gutter)',
           paddingRight: 'var(--pane-gutter)',
           // Reserve clearance equal to the measured composer height + the
           // card's bottom inset + the tail gap, so the last line of content
           // scrolls clear of the card rather than resting against it.
           // A docked phone selection can add room below it (SelectionActions).
-          paddingBottom: `calc(${
-            composerMounted
-              ? composerHeight + COMPOSER_CLEARANCE
-              : COMPOSER_BOTTOM_INSET
-          }px + var(${DOCK_ROOM_VAR}, 0px))`,
+          paddingBottom: bottomRoom,
+          // What the composer and the top fade cover is not shown: a block
+          // opened under the composer scrolls clear of it (agentBlockMotion).
+          scrollPaddingTop: PANE_TOP_FADE,
+          scrollPaddingBottom: bottomRoom,
           fontSize: 'var(--pane-font-size)',
           lineHeight: 'var(--pane-leading)',
           color: 'var(--term-fg)',
         }}
       >
+        <ChatBlocksHostContext.Provider value={chatBlocksHost}>
         <PaneMessageList
-          node={n}
+          node={shownNode ?? n}
+          mountFrom={mount.from}
           loadingOlder={loadingOlder}
           onLoadOlder={loadOlder}
           mergeSourceLabels={mergeSourceLabels}
@@ -2417,6 +2729,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           streaming={streaming}
           onRetryTurn={handleRetryTurn}
           onRunAgain={handleRunAgain}
+          onContinueTurn={handleContinueTurn}
           onEditUserMessage={handleEditUserMessage}
           onContinueFollowUp={handleContinueFollowUp}
           onBranchFollowUp={handleBranchFollowUp}
@@ -2435,13 +2748,14 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           planStep={planStep}
           replySources={replySources}
         />
+        </ChatBlocksHostContext.Provider>
       </div>
       {phone && (
         <TranscriptScrubber
           scrollRef={scrollRef}
-          messages={n.messages}
-          hasOlder={Boolean(n.historyBefore)}
-          top={(prefs.paneTopFadeHeight || 0) + 6}
+          messages={userMessages}
+          hasOlder={Boolean(n.historyBefore) || mount.from > 0}
+          top={PANE_TOP_FADE + 6}
           bottom={(composerMounted ? composerHeight + COMPOSER_CLEARANCE : COMPOSER_BOTTOM_INSET) + 8}
           onScrub={handleScrub}
         />
@@ -2459,6 +2773,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
       <ComposerSlot key="composer">
       <div
         aria-hidden
+        data-pane-band="bottom"
         style={{
           position: 'absolute',
           left: 0,
@@ -2468,7 +2783,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
           // above it (below COMPOSER_TAIL_GAP, so settled text is never dimmed),
           // softening text that scrolls under the card's top edge.
           height: phone ? COMPOSER_BOTTOM_INSET + composerHeight + COMPOSER_TOP_FADE : 12,
-          background: 'var(--term-pane-bg, var(--term-surface))',
+          background: paneSurface,
+          transition: 'background-color var(--t-soft) var(--t-ease)',
           ...(phone ? {
             maskImage: `linear-gradient(to top, black calc(100% - ${COMPOSER_TOP_FADE}px), transparent)`,
             WebkitMaskImage: `linear-gradient(to top, black calc(100% - ${COMPOSER_TOP_FADE}px), transparent)`,
@@ -2525,10 +2841,11 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
               quotedText={quotedText}
               pendingAttachments={pendingAttachments}
               workspaceId={activeProject?.id}
-              canSteerQueued={streaming && shouldSteerInsteadOfQueue(agentStatus?.capabilityDescriptor)}
+              canSteerQueued={n.status === 'streaming' && shouldSteerInsteadOfQueue(agentStatus?.capabilityDescriptor)}
               slashEntries={slashEntries}
               steeringQueueId={steeringQueueId}
               onSteerQueued={(queueId) => { void steerQueuedEntry(queueId); }}
+              onSendQueuedNow={() => sendQueuedNow(nodeId)}
               onRestoreQueued={(queueId) => {
                 // Restore the entry to the composer so the user can edit or
                 // branch it, in front of what was typed since, as a rejected
@@ -2571,8 +2888,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
               onChange={setDraft}
               className="hide-sb"
               artifacts={mentionContexts}
-              sameTreeNodes={sameTreeNodes}
-              crossTreeNodes={crossTreeNodes}
+              getMentionCandidates={getMentionCandidates}
               currentNodeId={nodeId}
               slashEntries={slashEntries}
               onSlashOpen={loadSlashCatalog}
@@ -2623,6 +2939,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
             onOpenModelMenu={openModelMenu}
             switchHint={claudeWorkflowRunning ? 'Switching the model also stops the running workflow.' : undefined}
             ultracode={ultracode}
+            serviceTier={serviceTier}
           />
           <PaneComposerActions
             allowBranch={!branchesOff}
@@ -2655,6 +2972,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         rootRef={scrollRef}
         focusNonce={findFocusNonce}
         onClose={() => setFindOpen(false)}
+        olderHistory={findOlder}
+        onLoadOlder={readOlderForFind}
         onVisitMatch={(range) => jumpToMessage(
           range.startContainer.parentElement?.closest('[data-msg-id]')?.getAttribute('data-msg-id') ?? null,
           { flash: { range } },
@@ -2703,6 +3022,8 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
         }}
         ultracode={ultracode}
         onSaveUltracode={ultracode ? (enabled) => setChatUltracode(nodeId, enabled) : undefined}
+        serviceTier={serviceTier}
+        onSaveServiceTier={serviceTier !== undefined ? (tier) => setChatServiceTier(nodeId, tier) : undefined}
         onRetryModels={retryModels}
         onCloseAgentMenu={() => setAgentMenu(null)}
         onCloseModelMenu={() => setModelMenu(null)}
@@ -2710,6 +3031,7 @@ function TPane({ nodeId, contentMaxWidth, embedded = false, draftRequest = null,
 
       <PaneDropIndicator side={paneDropSide} />
       <FileDropOverlay visible={dropzoneVisible} fileCount={droppedFileCount} />
+      {recede}
     </div>
   );
 }
@@ -2758,7 +3080,7 @@ function PermissionSlot({ room, onLeave, children }: { room: number; onLeave: ()
         opacity: 1,
         transition: {
           height: { duration: DUR.enter, ease: EASE.drawer },
-          opacity: { ...SLOT_FADE_IN, delay: 0.06 },
+          opacity: { ...SLOT_FADE_IN, delay: DUR.quick },
         },
       }}
       exit={{

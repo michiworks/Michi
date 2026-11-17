@@ -159,7 +159,7 @@ describe('AcpAgentSession Pages turn context and attribution', () => {
     assert.equal(activeGetter, undefined);
   });
 
-  it('sends the Michi Memory block ahead of the Pages context, after the first-message preamble, and keeps it out of history', async () => {
+  it('sends the workspace instructions, then the Michi Memory block, ahead of the Pages context, after the first-message preamble, and keeps them out of history', async () => {
     const prompts: string[] = [];
     const client = {
       async *prompt(_sid: string, text: string) {
@@ -179,12 +179,13 @@ describe('AcpAgentSession Pages turn context and attribution', () => {
     session.primeFirstMessage('FIRST-MESSAGE PREAMBLE');
 
     for await (const _event of session.send('first question', {
+      instructionsContext: 'Workspace instructions as they are now:\n\nUse pnpm.',
       memoryContext: '<michi-memory>\n- Reply in Chinese. (preference)\n</michi-memory>',
       pageContext: 'Michi Pages manifest (JSON): {}',
     })) { /* drain */ }
     for await (const _event of session.send('second question')) { /* drain */ }
 
-    assert.match(prompts[0]!, /^FIRST-MESSAGE PREAMBLE\n<michi-memory>\n- Reply in Chinese\. \(preference\)\n<\/michi-memory>\n\n---\n\nMichi Pages manifest \(JSON\): \{\}\n\n---\n\nfirst question/);
+    assert.match(prompts[0]!, /^FIRST-MESSAGE PREAMBLE\nWorkspace instructions as they are now:\n\nUse pnpm\.\n\n---\n\n<michi-memory>\n- Reply in Chinese\. \(preference\)\n<\/michi-memory>\n\n---\n\nMichi Pages manifest \(JSON\): \{\}\n\n---\n\nfirst question/);
     assert.match(prompts[1]!, /^second question/, 'a turn without a block sends none');
     assert.deepEqual(session.getHistory().filter((m) => m.role === 'user').map((m) => m.content), ['first question', 'second question']);
   });

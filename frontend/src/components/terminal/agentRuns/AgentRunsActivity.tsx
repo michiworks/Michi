@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { AgentResourceIdentity } from '../../../state/agentIdentity';
 import { AgentRunCard } from './AgentRunCard';
 import { selectAgentRunActivityGroups, type LocatedAgentRun } from './agentRunSelectors';
+import './agentRuns.css';
 
 export function AgentRunsActivity({ runs, onOpen, defaultExpanded = false, now }: {
   runs: readonly LocatedAgentRun[];
@@ -18,8 +19,8 @@ export function AgentRunsActivity({ runs, onOpen, defaultExpanded = false, now }
   ] as const;
   return (
     <section aria-label="Agent runs activity" style={{ borderTop: '1px solid var(--term-line)', fontFamily: 'var(--ui-font)' }}>
-      <button type="button" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}
-        style={{ width: '100%', border: 0, background: 'transparent', color: visibleCount ? 'var(--term-fg)' : 'var(--term-muted)', padding: '9px 0', display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 'var(--fs-xs)', fontWeight: 700, letterSpacing: 'var(--ls-wide)', textTransform: 'uppercase' }}>
+      <button type="button" className="agent-runs-fold" data-empty={visibleCount ? undefined : ''} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}
+        style={{ width: '100%', padding: '9px 0', display: 'flex', alignItems: 'center', gap: 8, fontSize: 'var(--fs-xs)', fontWeight: 700, letterSpacing: 'var(--ls-wide)', textTransform: 'uppercase' }}>
         <span aria-hidden>{expanded ? '−' : '+'}</span>
         Agent runs
         <span style={{ color: 'var(--term-muted)', marginLeft: 'auto' }}>{visibleCount}</span>

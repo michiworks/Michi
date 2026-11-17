@@ -57,7 +57,7 @@
  *   Michi holds, its turn recorded as check-in material; after that
  *   nothing_to_do is refused, and its post or Michi's receipt lists the send
  *   (D21): the user must hear of it;
- * - a check-in's brief, and a follow-up it sends itself, go out only while
+ * - a follow-up a check-in sends itself goes out only while
  *   what its Michi Memory pack showed when it started holds
  *   (checkinNode.ts checkinMemoryHolds, D5): otherwise they are refused as
  *   withdrawn, and so is every later result of that check-in;
@@ -90,6 +90,7 @@ import {
   DEFAULT_COMPANION_NAME,
   companionCardButtonLabel,
   companionCheckinTurnRunId,
+  companionItemRaise,
   isCheckinNodeId,
   parseCompanionPostMetadata,
   parseCompanionTurnMetadata,
@@ -114,9 +115,8 @@ import { log } from '../logger';
 import { activeTurnTrust, recordCompanionTaint, turnTaintOf } from '../turnTrust';
 import { turnHoldsOutsideContent } from '../turnGuard';
 import { COMPANION_CARD_KINDS, COMPANION_MAX_PENDING_CARDS, proposePublicCompanionCard as proposeCompanionCard } from './cards';
-import { CHECKIN_WITHDRAWN_MESSAGE, checkinMemoryHolds } from './checkinNode';
 import { checkinWritesOf, noteCheckinWrite } from './checkinWrites';
-import { COMPANION_TIME_FORMS, localDateKey, localTimeEchoText, parseCompanionTime, systemCompanionClock } from './clock';
+import { COMPANION_TIME_FORMS, localTimeEchoText, parseCompanionTime, systemCompanionClock } from './clock';
 import { companionEvents, type CompanionChangeReason, type CompanionEventBus } from './delivery';
 import { CompanionError, notFound } from './errors';
 import {
@@ -136,14 +136,12 @@ import {
   COMPANION_GOAL_PROGRESS_MAX_CHARS,
   COMPANION_MAX_SNOOZE_MS,
   applyItemAction,
-  briefForDate,
   cardDto,
   companionTransaction,
   editGoal,
   getCompanionNotesState,
   getGoal,
   getItem,
-  insertBrief,
   isCompanionItemHidden,
   latestEventSeq,
   listEventsAfter,
@@ -154,7 +152,6 @@ import {
   readCompanionRules,
   recordGoalProgress,
   recordRunChange,
-  setBriefCurate,
   setDelegationAutoSend,
   setNotesByCompanion,
 } from './repository';
@@ -240,9 +237,8 @@ interface HiddenTurn {
   quietNote: string | null;
   /** nothing_to_do was accepted: the turn ends quiet, whatever stray text the model wrote around the call. */
   quietEnd: boolean;
-  /** companion_headline's last line, or the headline of the brief it published: Michi's latest line once the turn ran (Q45). */
+  /** companion_headline's last line: Michi's latest line once the turn ran (Q45). */
   headline: string | null;
-  briefHeadline: string | null;
 }
 
 /** Turns this process keeps in its small per-turn maps. */
@@ -269,14 +265,14 @@ function remember<V>(map: Map<string, V>, key: string, value: V): void {
 
 /** conversation.ts: a hidden turn of this kind is about to start under this chat turn id. */
 export function beginCompanionHiddenTurn(turnId: string, info: { kind: CompanionTurnKind; runId: string }): void {
-  remember(hiddenTurns, turnId, { kind: info.kind, runId: info.runId, quietNote: null, quietEnd: false, headline: null, briefHeadline: null });
+  remember(hiddenTurns, turnId, { kind: info.kind, runId: info.runId, quietNote: null, quietEnd: false, headline: null });
 }
 
 /**
  * conversation.ts: the hidden turn is over. quietEnd: it ended with an
  * accepted nothing_to_do, so it is quiet even when the model also wrote
  * something; quietNote: what that call noted for the Activity log;
- * headline: the line it wrote for Home (its own, else its brief's).
+ * headline: the line it wrote for Home.
  */
 export function endCompanionHiddenTurn(turnId: string): { quietNote: string | null; quietEnd: boolean; headline: string | null } {
   const turn = hiddenTurns.get(turnId);
@@ -288,7 +284,7 @@ export function endCompanionHiddenTurn(turnId: string): { quietNote: string | nu
   sessionSendsByTurn.delete(turnId);
   checkinSendsByTurn.delete(turnId);
   checkinSentByTurn.delete(turnId);
-  return { quietNote: turn?.quietNote ?? null, quietEnd: turn?.quietEnd ?? false, headline: turn?.headline ?? turn?.briefHeadline ?? null };
+  return { quietNote: turn?.quietNote ?? null, quietEnd: turn?.quietEnd ?? false, headline: turn?.headline ?? null };
 }
 
 // ── Who started the turn ────────────────────────────────────────────────────
@@ -708,7 +704,7 @@ const itemTool = companionTool({
 
 // ── What the check-ins wrote (DESIGN-v2 §3.5) ─────────────────────────────
 
-const READ_WHATS = ['posts', 'notes', 'goals', 'brief', 'cards'] as const;
+const READ_WHATS = ['posts', 'notes', 'goals', 'cards'] as const;
 type ReadWhat = typeof READ_WHATS[number];
 
 interface PostRow {
@@ -759,17 +755,6 @@ function readGoals(now: number): string[] {
   return [fill('read.goals'), ...(lines.length > 0 ? lines : [fill('section.nothing')])];
 }
 
-function readBrief(now: number): string[] {
-  const brief = briefForDate(localDateKey(now));
-  if (!brief) return [fill('read.brief', { published: 'not published yet' })];
-  return [
-    fill('read.brief', { published: `published at ${stampText(now, brief.createdAt)}` }),
-    `headline: "${materialLine(brief.headline, 200)}"`,
-    ...brief.cards.map((card) => `- "${materialLine(card.title, 120)}": ${materialLine(card.body, 600)}${card.itemIds.length > 0 ? ` (items ${card.itemIds.join(', ')})` : ''}`),
-    `closing: "${materialLine(brief.closing, 200)}"`,
-  ];
-}
-
 function readCards(since: number | null, now: number): string[] {
   const lines = listPendingCards(now).map(cardDto).filter((card) => since === null || card.createdAt >= since).map((card) => [
     `- ${card.id} ${card.kind}, proposed ${stampText(now, card.createdAt)}: ${materialLine(card.summary, 400)}`,
@@ -801,7 +786,6 @@ const readTool = companionTool({
       posts: () => readPosts(call.ctx.nodeId!, since, call.now),
       notes: readNotes,
       goals: () => readGoals(call.now),
-      brief: () => readBrief(call.now),
       cards: () => readCards(since, call.now),
     };
     const lines = sections[input.what]();
@@ -963,10 +947,14 @@ const checkNowTool = companionTool({
 
 // ── The user's direct requests, and a check-in's tidying ───────────────────
 
-const UPDATE_ACTIONS = ['snooze', 'dismiss', 'mute', 'restore'] as const;
+const UPDATE_ACTIONS = ['snooze', 'dismiss', 'mute', 'restore', 'raise', 'lower'] as const;
 
-/** What an item's state is, for the record of a check-in's change (its Undo restores it). */
-const itemState = (item: Pick<CompanionItemDto, 'status' | 'snoozedUntil'>) => ({ status: item.status, snoozedUntil: item.snoozedUntil });
+/** raise and lower are Michi's own (a check-in's): they say what waits on the user today, and they never change an item's status. */
+const RAISE_ACTIONS: readonly string[] = ['raise', 'lower'];
+
+/** What an item's state is at `at`, for the record of a check-in's change (its Undo restores it); a raise from an earlier day is none. */
+const itemState = (item: Pick<CompanionItemDto, 'status' | 'snoozedUntil' | 'raised'>, at: number) =>
+  ({ status: item.status, snoozedUntil: item.snoozedUntil, raised: companionItemRaise(item, at)?.reason ?? null });
 
 const updateItemTool = companionTool({
   name: 'companion_update_item',
@@ -996,6 +984,8 @@ const updateItemTool = companionTool({
     }), args);
     // A check-in tidies Today; muting an object for good stays the user's (§2.3).
     if (checkin && input.action === 'mute') refuse(fill('result.checkinItemAction'));
+    // Raising is how a check-in says "this waits on you today" now the brief is gone; in the user's own turn, say it in the message.
+    if (!checkin && RAISE_ACTIONS.includes(input.action)) refuse(fill('result.userTurnRaise'));
     if (input.action === 'snooze' && input.until === undefined) refuse(`INVALID_ARGUMENT: until: snooze needs until (${COMPANION_TIME_FORMS})`);
     if (input.action !== 'snooze' && input.until !== undefined) refuse('INVALID_ARGUMENT: until: only snooze takes until');
     let until: number | undefined;
@@ -1010,31 +1000,42 @@ const updateItemTool = companionTool({
     if (existing && isCompanionItemHidden(existing)) throw notFound('Companion item not found');
     // Undoing the user's "never show this again" is the same decision as muting: theirs alone (§2.3, G1b-review #4).
     if (own && input.action === 'restore' && existing?.status === 'muted') refuse(fill('result.checkinUnmute'));
+    // Only what the user has on Today now can wait on them today; what they put away is theirs to bring back.
+    if (input.action === 'raise' && existing && existing.status !== 'new' && existing.status !== 'seen') {
+      refuse(fill('result.raiseNotOnToday', { title: quotedTitle(existing.title), status: existing.status }));
+    }
     // At most COMPANION_CHECKIN_MAX_ITEM_CHANGES items per check-in; one it already changed may change again (D5).
     const changedItems = own ? itemChangesByTurn.get(own.turnId) ?? new Set<string>() : null;
     if (changedItems && existing && !changedItems.has(existing.id) && changedItems.size >= COMPANION_CHECKIN_MAX_ITEM_CHANGES) {
       refuse(fill('result.itemChangeLimit', { max: COMPANION_CHECKIN_MAX_ITEM_CHANGES }));
     }
-    const action: CompanionItemAction = input.action === 'snooze' ? { action: 'snooze', until: until! } : { action: input.action };
+    const action: CompanionItemAction = input.action === 'snooze' ? { action: 'snooze', until: until! }
+      : input.action === 'raise' ? { action: 'raise', reason: reason! } : { action: input.action };
     let changed = false;
     const item = companionTransaction(() => {
       const updated = applyItemAction(input.itemId, action, at);
-      changed = !existing || existing.status !== updated.status || existing.snoozedUntil !== updated.snoozedUntil;
+      changed = !existing || existing.status !== updated.status || existing.snoozedUntil !== updated.snoozedUntil
+        || itemState(existing, at).raised !== itemState(updated, at).raised;
       if (changed && own) {
         recordRunChange({
-          runId: own.runId, targetKind: 'item', targetId: updated.id, before: itemState(existing!), after: itemState(updated),
+          runId: own.runId, targetKind: 'item', targetId: updated.id, before: itemState(existing!, at), after: itemState(updated, at),
           reason, action: input.action as CompanionPostChangeAction, now: at,
         });
       }
       return updated;
     });
-    if (!changed) return fill('result.itemUnchanged', { what: `${quotedTitle(item.title)} is already ${item.status}` });
+    if (!changed) {
+      const how = input.action === 'raise' ? `raised, for the same reason` : input.action === 'lower' ? 'not raised' : `already ${item.status}`;
+      return fill('result.itemUnchanged', { what: `${quotedTitle(item.title)} is ${how}` });
+    }
     if (own) {
       remember(itemChangesByTurn, own.turnId, new Set([...changedItems!, item.id]));
       noteCheckinWrite(own.turnId, { kind: 'item', id: item.id, applied: 1, proposed: 0, action: input.action as CompanionPostChangeAction, reason });
     }
     emit('items');
     const what = input.action === 'snooze' ? `snoozed ${quotedTitle(item.title)} until ${localTimeEchoText(until!)}`
+      : input.action === 'raise' ? `${quotedTitle(item.title)} waits on the user today: ${item.raised?.reason ?? reason}`
+      : input.action === 'lower' ? `${quotedTitle(item.title)} no longer waits on the user today`
       : `${quotedTitle(item.title)} is now ${item.status}`;
     return fill('result.itemUpdated', { what });
   },
@@ -1353,62 +1354,7 @@ const sessionSendTool = companionTool({
   },
 });
 
-const publishBriefTool = companionTool({
-  name: 'companion_publish_brief',
-  label: 'Publish brief',
-  description: fill('tool.companion_publish_brief', { maxCards: COMPANION_LIMITS.maxBriefCards }),
-  parameters: { object: {
-    headline: f('string', { description: 'One line: what today is about.' }),
-    cards: f({ array: { object: {
-      title: f('string'),
-      body: f('string', { description: 'What it is and why it matters today.' }),
-      itemIds: f({ array: 'string' }, { optional: true, description: 'Ids of the items the card is about.' }),
-      action: f({ object: { label: f('string'), prompt: f('string') } }, { optional: true, description: 'A button that puts prompt into this chat.' }),
-    } } }, { description: `At most ${COMPANION_LIMITS.maxBriefCards}, most important first.` }),
-    closing: f('string', { description: 'One sentence that ends the brief.' }),
-  } },
-  sequential: true,
-  acts: true,
-  run: (call) => {
-    const { args, now: at, turn } = call;
-    const input = parse(arg.object({
-      headline: arg.string(),
-      cards: arg.list(arg.object({
-        title: arg.string(),
-        body: arg.string(),
-        itemIds: arg.optional(arg.list(ID_ARG, { max: 10 })),
-        action: arg.optional(arg.nullable(arg.object({ label: arg.string(), prompt: arg.string() }))),
-      }), { max: COMPANION_LIMITS.maxBriefCards }),
-      closing: arg.string(),
-    }), args);
-    const unknown = [...new Set(input.cards.flatMap((card) => card.itemIds ?? []))].filter((id) => !visibleItem(id));
-    if (unknown.length > 0) {
-      refuse(`INVALID_ARGUMENT: cards: unknown item ${unknown.slice(0, 5).map((id) => materialLine(id, 160)).join(', ')}; use item ids from Michi's data`);
-    }
-    if (call.purpose === 'checkin') {
-      // D5: a check-in's brief goes out only while what its memory pack showed holds.
-      const own = checkinTurnOf(call);
-      if (!own) refuse(fill('result.unknownTurn', { tool: 'companion_publish_brief' }));
-      if (!checkinMemoryHolds(own!.runId)) refuse(`WITHDRAWN: ${CHECKIN_WITHDRAWN_MESSAGE}`);
-    }
-    const own = call.purpose === 'checkin' ? checkinTurnOf(call) : null;
-    const brief = insertBrief({
-      date: localDateKey(at),
-      headline: input.headline,
-      cards: input.cards.map((card) => ({ title: card.title, body: card.body, itemIds: card.itemIds ?? [], action: card.action ?? null })),
-      closing: input.closing,
-      origin: 'llm',
-      now: at,
-    });
-    if (!brief) refuse(fill('result.briefExists'));
-    const hidden = own ? hiddenTurns.get(own.turnId) : undefined;
-    if (hidden) hidden.briefHeadline = materialLine(input.headline, COMPANION_LIMITS.maxHeadlineChars) || null;
-    // The user's "Tomorrow, focus on…" was for this brief.
-    if (turn().kind === 'brief') setBriefCurate('');
-    emit('brief');
-    return fill('result.briefPublished', { cards: plural(brief!.cards.length, 'card') });
-  },
-});
+
 
 // ── Michi's line for Home ───────────────────────────────────────────────────
 
@@ -1477,7 +1423,6 @@ export const COMPANION_OWN_TOOLS: readonly AssistantTool[] = Object.freeze([
   goalProgressTool,
   editGoalTool,
   proposeTool,
-  publishBriefTool,
   setNameTool,
   setNotificationsTool,
   readTool,

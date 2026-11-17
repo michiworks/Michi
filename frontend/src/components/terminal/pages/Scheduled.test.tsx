@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MetaAgentOverview, ScheduledJobBlockedExecution, ScheduledJobDto, ScheduledJobRunDto } from 'michi-shared';
 import type { Project } from '../../../state/chatTypes';
 import TerminalScheduled from './Scheduled';
-import { openScheduledHome, requestScheduledJobDetail, requestScheduledRun } from '../scheduled/scheduledNav';
+import { openScheduledHome, requestNewScheduledJob, requestScheduledJobDetail, requestScheduledRun } from '../scheduled/scheduledNav';
 import { getCompanionPanelState, resetCompanionPanelForTests } from '../../../state/companion/companionPanel';
 import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
 import { companionScheduleWorkspace, resetCompanionScreenForTests } from '../../../state/companion/companionScreen';
@@ -47,7 +47,8 @@ vi.mock('../../../state/appEvents', async (importOriginal) => ({
 vi.mock('../../../state/chatStore', () => ({
   useChatProjects: () => ({ projects: state.projects, activeProject: state.projects[0] ?? null, hydrated: true }),
   useChatActions: () => ({ revealBackendNode: (...args: unknown[]) => state.reveal(...args) }),
-  useChatNode: (nodeId: string) => (nodeId ? { nodeId, projectId: 'ws-1' } : undefined),
+  // The run's thread is held in its workspace.
+  useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => selector({ 'n-1': { nodeId: 'n-1', projectId: 'ws-1' } }),
 }));
 vi.mock('../../../services/api/scheduledJobs', () => ({
   getScheduledJobSettings: () => state.defaults(),
@@ -186,7 +187,7 @@ describe('Scheduled page', () => {
     expect(within(banner).getByText('Previous scheduled job')).toBeTruthy();
     expect(within(banner).getByText(/All new scheduled runs are paused/)).toBeTruthy();
     expect(within(banner).queryByText('unconfirmed_executor')).toBeNull();
-    expect((screen.getByRole('button', { name: 'Run Morning digest now' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Run Morning digest now' }).getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Run Morning digest now' }));
     expect(state.runNow).not.toHaveBeenCalled();
     fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'no matching job' } });
@@ -274,6 +275,19 @@ describe('Scheduled page', () => {
     expect(screen.getAllByRole('button', { name: /New job/ })).toHaveLength(2);
   });
 
+  it('opens New job once for each request from the sidebar, made before or while it shows', async () => {
+    state.jobs = [];
+    requestNewScheduledJob();
+    const first = render(<TerminalScheduled />);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    first.unmount();
+    render(<TerminalScheduled />);
+    expect(await screen.findByText('No scheduled jobs')).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    act(() => requestNewScheduledJob());
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
   it('offers Create with agent where New job is, telling the panel the workspace New job preselects', async () => {
     state.projects = [{ ...project('ws-assistant', 'Michi assistant'), system: 'assistant' }, ...state.projects];
     const { unmount } = render(<TerminalScheduled />);
@@ -341,9 +355,9 @@ describe('Scheduled page', () => {
     const dialog = await screen.findByRole('dialog');
     fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Nightly CI' } });
     fireEvent.change(within(dialog).getByLabelText('Prompt'), { target: { value: 'Check the CI dashboard' } });
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'Interval' }));
+    fireEvent.change(within(dialog).getByLabelText('Schedule'), { target: { value: 'interval' } });
     fireEvent.change(within(dialog).getByLabelText('Interval'), { target: { value: '2' } });
-    expect(within(dialog).getByRole('radio', { name: /One ongoing thread/ }).getAttribute('aria-checked')).toBe('true');
+    expect((within(dialog).getByRole('radio', { name: /One ongoing thread/ }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create job' }));
     await waitFor(() => expect(state.create).toHaveBeenCalledTimes(1));
     expect(state.create.mock.calls[0][0]).toMatchObject({
@@ -359,7 +373,7 @@ describe('Scheduled page', () => {
     await screen.findByText('Morning digest');
     fireEvent.click(screen.getByRole('button', { name: /New job/ }));
     const dialog = await screen.findByRole('dialog');
-    expect(within(dialog).getByRole('radio', { name: /New thread each run/ }).getAttribute('aria-checked')).toBe('true');
+    expect((within(dialog).getByRole('radio', { name: /New thread each run/ }) as HTMLInputElement).checked).toBe(true);
   });
 
   it("never offers the assistant's hidden workspace, even when it is the active one", async () => {
@@ -405,6 +419,9 @@ describe('Scheduled page', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create job' }));
     expect(await within(dialog).findByText('Give the job a name')).toBeTruthy();
     expect(within(dialog).getByText('Write the prompt to run')).toBeTruthy();
+    const name = within(dialog).getByLabelText('Name');
+    expect(name.getAttribute('aria-invalid')).toBe('true');
+    expect(document.getElementById(name.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Give the job a name');
     expect(state.create).not.toHaveBeenCalled();
   });
 

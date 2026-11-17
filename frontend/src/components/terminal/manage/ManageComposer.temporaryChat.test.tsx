@@ -20,7 +20,9 @@ const store = vi.hoisted(() => ({
   createChildChat: vi.fn(async (..._args: unknown[]) => 'child-node-id'),
   sendMessage: vi.fn(),
 }));
-vi.mock('../../../state/chatStore', () => ({
+vi.mock('../../../state/chatStore', async () => ({
+  // The @ menu reads the node store only when it opens; these tests open none.
+  ChatNodeStoreContext: (await import('react')).createContext(null),
   useChatStore: () => ({
     ...store,
     setChatUltracode: vi.fn(),
@@ -31,8 +33,6 @@ vi.mock('../../../state/chatStore', () => ({
     defaultModeId: null,
     projects: [{ id: 'ws1', name: 'Workspace', cwd: '/tmp', artifacts: [] }],
   }),
-  useStructuralSelector: () => [],
-  shallowArrayEqual: Object.is,
   chatLabel: () => 'New thread',
 }));
 vi.mock('../../../services/api', () => ({

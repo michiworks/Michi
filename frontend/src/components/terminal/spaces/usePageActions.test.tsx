@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { toast } from 'sonner';
 import type { PageSummaryDto } from 'michi-shared';
 import { usePageActions } from './usePageActions';
 import { resetUndoStackForTests, undoLatest } from '../../../state/undoStack';
@@ -7,6 +8,7 @@ import { resetUndoStackForTests, undoLatest } from '../../../state/undoStack';
 const api = vi.hoisted(() => ({ createPage: vi.fn(), deletePage: vi.fn(), restorePage: vi.fn(), fetchPage: vi.fn(), patchPage: vi.fn(), notify: vi.fn() }));
 vi.mock('../../../services/api/pages', () => api);
 vi.mock('../../../state/pages/pageEvents', () => ({ notifyPageChanged: api.notify }));
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn((_message: string, options?: { id?: string }) => options?.id), { error: vi.fn(), dismiss: vi.fn() }) }));
 
 const summary = (id: string, parentId: string | null, title = id): PageSummaryDto => ({
   id, parentId, title, workspaceId: 'ws', position: 0, color: null, updatedAt: 1, updatedBy: 'user', pendingProposals: 0, helperNodeId: null,
@@ -62,7 +64,6 @@ describe('shared page actions', () => {
   it('undoes moving a page to trash by restoring it', async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText('Trash'));
-    fireEvent.click(screen.getByRole('button', { name: 'Move to trash' }));
     await waitFor(() => expect(api.deletePage).toHaveBeenCalledWith('child', identity));
     api.restorePage.mockResolvedValue({});
     expect(await undoLatest()).toBe('undone');
@@ -89,16 +90,22 @@ describe('shared page actions', () => {
     await waitFor(() => expect(api.patchPage).toHaveBeenCalledWith('child', { revision: 9, parentId: 'sibling' }, identity));
   });
 
-  it('requires confirmation before moving a page tree to trash and supports cancelling', async () => {
+  it('moves a page tree to trash at once, with Undo in its toast and no dialog', async () => {
     render(<Harness />);
     fireEvent.click(screen.getByText('Trash'));
-    expect(api.deletePage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText('Cancel'));
-    expect(api.deletePage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText('Trash'));
-    fireEvent.click(screen.getByRole('button', { name: 'Move to trash' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
     await waitFor(() => expect(onTrashed).toHaveBeenCalledWith(pages[1]));
     expect(api.deletePage).toHaveBeenCalledWith('child', identity);
+    expect(toast).toHaveBeenCalledWith('Moved “Notes” to Trash', expect.objectContaining({ action: expect.objectContaining({ label: 'Undo' }) }));
+  });
+
+  it('says why a move to trash failed, in a toast, and leaves the page', async () => {
+    api.deletePage.mockRejectedValueOnce(new Error('The backend is unreachable'));
+    render(<Harness />);
+    fireEvent.click(screen.getByText('Trash'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Couldn’t move “Notes” to Trash: The backend is unreachable'));
+    expect(onTrashed).not.toHaveBeenCalled();
+    expect(api.notify).not.toHaveBeenCalled();
   });
 
   it('retains the entered name after a failed write so it can be retried', async () => {

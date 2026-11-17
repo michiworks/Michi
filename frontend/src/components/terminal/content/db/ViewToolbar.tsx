@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUpDown, GripVertical, ListFilter, Rows3, SlidersHorizontal, X } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { CloseIcon, FilterIcon, GripIcon, RowsIcon, SlidersIcon, SortIcon } from '../../icons';
 import type { MichiDatabase, MichiDbColumn, MichiDbFilter, MichiDbFilterOp, MichiDbSort, MichiDbView, MichiDbViewConfig } from 'michi-shared';
 import { DbPopover, DbSwitch } from './DbPopover';
 import { boardGroupColumn, coverColumn, isActiveFilter, isThreadsDb, NO_VALUE_OPS, OPS_FOR, parseNumberText, shownColumns, titleColumn, type CellValue } from './dbModel';
@@ -76,32 +77,34 @@ export function ViewToolbar({
   return (
     <div className="michi-db-toolbar" role="toolbar" aria-label="View settings">
       {right}
-      {drawsColumns(db, view) && tool('properties', <SlidersHorizontal size={13} strokeWidth={1.7} aria-hidden="true" />, 'Properties', !!view.config.visible, 'Properties')}
-      {tool('filter', <ListFilter size={13} strokeWidth={1.7} aria-hidden="true" />, <>Filter{active > 0 && <span className="michi-db-tool__count">{active}</span>}</>, active > 0, active ? `Filter, ${active} on` : 'Filter')}
-      {tool('sort', <ArrowUpDown size={13} strokeWidth={1.7} aria-hidden="true" />, 'Sort', sorted.length > 0, 'Sort')}
-      {tool('group', <Rows3 size={13} strokeWidth={1.7} aria-hidden="true" />, <>{group ? `Group: ${columnName(db, group)}` : 'Group'}</>, !!group, group ? `Group: ${columnName(db, group)}` : 'Group')}
+      {drawsColumns(db, view) && tool('properties', <SlidersIcon aria-hidden="true" />, 'Properties', !!view.config.visible, 'Properties')}
+      {tool('filter', <FilterIcon aria-hidden="true" />, <>Filter{active > 0 && <span className="michi-db-tool__count">{active}</span>}</>, active > 0, active ? `Filter, ${active} on` : 'Filter')}
+      {tool('sort', <SortIcon aria-hidden="true" />, 'Sort', sorted.length > 0, 'Sort')}
+      {tool('group', <RowsIcon aria-hidden="true" />, <>{group ? `Group: ${columnName(db, group)}` : 'Group'}</>, !!group, group ? `Group: ${columnName(db, group)}` : 'Group')}
       <span className="michi-db-count michi-db-mono">{count} {unit}{count === 1 ? '' : 's'}</span>
 
-      {openPanel === 'properties' && buttons.current.properties && (
-        <DbPopover anchor={buttons.current.properties} label="Properties" align="end" width={260} onClose={() => onPanel(null)}>
-          <PropertiesPanel db={db} view={view} edit={edit} />
-        </DbPopover>
-      )}
-      {openPanel === 'filter' && buttons.current.filter && (
-        <DbPopover anchor={buttons.current.filter} label="Filter" align="end" width={440} onClose={() => onPanel(null)}>
-          <FilterPanel db={db} config={view.config} save={save} />
-        </DbPopover>
-      )}
-      {openPanel === 'sort' && buttons.current.sort && (
-        <DbPopover anchor={buttons.current.sort} label="Sort" align="end" width={320} onClose={() => onPanel(null)}>
-          <SortPanel db={db} config={view.config} save={save} />
-        </DbPopover>
-      )}
-      {openPanel === 'group' && buttons.current.group && (
-        <DbPopover anchor={buttons.current.group} label="Group" align="end" width={260} onClose={() => onPanel(null)}>
-          <GroupPanel db={db} view={view} config={config} save={save} prefs={prefs} onPrefs={onPrefs} />
-        </DbPopover>
-      )}
+      <AnimatePresence>
+        {openPanel === 'properties' && buttons.current.properties && (
+          <DbPopover key="properties" anchor={buttons.current.properties} label="Properties" align="end" width={260} onClose={() => onPanel(null)}>
+            <PropertiesPanel db={db} view={view} edit={edit} />
+          </DbPopover>
+        )}
+        {openPanel === 'filter' && buttons.current.filter && (
+          <DbPopover key="filter" anchor={buttons.current.filter} label="Filter" align="end" width={440} onClose={() => onPanel(null)}>
+            <FilterPanel db={db} config={view.config} save={save} />
+          </DbPopover>
+        )}
+        {openPanel === 'sort' && buttons.current.sort && (
+          <DbPopover key="sort" anchor={buttons.current.sort} label="Sort" align="end" width={320} onClose={() => onPanel(null)}>
+            <SortPanel db={db} config={view.config} save={save} />
+          </DbPopover>
+        )}
+        {openPanel === 'group' && buttons.current.group && (
+          <DbPopover key="group" anchor={buttons.current.group} label="Group" align="end" width={260} onClose={() => onPanel(null)}>
+            <GroupPanel db={db} view={view} config={config} save={save} prefs={prefs} onPrefs={onPrefs} />
+          </DbPopover>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -120,7 +123,7 @@ export function FilterChips({ db, view, edit }: { db: MichiDatabase; view: Michi
           <span key={i} className="michi-db-chip">
             {text}
             <button type="button" className="michi-db-chip__x" aria-label={`Remove filter ${text}`} onClick={() => put(filters.filter((_, j) => j !== i), 'Removed a filter')}>
-              <X size={11} strokeWidth={2} aria-hidden="true" />
+              <CloseIcon size="sm" aria-hidden="true" />
             </button>
           </span>
         );
@@ -257,7 +260,7 @@ function FilterPanel({ db, config, save }: { db: MichiDatabase; config: MichiDbV
               />
             )}
             <button type="button" className="michi-db-icon-btn" aria-label={`Remove filter ${i + 1}`} onClick={() => put(filters.filter((_, j) => j !== i))}>
-              <X size={13} strokeWidth={1.8} aria-hidden="true" />
+              <CloseIcon aria-hidden="true" />
             </button>
           </div>
         );
@@ -402,7 +405,7 @@ function SortPanel({ db, config, save }: { db: MichiDatabase; config: MichiDbVie
                 if (event.key === 'ArrowDown' && i < sorts.length - 1) { event.preventDefault(); move(i, i + 1); }
               }}
             >
-              <GripVertical size={13} strokeWidth={1.7} aria-hidden="true" />
+              <GripIcon aria-hidden="true" />
             </span>
             <select
               className="michi-db-select michi-db-rule__grow"
@@ -424,7 +427,7 @@ function SortPanel({ db, config, save }: { db: MichiDatabase; config: MichiDbVie
               </select>
             )}
             <button type="button" className="michi-db-icon-btn" aria-label={`Remove sort ${i + 1}`} onClick={() => put(sorts.filter((_, j) => j !== i))}>
-              <X size={13} strokeWidth={1.8} aria-hidden="true" />
+              <CloseIcon aria-hidden="true" />
             </button>
           </div>
         );

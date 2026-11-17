@@ -1,12 +1,22 @@
 import type React from 'react';
-import { Eye, Trash2, Undo2, type LucideIcon } from 'lucide-react';
+import { EyeIcon, TrashIcon, UndoIcon, type IconComponent } from '../icons';
 import { HoverTip } from '../../ui/Popover';
 import { ActionMenu } from '../../ui/ActionMenu';
 
-export function TrashIconButton({ icon: Icon, tooltip, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: LucideIcon; tooltip: string }) {
-  return <HoverTip label={tooltip} disabled={props.disabled}>
-    <button {...props} type="button" className={`trash-icon-button ${props.className ?? ''}`}>
-      <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+/** With a `blockedReason` it is unavailable for a reason the user can change:
+ *  it stays focusable, ignores clicks and shows the reason as its tip.
+ *  A plain `disabled` button shows no tip. */
+export function TrashIconButton({ icon: Icon, tooltip, blockedReason, onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  icon: IconComponent;
+  tooltip: string;
+  blockedReason?: string;
+}) {
+  const blocked = blockedReason !== undefined && !props.disabled;
+  return <HoverTip label={blocked ? blockedReason : tooltip} disabled={props.disabled}>
+    <button {...props} type="button" aria-disabled={blocked || undefined}
+      onClick={(event) => { if (!blocked) onClick?.(event); }}
+      className={`trash-icon-button ${props.className ?? ''}`}>
+      <Icon size="lg" aria-hidden="true" />
     </button>
   </HoverTip>;
 }
@@ -19,8 +29,8 @@ export function TrashMenu({ anchor, onClose, onPreview, onRestore, onDelete }: {
   onDelete: () => void;
 }) {
   return <ActionMenu anchor={anchor} onClose={onClose} label="Trash actions" items={[
-    { id: 'preview', label: 'Preview', icon: <Eye size={14} aria-hidden="true" />, onSelect: onPreview },
-    { id: 'restore', label: 'Restore', icon: <Undo2 size={14} aria-hidden="true" />, onSelect: onRestore },
-    { id: 'delete', label: 'Delete permanently...', icon: <Trash2 size={14} aria-hidden="true" />, danger: true, dividerBefore: true, onSelect: onDelete },
+    { id: 'preview', label: 'Preview', icon: <EyeIcon aria-hidden="true" />, onSelect: onPreview },
+    { id: 'restore', label: 'Restore', icon: <UndoIcon aria-hidden="true" />, onSelect: onRestore },
+    { id: 'delete', label: 'Delete permanently…', icon: <TrashIcon aria-hidden="true" />, danger: true, dividerBefore: true, onSelect: onDelete },
   ]} />;
 }

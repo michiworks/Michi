@@ -4,7 +4,6 @@ import { act, fireEvent, render, within } from '@testing-library/react';
 import { SUBAGENT_UNTRACKED_ERROR, type BackgroundSubagentsUpdateV1 } from 'michi-shared';
 import { ChatNodeStoreContext } from '../../../state/chatStore';
 import type { ChatMessage, ChatNodeState, SubagentInfo, ToolCallState } from '../../../state/chatTypes';
-import { AgentBlockStyleOverride, type AgentBlockStyle } from '../../../state/prefs';
 import { WorkflowDomainProvider, useOptionalWorkflowDomain, type WorkflowDomainApi } from '../../../state/workflowDomain';
 import { ToolCallGroup } from '../ToolCallGroup';
 import {
@@ -13,8 +12,8 @@ import {
   type OpenBackgroundWorkDetail,
 } from '../backgroundWork/backgroundWorkEvents';
 import { SubagentDetail } from './SubagentDetail';
-import { MessageSubagents, SubagentRow } from './SubagentRoster';
-import { delegationStatus, firstPlainLine, subagentRowTitle, subagentSummary, unclaimedSubagents, withConversationTone, withDelegationStatus } from './subagentPresentation';
+import { MessageSubagents } from './SubagentRoster';
+import { delegationStatus, firstPlainLine, subagentDisplayName, subagentRowTitle, subagentSummary, inlineSubagentRoster, withConversationTone, withDelegationStatus } from './subagentPresentation';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
@@ -99,8 +98,11 @@ describe('SubagentDetail', () => {
     });
     const { getByTestId, getByText } = render(<SubagentDetail subagent={long} />);
     expect(getByTestId('subagent-task').textContent?.length).toBeLessThan(700);
+    expect(getByText('Show full task').getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(getByText('Show full task'));
     expect(getByTestId('subagent-task').textContent).toHaveLength(900);
+    expect(getByText('Show less').getAttribute('aria-controls')).toBe(getByTestId('subagent-task').id);
+    expect(getByText('Show less').getAttribute('aria-expanded')).toBe('true');
     expect(getByText('4 earlier steps not kept')).toBeTruthy();
     expect(getByText('Steps')).toBeTruthy();
     // The step at work says "now", in no run colour.
@@ -188,66 +190,9 @@ describe('delegation status', () => {
 });
 
 describe('delegation chips with a linked roster', () => {
-  it('plain: keeps a backgrounded agent visibly working and opens it in the drawer', () => {
-    const roster = [subagent({ sessionId: 'toolu_1', parentToolCallId: 'toolu_1', agentName: 'Explore', prompt: 'Find readers.', currentTool: 'Read src/auth.ts' })];
-    const { getByTestId, container, rerender, requests } = inConversation(
-      <ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded subagents={roster} />,
-    );
-    const row = getByTestId('subagent-spine-row');
-    expect(row.textContent).toContain('SubAgent · Explore');
-    expect(row.textContent).toContain('now ❯ Read src/auth.ts');
-    expect(row.textContent).toContain('working');
-    // The ❯ ornament is decoration: the line's name keeps "now", not the glyph.
-    expect(within(row).getByRole('button', { name: 'SubAgent · Explore now Read src/auth.ts working' })).toBe(getByTestId('subagent-summary'));
-    expect(within(row).queryByRole('button', { name: /❯/ })).toBeNull();
-
-    // The group auto-collapses when the agent (not its launch receipt) ends.
-    rerender(
-      <BackgroundWorkNodeContext.Provider value="node-1">
-        <ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded subagents={[finished]} />
-      </BackgroundWorkNodeContext.Provider>,
-    );
-    const header = container.querySelector('button[data-toolgroup-header]') as HTMLElement;
-    expect(header.textContent).toContain('completed');
-    fireEvent.click(header);
-    // Named by what it shows, the summary included; the drawer hint is its description.
-    const line = within(getByTestId('subagent-spine-row')).getByRole('button', { name: 'SubAgent · Explore Three readers in src/auth.ts. completed 4.2s' });
-    expect(hintOf(line)).toBe('Show in background work');
-    // One line: the result's first line, never the result body inline.
-    expect(line.textContent).toContain('Three readers in src/auth.ts.');
-    expect(line.textContent).toContain('4.2s');
-    expect(container.querySelector('[data-testid="subagent-result"]')).toBeNull();
-    expect(container.querySelector('[data-testid="subagent-task"]')).toBeNull();
-    fireEvent.click(line);
-    expect(requests).toEqual([{ nodeId: 'node-1', focus: { kind: 'subagent', sessionId: 'toolu_1' } }]);
-  });
-
-  it('plain: a crew chip lists each agent on its own line', () => {
-    const crew: ToolCallState = { id: 'crew', title: 'Spawning agent crew', status: 'in_progress', kind: 'other' };
-    const roster = [
-      subagent({ sessionId: 'a', parentToolCallId: 'crew', agentName: 'reader', initialQuery: 'Read fixture.txt' }),
-      subagent({ sessionId: 'b', parentToolCallId: 'crew', agentName: 'checker', status: 'terminated', outcome: 'completed', result: 'ok' }),
-    ];
-    const { getByTestId, getAllByTestId, requests } = inConversation(<ToolCallGroup tools={[crew]} defaultExpanded subagents={roster} />);
-    expect(getByTestId('subagent-spine-row').textContent).toContain('Spawning agent crew · 2 agents');
-    const rows = getAllByTestId('subagent-row');
-    expect(rows.map((row) => row.getAttribute('data-subagent-id'))).toEqual(['a', 'b']);
-    expect(rows[0].textContent).toContain('Read fixture.txt');
-    expect(rows[1].textContent).toContain('ok');
-    fireEvent.click(within(rows[1]).getByRole('button'));
-    expect(requests).toEqual([{ nodeId: 'node-1', focus: { kind: 'subagent', sessionId: 'b' } }]);
-  });
-
-  it.each(['card', 'terminal'] as const)('%s: one line with name, result and status that opens the drawer', (style) => {
+  it('one line with name, result and status that opens the drawer', () => {
     const tool: ToolCallState = { id: 'toolu_1', title: 'Task', status: 'completed', kind: 'subagent' };
-    const { getByTestId, container, requests } = inConversation(
-      <AgentBlockStyleOverride.Provider value={style}>
-        <ToolCallGroup tools={[tool]} defaultExpanded subagents={[finished]} />
-      </AgentBlockStyleOverride.Provider>,
-    );
-    // A completed pure-subagent group collapses; open it.
-    const header = container.querySelector('button[data-toolgroup-header]');
-    if (header) fireEvent.click(header);
+    const { getByTestId, requests } = inConversation(<ToolCallGroup tools={[tool]} subagents={[finished]} />);
     const card = getByTestId('subagent-card');
     const line = within(card).getByTestId('subagent-summary');
     expect(line.tagName).toBe('BUTTON');
@@ -260,14 +205,28 @@ describe('delegation chips with a linked roster', () => {
   });
 
   it('renders a static line outside a conversation and for a chip without a roster', () => {
-    const { getByTestId, unmount } = render(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded subagents={[finished]} />);
+    const { getByTestId, unmount } = render(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} subagents={[finished]} />);
     expect(getByTestId('subagent-summary').tagName).toBe('DIV');
     expect(getByTestId('subagent-summary').textContent).toContain('Three readers in src/auth.ts.');
     unmount();
-    const { getByTestId: get } = inConversation(<ToolCallGroup tools={[agentTool('toolu_2')]} defaultExpanded />);
+    const { getByTestId: get } = inConversation(<ToolCallGroup tools={[agentTool('toolu_2')]} />);
     const line = get('subagent-summary');
     expect(line.tagName).toBe('DIV');
     expect(line.textContent).toContain('Map the auth flow');
+  });
+
+  it("marks a completed agent with the drawer's green ✓ and a stopped one with the quiet dot", () => {
+    const green = (row: HTMLElement) => [...row.querySelectorAll('[style]')].filter((el) => el.getAttribute('style')?.includes('var(--term-digest)'));
+    const line = (subagent: SubagentInfo) => render(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} subagents={[subagent]} />);
+    const done = line(finished);
+    const [check, word] = green(done.getByTestId('subagent-summary'));
+    expect(check.querySelector('svg')).not.toBeNull();
+    expect(word.textContent).toBe('completed');
+    done.unmount();
+    // Its tool status reads completed too; its own tone says stopped.
+    const stopped = line({ ...finished, outcome: 'cancelled' });
+    expect(green(stopped.getByTestId('subagent-summary'))).toEqual([]);
+    expect(stopped.getByTestId('subagent-summary').querySelector('.term-dot-i')).not.toBeNull();
   });
 });
 
@@ -304,11 +263,11 @@ describe('subagent summaries', () => {
 describe('background agents', () => {
   it('reads "in background" on the spawning message instead of ended', () => {
     const bg = subagent({ sessionId: 'toolu_1', parentToolCallId: 'toolu_1', agentName: 'Explore', status: 'terminated', background: true, prompt: 'Scan' });
-    const { getByTestId, requests } = inConversation(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded subagents={[bg]} />);
+    const { getByTestId, requests } = inConversation(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} subagents={[bg]} />);
     const line = getByTestId('subagent-summary');
-    expect(getByTestId('subagent-spine-row').textContent).toMatch(/in background(?! work)/);
+    expect(getByTestId('subagent-card').textContent).toMatch(/in background(?! work)/);
     expect(line.hasAttribute('aria-label')).toBe(false);
-    expect(within(getByTestId('subagent-spine-row')).getByRole('button', { name: 'SubAgent · Explore Map the auth flow in background' })).toBe(line);
+    expect(within(getByTestId('subagent-card')).getByRole('button', { name: 'Explore Map the auth flow in background' })).toBe(line);
     expect(hintOf(line)).toBe('Show in background work');
     fireEvent.click(line);
     expect(requests).toEqual([{ nodeId: 'node-1', focus: { kind: 'subagent', sessionId: 'toolu_1' } }]);
@@ -318,12 +277,8 @@ describe('background agents', () => {
    * A delegation chip in the first assistant message of conversation
    * node-1, rendered inside a store the test drives (`show` replaces the
    * conversation's messages after the launch message, and sets its status).
-   * Expanded in the plain chrome unless told otherwise.
    */
-  function launchedInConversation(
-    launch: SubagentInfo,
-    { style = 'plain', expanded = true, onRender }: { style?: AgentBlockStyle; expanded?: boolean; onRender?: () => void } = {},
-  ) {
+  function launchedInConversation(launch: SubagentInfo) {
     const tools = [agentTool('toolu_1', 'completed')];
     const launched: ChatMessage[] = [
       { id: 'u1', role: 'user', text: 'go', toolCalls: [] },
@@ -351,22 +306,16 @@ describe('background agents', () => {
       React.useEffect(() => domain?.subscribeWorkspace('ws'), [domain]);
       return null;
     }
-    const { getByTestId, container } = inConversation(
+    const { getByTestId } = inConversation(
       <ChatNodeStoreContext.Provider value={store}>
         <WorkflowDomainProvider api={api}>
           <Subscribe />
-          <AgentBlockStyleOverride.Provider value={style}>
-            <React.Profiler id="group" onRender={() => onRender?.()}>
-              <ToolCallGroup tools={tools} defaultExpanded={expanded} subagents={[launch]} />
-            </React.Profiler>
-          </AgentBlockStyleOverride.Provider>
+          <ToolCallGroup tools={tools} subagents={[launch]} />
         </WorkflowDomainProvider>
       </ChatNodeStoreContext.Provider>,
     );
     return {
       line: () => getByTestId('subagent-summary'),
-      /** The collapsed group's header. */
-      header: () => container.querySelector('button[data-toolgroup-header]') as HTMLElement,
       show: (later: ChatMessage[], status?: ChatNodeState['status']) => {
         current = conversation([...launched, ...later], status);
         act(() => { for (const listener of listeners) listener(); });
@@ -393,13 +342,10 @@ describe('background agents', () => {
   it('reads stopped, with no now line, when the working agent\'s process ended before its turn did', () => {
     // The app quit mid-turn: the launch turn never closed its roster.
     const launch = subagent({ sessionId: 'toolu_1', parentToolCallId: 'toolu_1', agentName: 'Explore', background: true, currentTool: 'Read a.ts', prompt: 'Scan', startedAt: 1_000 });
-    const { line, header, live } = launchedInConversation(launch);
+    const { line, live } = launchedInConversation(launch);
     expect(within(line()).getByTestId('subagent-summary-text').getAttribute('data-summary-tone')).toBe('now');
     expect(line().textContent).toContain('❯ Read a.ts');
     live({ snapshot: true, nodes: {} });
-    // No longer running, the group collapses as it does when an agent ends; open it again.
-    expect(header().textContent).toContain('SubAgent · Explore · stopped');
-    fireEvent.click(header());
     expect(within(line()).getByTestId('subagent-summary-text').getAttribute('data-summary-tone')).toBe('error');
     expect(line().textContent).toContain(SUBAGENT_UNTRACKED_ERROR.split('\n')[0]);
     expect(line().textContent).toContain('stopped');
@@ -431,7 +377,7 @@ describe('background agents', () => {
       result: 'Found 3 issues', usage: { durationMs: 9_000 }, startedAt: 1_000, endedAt: 10_000,
     });
     const { line, show } = launchedInConversation(completed);
-    const name = 'SubAgent · Explore Found 3 issues completed 9.0s';
+    const name = 'Explore Found 3 issues completed 9.0s';
     expect(line().textContent).toContain('Found 3 issues');
     show([
       { id: 'u2', role: 'user', text: 'close it', toolCalls: [] },
@@ -458,146 +404,11 @@ describe('background agents', () => {
 
     // Recorded in place on its own copy, it reads the same.
     const interrupted = { ...launch, outcome: 'cancelled' as const, endedAt: 40_000, error: 'Interrupted: Michi restarted while this subagent was running' };
-    const { container } = inConversation(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded subagents={[interrupted]} />);
+    const { container } = inConversation(<ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} subagents={[interrupted]} />);
     const own = within(container).getByTestId('subagent-summary');
     expect(own.textContent).toContain('Interrupted: Michi restarted while this subagent was running');
     expect(own.textContent).toContain('stopped');
     expect(own.textContent).not.toMatch(/in background(?! work)|working/);
-  });
-
-  describe.each(['plain', 'card', 'terminal'] as const)('%s: the collapsed group', (style) => {
-    const launch = subagent({ sessionId: 'toolu_1', parentToolCallId: 'toolu_1', agentName: 'Explore', status: 'terminated', background: true, prompt: 'Scan', startedAt: 1_000, endedAt: 13_000 });
-    const later = (patch: Partial<SubagentInfo>): ChatMessage[] => [
-      { id: 'self', role: 'assistant', text: '', toolCalls: [], subagents: [subagent({ sessionId: 'toolu_1', status: 'terminated', ...patch })] },
-    ];
-
-    it('reads in background while the agent runs, without running chrome, then stopped once no live process tracks it', () => {
-      const { header, live } = launchedInConversation(launch, { style, expanded: false });
-      expect(header().textContent).toContain('SubAgent · Explore · in background');
-      expect(header().textContent).not.toContain('completed');
-      // Its launch turn is over: no spinner, shimmer or done counter.
-      expect(header().textContent).not.toContain('0/1');
-      expect(header().querySelector('.agent-spinner, .term-shimmer, .term-dot-i--run')).toBeNull();
-
-      live({ snapshot: true, nodes: { 'node-1': ['toolu_1'] } });
-      expect(header().textContent).toContain('SubAgent · Explore · in background');
-      live({ snapshot: false, nodes: { 'node-1': [] } });
-      expect(header().textContent).toContain('SubAgent · Explore · stopped');
-      expect(header().textContent).not.toMatch(/in background|completed/);
-    });
-
-    it('reads the outcome a later turn brought', () => {
-      const { header, show } = launchedInConversation(launch, { style, expanded: false });
-      show(later({ outcome: 'completed', result: 'Found two readers.' }));
-      expect(header().textContent).toContain('SubAgent · Explore · completed');
-      show(later({ outcome: 'failed', error: 'boom' }));
-      expect(header().textContent).toContain('SubAgent · Explore · failed');
-      show(later({ background: true, outcome: 'cancelled', error: 'Interrupted: Michi restarted while this subagent was running' }));
-      expect(header().textContent).toContain('SubAgent · Explore · stopped');
-    });
-
-    it('reads working while the agent works in its turn', () => {
-      const { header } = launchedInConversation({ ...launch, status: 'working' }, { style, expanded: false });
-      expect(header().textContent).toContain('SubAgent · Explore · working');
-    });
-
-    /** The spinner, shimmer or running dot a group shows while it runs. */
-    const spinner = (header: HTMLElement) => header.querySelector('.agent-spinner, .term-shimmer, .term-dot-i--run');
-    /** Header text in the danger text color (the failure fragment). */
-    const dangerText = (header: HTMLElement) => [header, ...header.querySelectorAll('[style]')]
-      .filter((el) => el.getAttribute('style')?.includes('var(--term-danger-text)'))
-      .map((el) => el.textContent);
-    const failedWords = (header: HTMLElement) => header.textContent?.match(/failed/g)?.length ?? 0;
-
-    it('reads a later turn\'s failure as failed once, in the danger color', () => {
-      const { header, show } = launchedInConversation(launch, { style, expanded: false });
-      expect(dangerText(header())).toEqual([]);
-      show(later({ outcome: 'failed', error: 'boom' }));
-      expect(header().textContent).toContain('SubAgent · Explore · failed');
-      expect(failedWords(header())).toBe(1);
-      expect(dangerText(header())).toEqual([' · failed']);
-      expect(spinner(header())).toBeNull();
-      expect(header().textContent).not.toContain('0/1');
-    });
-
-    it('reads a failure on its own copy once, in the danger color', () => {
-      const { header } = launchedInConversation({ ...launch, outcome: 'failed', error: 'boom' }, { style, expanded: false });
-      expect(header().textContent).toContain('SubAgent · Explore · failed');
-      expect(failedWords(header())).toBe(1);
-      expect(dangerText(header())).toEqual([' · failed']);
-    });
-
-    it('neither spins nor counts under the completion a later turn brought to a launch copy left working', () => {
-      // A roster that was never closed: the launch copy still says working.
-      const { header, show } = launchedInConversation({ ...launch, status: 'working' }, { style, expanded: false });
-      show(later({ outcome: 'completed', result: 'Found two readers.' }));
-      expect(header().textContent).toContain('SubAgent · Explore · completed');
-      expect(header().textContent).not.toContain('0/1');
-      expect(spinner(header())).toBeNull();
-      expect(dangerText(header())).toEqual([]);
-    });
-
-    it('neither spins nor counts once liveness stopped a launch copy left working', () => {
-      const { header, live } = launchedInConversation({ ...launch, status: 'working' }, { style, expanded: false });
-      live({ snapshot: true, nodes: {} });
-      expect(header().textContent).toContain('SubAgent · Explore · stopped');
-      expect(header().textContent).not.toContain('0/1');
-      expect(spinner(header())).toBeNull();
-    });
-
-    it('collapses once a later turn ends a launch copy left working', () => {
-      const { header, show } = launchedInConversation({ ...launch, status: 'working' }, { style, expanded: true });
-      expect(header()?.textContent ?? '').not.toContain('SubAgent · Explore');
-      show(later({ outcome: 'completed', result: 'Found two readers.' }));
-      expect(header().textContent).toContain('SubAgent · Explore · completed');
-    });
-
-    it('does not spin for a background agent a later turn carries working', () => {
-      const { header, show } = launchedInConversation(launch, { style, expanded: false });
-      show([
-        { id: 'u2', role: 'user', text: 'next', toolCalls: [] },
-        { id: 'a2', role: 'assistant', text: '', toolCalls: [], streaming: true, subagents: [subagent({ sessionId: 'toolu_1', status: 'working', background: true })] },
-      ], 'streaming');
-      expect(header().textContent).toContain('SubAgent · Explore · working');
-      expect(header().textContent).not.toContain('0/1');
-      expect(spinner(header())).toBeNull();
-    });
-
-    it('spins with its counter while a foreground agent works in its turn', () => {
-      // The plain chrome shows its running chrome on the open group's header;
-      // the terminal header's running chrome is the counter alone.
-      const { header } = launchedInConversation({ ...launch, status: 'working', background: false }, { style, expanded: style === 'plain' });
-      expect(header().textContent).toContain('0/1');
-      if (style !== 'terminal') expect(spinner(header())).not.toBeNull();
-    });
-
-    it('does not re-render on stream frames that leave the agent as it is', () => {
-      let renders = 0;
-      const { header, show } = launchedInConversation(launch, { style, expanded: false, onRender: () => { renders += 1; } });
-      const before = renders;
-      expect(before).toBeGreaterThan(0);
-      show([{ id: 'u2', role: 'user', text: 'next', toolCalls: [] }, { id: 'a2', role: 'assistant', text: 'Hel', toolCalls: [], streaming: true }]);
-      show([{ id: 'u2', role: 'user', text: 'next', toolCalls: [] }, { id: 'a2', role: 'assistant', text: 'Hello', toolCalls: [], streaming: true }]);
-      expect(renders).toBe(before);
-      expect(header().textContent).toContain('SubAgent · Explore · in background');
-    });
-
-    it('reads the tool status without a conversation or an exactly linked entry', () => {
-      const collapsed = (ui: React.ReactElement) => <AgentBlockStyleOverride.Provider value={style}>{ui}</AgentBlockStyleOverride.Provider>;
-      const group = <ToolCallGroup tools={[agentTool('toolu_1', 'completed')]} defaultExpanded={false} subagents={[launch]} />;
-      const headerIn = (container: HTMLElement) => container.querySelector('button[data-toolgroup-header]')!.textContent;
-      // No chat node (specimens, provider-free tests).
-      const bare = render(collapsed(group));
-      expect(headerIn(bare.container)).toContain('SubAgent · Explore · completed');
-      bare.unmount();
-      // A chat node id but no store.
-      const noStore = inConversation(collapsed(group));
-      expect(headerIn(noStore.container)).toContain('SubAgent · Explore · completed');
-      noStore.unmount();
-      // A legacy entry matched by name, not linked to the chip.
-      const { header } = launchedInConversation({ ...launch, parentToolCallId: undefined }, { style, expanded: false });
-      expect(header().textContent).toContain('SubAgent · Explore · completed');
-    });
   });
 
   it('explains a background agent in its detail', () => {
@@ -608,19 +419,22 @@ describe('background agents', () => {
 
   it('names Codex children by thread id when they have no nickname', () => {
     const child = subagent({ sessionId: '01a13922-817a', source: 'codex', status: 'terminated', outcome: 'completed' });
-    const { getByTestId } = render(<SubagentRow subagent={child} />);
-    expect(getByTestId('subagent-row').textContent).toContain('Codex 01a13922');
+    expect(subagentDisplayName(child)).toContain('Codex 01a13922');
   });
 });
 
 describe('message-level roster', () => {
+  const rosterNode = (subagents: SubagentInfo[], toolCalls: ToolCallState[]): ChatNodeState => ({
+    nodeId: 'node-1', kind: 'chat', chatId: null, projectId: 'ws', followUps: [], status: 'idle',
+    messages: [{ id: 'a1', role: 'assistant', text: '', toolCalls, subagents }],
+  } as ChatNodeState);
+
   it('shows only agents no chip in the message claims', () => {
     const crewAgent = subagent({ sessionId: 'crew-1', agentName: 'researcher', source: 'crew' });
-    const roster = [finished, crewAgent];
-    const unclaimed = unclaimedSubagents(roster, [agentTool('toolu_1', 'completed')]);
-    expect(unclaimed.map((entry) => entry.sessionId)).toEqual(['crew-1']);
+    const roster = inlineSubagentRoster(rosterNode([finished, crewAgent], [agentTool('toolu_1', 'completed')]));
+    expect(roster?.subagents.map((entry) => entry.sessionId)).toEqual(['crew-1']);
 
-    const { getByTestId } = render(<MessageSubagents subagents={unclaimed} />);
+    const { getByTestId } = render(<MessageSubagents subagents={roster!.subagents} />);
     expect(getByTestId('message-subagents').textContent).toBe('Subagents1 working');
   });
 
@@ -648,11 +462,12 @@ describe('message-level roster', () => {
     expect(line.textContent).toContain('1 done');
     expect(hintOf(line)).toBe('Show in background work');
     fireEvent.click(line);
-    expect(requests).toEqual([{ nodeId: 'node-1' }]);
+    expect(requests).toEqual([{ nodeId: 'node-1', subagentIds: ['toolu_1'] }]);
   });
 
   it('renders nothing when every agent is claimed', () => {
-    const { container } = render(<MessageSubagents subagents={unclaimedSubagents([finished], [agentTool('toolu_1')])} />);
+    expect(inlineSubagentRoster(rosterNode([finished], [agentTool('toolu_1')]))).toBeUndefined();
+    const { container } = render(<MessageSubagents subagents={[]} />);
     expect(container.firstChild).toBeNull();
   });
 });

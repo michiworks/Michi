@@ -62,13 +62,14 @@ function makeHub(opts: {
   titleGenerator?: ((request: SidecarTitleRequest) => Promise<string | null>) | null;
   nodeTitle?: (nodeId: string) => string | null;
   checkpoints?: DurableTurnSnapshot[];
+  onCheckpoint?: (snapshot: DurableTurnSnapshot) => void;
 }) {
   return new ChatHub({
     retentionMs: 100,
     workspaceIdForNode: () => 'ws-test',
     persistence: {
       begin: () => {},
-      checkpoint: (snapshot) => { opts.checkpoints?.push(snapshot); },
+      checkpoint: (snapshot) => { opts.checkpoints?.push(snapshot); opts.onCheckpoint?.(snapshot); },
       finalize: () => {},
     },
     titleGenerator: opts.titleGenerator,
@@ -83,11 +84,15 @@ async function flush(): Promise<void> {
 describe('ChatHub sidecar title generation', () => {
   it('emits a title event and checkpoints it while the turn is still streaming', async () => {
     const title = deferred<string | null>();
+    const checkpointed = deferred<void>();
     const requests: SidecarTitleRequest[] = [];
     const checkpoints: DurableTurnSnapshot[] = [];
     const hub = makeHub({
       titleGenerator: (request) => { requests.push(request); return title.promise; },
       checkpoints,
+      onCheckpoint: (snapshot) => {
+        if (snapshot.nodeMetadata.title === 'Fixing flaky tests') checkpointed.resolve();
+      },
     });
     const { session, finish } = holdingSession();
     const seen: ChatStreamEvent[] = [];
@@ -107,7 +112,7 @@ describe('ChatHub sidecar title generation', () => {
     assert.equal(requests[0].nodeId, 'node-1');
 
     title.resolve('  Fixing flaky tests  ');
-    await flush();
+    await checkpointed.promise;
 
     const titleEvents = seen.filter((event) => event.event === 'title');
     assert.equal(titleEvents.length, 1);

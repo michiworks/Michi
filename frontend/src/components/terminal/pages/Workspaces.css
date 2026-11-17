@@ -1,0 +1,29 @@
+/* The desktop Workspaces table. */
+
+/* A row's ⋯ rests dim for a pointer that can hover and shows in full while
+   the row is hovered, the keyboard is in it or its menu is open; a touch
+   screen always shows it in full (ST-04). */
+@media (hover: hover) {
+  .ws-table-more { opacity: 0.45; }
+  tr:is(:hover, :has(:focus-visible)) .ws-table-more,
+  .ws-table-more[aria-expanded='true'] { opacity: 1; }
+}
+
+/* A row lights under a pointer, or for keyboard focus in it; the open
+   workspace keeps its --term-alt fill. CSS, not React state: a pointer moving
+   over the table renders nothing (ST-27). */
+.workspaces-row {
+  background: transparent;
+  transition: background var(--t-quick) var(--t-ease);
+}
+.workspaces-row[data-active] {
+  background: var(--term-alt);
+}
+@media (hover: hover) {
+  .workspaces-row:not([data-active]):hover {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+.workspaces-row:not([data-active]):has(:focus-visible) {
+  background: var(--term-hover-bg, var(--term-alt));
+}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight, FileText, MessageSquare, Plus, Sparkles } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
 import { HOME_SECTION_KEYS, META_AGENT_DEFAULT_FIRST_RUN_DAYS, type FirstRunProgressDto, type HomeSectionKey, type SpacesHomeSectionsDto, type WorkspaceHomeDto } from 'michi-shared';
 import { useChatActions, useChatNodesSnapshot, useChatProjects } from '../../../../state/chatStore';
 import type { ChatNodeState, Project } from '../../../../state/chatTypes';
@@ -16,6 +16,8 @@ import { useMinuteClock } from '../../content/home/useMinuteClock';
 import { CreateSpaceDialog, type OpenNativePageRoute } from '../SpacesPage';
 import { HomePlaceholder, useHomeDocument } from './HomeDocument';
 import { formatMichiAgo } from '../../content/michiFormat';
+import { CompanionGlyph } from '../../companion/CompanionGlyph';
+import { ChatIcon, ChevronRightIcon, DocIcon, PlusIcon } from '../../icons';
 import { useHomeNavigation } from './useHomeNavigation';
 import { NewChatSheetSlot, PageProgressCards, type SpaceConversationScope } from './homeLinks';
 import { useSpacesHomeSections } from './homeCounts';
@@ -23,6 +25,7 @@ import { useCompanionName } from '../../../../state/companion/companionName';
 import '../../content/home/michiHome.css';
 import './home.css';
 import { LayoutRulesMenuButton } from '../layoutRules/LayoutRulesMenu';
+import { usePageArrival } from '../usePageArrival';
 
 export interface WorkspaceHomeViewProps {
   workspaceId: string;
@@ -187,6 +190,9 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
 
   const name = project?.name ?? home.data?.page.title ?? 'Workspace';
   const page = doc.page;
+  // Until its first answer the home is its skeleton; one watched on screen hands over as Home does.
+  const pending = home.status === 'loading' && !page;
+  const arriving = usePageArrival(pending, workspaceId);
   const blocks = page?.blocks ?? [];
   const own = (spaces ?? []).filter((space) => space.workspaceId === workspaceId);
   const related = React.useMemo(() => workspaceConversations(project, nodes, sections.data), [nodes, project, sections.data]);
@@ -208,20 +214,22 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
     window.dispatchEvent(new CustomEvent('michi:goto-home'));
   };
 
-  if (home.status === 'loading' && !page) {
+  const kicker = <p className="area-settings__kicker" data-still="">{name} · workspace home</p>;
+  const skeletonBars = <div className="michi-doc-skeleton" aria-hidden="true"><span style={{ width: '46%', height: 24 }} /><span style={{ width: '62%' }} /><span style={{ width: '100%', height: 64 }} /></div>;
+  if (pending) {
     return <main className="area-settings michi-doc spaces-home" aria-label={name}><div className="area-settings__doc spaces-home__doc">
-      <p className="area-settings__kicker">{name} · workspace home</p>
-      <div className="michi-doc-skeleton" aria-hidden="true"><span style={{ width: '46%', height: 24 }} /><span style={{ width: '62%' }} /><span style={{ width: '100%', height: 64 }} /></div>
+      {kicker}
+      {skeletonBars}
       <p className="spaces-home-muted" role="status">Loading…</p>
     </div></main>;
   }
 
   return (
-    <main className="area-settings michi-doc space-doc spaces-home spaces-ws-home" aria-labelledby="workspace-home-title">
+    <main className="area-settings michi-doc space-doc spaces-home spaces-ws-home" aria-labelledby="workspace-home-title" data-arriving={arriving ? '' : undefined}>
       <div className="area-settings__doc spaces-home__doc">
         <NewChatSheetSlot scope={scope} />
         <header className="spaces-home__head">
-          <p className="area-settings__kicker">{name} · workspace home</p>
+          {kicker}
           <div className="spaces-home__title-row">
             <h1 id="workspace-home-title" className="spaces-home__title">{name}</h1>
             <span className="spaces-home-spacer" /><LayoutRulesMenuButton pageId={page?.id ?? null} backendConnectionId={backendConnectionId} readOnly={home.stale} />
@@ -238,11 +246,11 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
         {page && blocks.length === 0 && noConversations && !firstRunActive ? (
           <div className="spaces-home-empty-ws">
             <p className="spaces-home-lead">No conversations yet. Start one and this page writes itself.</p>
-            <div><Button size="sm" onClick={newConversation}><MessageSquare size={12} strokeWidth={1.7} aria-hidden="true" />New conversation</Button></div>
+            <div><Button size="sm" onClick={newConversation}><ChatIcon size="sm" aria-hidden="true" />New conversation</Button></div>
           </div>
         ) : <>
           {doc.renderBlocks(blocks.slice(0, 1), 'lead')}
-          {source && <div className="spaces-home-source"><Sparkles size={12} strokeWidth={1.7} aria-hidden="true" /><span>{source}</span></div>}
+          {source && <div className="spaces-home-source"><CompanionGlyph size={12} /><span>{source}</span></div>}
           <PageProgressCards scope={scope} />
           {home.data && blocks.length === 0 && firstRunActive && <FirstRunPending run={run} name={name} onRetry={() => { void retrySpacesFirstRunNow(backendConnectionId, workspaceId); }} />}
           {home.data && blocks.length === 0 && !firstRunActive && (nothingRecent
@@ -259,7 +267,7 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
             <div className="spaces-home-space-cards">
               {own.map((space) => (
                 <button key={space.id} type="button" className="spaces-home-space-card" onClick={() => onOpenPage({ pageId: space.id, workspaceId, backendConnectionId })}>
-                  <span className="spaces-home-space-card__title"><FileText size={14} strokeWidth={1.6} aria-hidden="true" />{space.title || 'Untitled page'}</span>
+                  <span className="spaces-home-space-card__title"><DocIcon aria-hidden="true" />{space.title || 'Untitled page'}</span>
                   <span className="spaces-home-space-card__sub">
                     {space.pageCount} {space.pageCount === 1 ? 'page' : 'pages'}
                     {space.pendingProposals > 0 && <> · <span className="spaces-home-accent">{space.pendingProposals} waiting for you</span></>}
@@ -267,7 +275,7 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
                 </button>
               ))}
               <button type="button" className="spaces-home-space-card spaces-home-space-card--add" onClick={() => setCreating(true)}>
-                <Plus size={14} strokeWidth={1.7} aria-hidden="true" />New page
+                <PlusIcon aria-hidden="true" />New page
               </button>
             </div>
           </section>
@@ -284,14 +292,14 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
             {related.length > 0 && <div className="spaces-home-threads">
               {shownRelated.map((thread) => (
                 <button key={thread.nodeId} type="button" className="spaces-home-threads__row" onClick={() => { void nav.openThread({ nodeId: thread.nodeId, workspaceId }); }}>
-                  <MessageSquare size={13} strokeWidth={1.7} aria-hidden="true" />
+                  <ChatIcon aria-hidden="true" />
                   <span className="spaces-home-threads__title">{thread.title}</span>
                   {thread.runtimeId && <span className="michi-tag spaces-home-threads__runtime">{runtimeName(thread.runtimeId)}</span>}
                   <span className="spaces-home-spacer" />
                   <span className="spaces-home-muted" data-state={thread.state ?? undefined}>
                     {[thread.state && RELATED_CONVERSATION_STATE[thread.state], formatMichiAgo(thread.at, clock)].filter(Boolean).join(' · ')}
                   </span>
-                  <ChevronRight size={13} strokeWidth={1.7} aria-hidden="true" />
+                  <ChevronRightIcon aria-hidden="true" />
                 </button>
               ))}
             </div>}
@@ -300,7 +308,14 @@ function LocalWorkspaceHome({ workspaceId, backendConnectionId, onOpenPage }: Wo
           </>}
         </>}
       </div>
-      {creating && <CreateSpaceDialog activeWorkspaceId={workspaceId} onClose={() => setCreating(false)} onCreated={(route) => { setCreating(false); onOpenPage(route); }} />}
+      {arriving && <div className="area-settings__doc spaces-home__doc spaces-arrival-ghost" aria-hidden="true" inert>
+        {kicker}
+        {skeletonBars}
+        <p className="spaces-home-muted">Loading…</p>
+      </div>}
+      <AnimatePresence>
+        {creating && <CreateSpaceDialog key="create-space" activeWorkspaceId={workspaceId} onClose={() => setCreating(false)} onCreated={(route) => { setCreating(false); onOpenPage(route); }} />}
+      </AnimatePresence>
     </main>
   );
 }

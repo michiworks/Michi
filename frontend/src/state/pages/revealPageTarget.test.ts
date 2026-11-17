@@ -39,6 +39,32 @@ describe('revealPageTarget', () => {
     expect(scrolled('b')).toHaveBeenCalledWith(expect.objectContaining({ behavior: 'auto' }));
   });
 
+  it('lands a jump from another surface at once and holds it while the page settles, until a wheel lets go', () => {
+    el('<div class="michi-doc-block" id="b" data-block-id="b-1"></div>');
+    const block = document.getElementById('b')!;
+    // The page above it is still growing: the block moves every frame.
+    let top = 0;
+    block.getBoundingClientRect = () => ({ top: (top += 40) }) as DOMRect;
+    revealPageTarget({ targetId: 'b-1' }, { land: 'instant' });
+    expect(scrolled('b')).toHaveBeenLastCalledWith({ block: 'center', inline: 'nearest' });
+    expect(block.hasAttribute('data-reveal-flash')).toBe(true);
+    vi.advanceTimersByTime(200);
+    const held = scrolled('b').mock.calls.length;
+    expect(held).toBeGreaterThan(2);
+    window.dispatchEvent(new Event('wheel'));
+    vi.advanceTimersByTime(1_000);
+    expect(scrolled('b')).toHaveBeenCalledTimes(held);
+    expect(scrolled('b')).not.toHaveBeenCalledWith(expect.objectContaining({ behavior: 'smooth' }));
+  });
+
+  it('ends a jump\'s hold once its target keeps still', () => {
+    el('<div class="michi-doc-block" id="b" data-block-id="b-1"></div>');
+    revealPageTarget({ targetId: 'b-1' }, { land: 'instant' });
+    vi.advanceTimersByTime(2_000);
+    // The first frame, then three still ones.
+    expect(scrolled('b')).toHaveBeenCalledTimes(4);
+  });
+
   it('in a page pane finds only that page\'s block, row or whole database; a row does not flash', () => {
     const pane = { pageId: 'page-1', workspaceId: 'ws', backendConnectionId: 'local' };
     el('<div data-native-page-pane data-page-id="page-2" data-workspace-id="ws" data-backend-connection-id="local"><div class="michi-doc-block" id="other" data-block-id="b-1"></div></div>'
@@ -57,7 +83,7 @@ describe('revealPageTarget', () => {
 
   it('a newer reveal replaces one still waiting, and a reveal gives up after its wait', () => {
     revealPageTarget({ targetId: 'first' });
-    revealPageTarget({ targetId: 'second' }, 1_000);
+    revealPageTarget({ targetId: 'second' }, { timeoutMs: 1_000 });
     el('<div class="michi-doc-block" id="first" data-block-id="first"></div>');
     vi.advanceTimersByTime(200);
     expect(scrolled('first')).not.toHaveBeenCalled();

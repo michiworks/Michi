@@ -12,9 +12,11 @@ import * as path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import {
+  applyWorkflowRunPatch,
   BACKGROUND_SUBAGENT_LIMITS,
   boundWorkflowRun,
   isBackgroundSubagentPending,
+  omittedItemsCount,
   omittedLeafCounts,
   parseBackgroundSubagentsEnded,
   parseBackgroundSubagentsUpdate,
@@ -825,6 +827,15 @@ describe('boundWorkflowRun', () => {
     assert.equal(boundWorkflowRun(small), small);
   });
 
+  it('keeps a JSON result valid while trimming it', () => {
+    const result = JSON.stringify({ docs: Array.from({ length: 6 }, (_, i) => ({ file: `doc-${i}.md`, notes: ['n'.repeat(3_000), 'm'.repeat(3_000)] })) }, null, 2);
+    const bounded = boundWorkflowRun(big({ result }), 40_000);
+    // Down to node skeletons, the result keeps 400 characters: its first doc and a count of the rest.
+    const kept = JSON.parse(bounded.result!) as { docs: unknown[] };
+    assert.equal((kept.docs[0] as { file: string }).file, 'doc-0.md');
+    assert.equal(kept.docs.length - 1 + (omittedItemsCount(kept.docs[kept.docs.length - 1]) ?? 0), 6);
+  });
+
   const bytes = (runs: WorkflowRunDtoV1[]) => runs.reduce((sum, run) => sum + Buffer.byteLength(JSON.stringify(run), 'utf8'), 0);
 
   it('marks runs the bulk snapshot trimmed as partial and keeps it within its byte budget', () => {
@@ -876,6 +887,32 @@ describe('boundWorkflowRun', () => {
     assert.ok(sent.length < 50);
     assert.ok(sent.some((run) => run.id === 'wfr_waiting'), 'the open run is kept');
     assert.ok(bytes(sent) <= 2_000_000);
+  });
+
+  it('sends a large finished run as its summary, and open, small and multi-model runs whole', () => {
+    const result = JSON.stringify({ docs: Array.from({ length: 4 }, (_, i) => ({ file: `doc-${i}.md`, rules: i, notes: ['n'.repeat(2_000)] })) }, null, 2);
+    const finished = big({
+      id: 'wfr_done', status: 'completed', actions: [], approvals: undefined, result, definition: 'phase("write")',
+      nodes: [
+        { id: 'p', kind: 'phase', title: 'write', status: 'completed', startedAt: 1, endedAt: 9 },
+        { id: 'a', parentId: 'p', kind: 'agent', title: 'tokens', status: 'failed', model: 'opus', prompt: 'p'.repeat(4_000), result: 'r'.repeat(8_000), error: 'rate limited\nexit code 1', usage: { totalTokens: 9 } },
+      ],
+    });
+    const open = big({ id: 'wfr_open', nodes: [], log: [] });
+    const small = big({ id: 'wfr_small', status: 'completed', actions: [], approvals: undefined, nodes: [], log: [] });
+    const multiModel = { ...finished, id: 'wfr_mm', multiModel: {} as NonNullable<WorkflowRunDtoV1['multiModel']> };
+    const [summary, ...rest] = snapshotRuns([finished, open, small, multiModel]);
+    assert.deepEqual(rest, [open, small, multiModel]);
+    assert.equal(summary.partial, true);
+    assert.equal(parseWorkflowRunDto(summary)?.partial, true, 'the client reads it as partial');
+    assert.deepEqual(summary.nodes, [
+      { id: 'p', kind: 'phase', title: 'write', status: 'completed', startedAt: 1, endedAt: 9 },
+      { id: 'a', parentId: 'p', kind: 'agent', title: 'tokens', status: 'failed', model: 'opus', usage: { totalTokens: 9 }, error: 'rate limited' },
+    ]);
+    assert.deepEqual([summary.log, summary.definition], [[], undefined]);
+    const preview = JSON.parse(summary.result!) as { docs: Array<{ file: string; rules: number }> };
+    assert.deepEqual(preview.docs.map((doc) => [doc.file, doc.rules]), [['doc-0.md', 0], ['doc-1.md', 1], ['doc-2.md', 2], ['doc-3.md', 3]]);
+    assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 4_000);
   });
 
   it('counts the partial flag in the budget, so a run that fits whole is not dropped for it', () => {
@@ -1011,6 +1048,40 @@ describe('workflow run routes', () => {
     };
     return { next, close: () => controller.abort() };
   }
+
+  it('sends a subscriber that asks for patches what changed against the run it sent it, and others whole runs', async () => {
+    const hub = new WorkflowRunHub(memoryStore());
+    hub.update(CONTEXT, 'claude', 'task-1', (run) => ({ ...run, name: 'first', nodes: [{ id: 'a', kind: 'agent', title: 'alpha', status: 'running', prompt: 'p'.repeat(4_000) }] }));
+    const base = await start(hub);
+    const open = async (query: string) => {
+      const controller = new AbortController();
+      const response = await fetch(`${base}/workflow-runs/subscribe?workspaceId=ws-a${query}`, { headers: { 'x-user': 'owner-a' }, signal: controller.signal });
+      const reader = response.body!.getReader();
+      let buffer = '';
+      const next = async () => {
+        while (!buffer.includes('\n\n')) { const chunk = await reader.read(); if (chunk.done) throw new Error('closed'); buffer += new TextDecoder().decode(chunk.value); }
+        const frame = buffer.slice(0, buffer.indexOf('\n\n'));
+        buffer = buffer.slice(buffer.indexOf('\n\n') + 2);
+        return parseWorkflowRunSseEnvelope(JSON.parse(frame.split('\n').find((line) => line.startsWith('data: '))!.slice(6)))!;
+      };
+      return { next, close: () => controller.abort() };
+    };
+    const patched = await open('&patches=1');
+    const whole = await open('');
+    const first = (await patched.next()).run!;
+    assert.equal((await whole.next()).run?.name, 'first');
+    hub.update(CONTEXT, 'claude', 'task-1', (run) => ({ ...run, nodes: [{ ...run.nodes[0], status: 'completed', result: 'done' }] }));
+    const change = await patched.next();
+    assert.equal(change.event, 'workflow_run_patch');
+    assert.deepEqual(change.patch?.nodes, [{ id: 'a', set: { status: 'completed', result: 'done' } }]);
+    assert.ok(JSON.stringify(change.patch).length < 400, 'the step\'s prompt is not sent again');
+    assert.deepEqual(parseWorkflowRunDto(applyWorkflowRunPatch(first, change.patch!)), hub.get('owner-a', first.id));
+    const plain = await whole.next();
+    assert.equal(plain.event, 'workflow_run');
+    assert.equal(plain.run?.nodes[0].status, 'completed');
+    patched.close();
+    whole.close();
+  });
 
   it('sends the caller\'s background subagents first, then their changes only', async () => {
     const hub = new WorkflowRunHub(memoryStore());

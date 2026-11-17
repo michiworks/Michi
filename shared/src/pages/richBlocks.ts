@@ -3,6 +3,9 @@
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import { isCalendarDay } from '../calendarDay';
+import { FORM_FIELD_LIMITS, FORM_FIELD_RULES, FORM_FIELD_TYPES, formFieldRuleBreaks, type FormField } from '../formField';
+
+export type { FormField, FormFieldValue } from '../formField';
 
 const text = z.string().max(2_000);
 const title = z.string().max(200);
@@ -73,8 +76,22 @@ export const richChartSchema = z.discriminatedUnion('kind', [
 });
 export type RichChart = z.infer<typeof richChartSchema>;
 
-const field = obj({ key: z.string().min(1).max(100).refine((v) => v.trim() === v && v.length > 0, 'must not start or end with spaces'), label: filled, type: z.enum(['text', 'number', 'select', 'date', 'checkbox']),
-  required: z.boolean().optional(), options: list(filled).optional() });
+/** One control of a form block or an ask_user question (formField.ts says what each type sends). */
+export const formFieldSchema: z.ZodType<FormField> = obj({
+  key: z.string().min(1).max(FORM_FIELD_LIMITS.key).refine((v) => v.trim() === v && v.length > 0, 'must not start or end with spaces'),
+  label: filled,
+  type: z.enum(FORM_FIELD_TYPES),
+  required: z.boolean().optional(),
+  options: list(filled, FORM_FIELD_LIMITS.options).optional().describe('select and multiselect'),
+  min: num.optional(),
+  max: num.optional(),
+  step: num.positive().optional(),
+  unit: z.string().max(FORM_FIELD_LIMITS.unit).refine((v) => v.trim().length > 0, 'must contain text').optional().describe('shown after a number or slider value'),
+  default: z.union([text, num, z.boolean(), z.array(text).max(FORM_FIELD_LIMITS.options)]).optional(),
+  help: z.string().max(FORM_FIELD_LIMITS.help).refine((v) => v.trim().length > 0, 'must contain text').optional().describe('one short line under the control'),
+}).superRefine((field, ctx) => {
+  for (const { rule, property } of formFieldRuleBreaks(field)) ctx.addIssue({ code: 'custom', message: rule, path: [property] });
+});
 
 /** Rules across fields that the JSON Schema cannot say; each is also the message of the check that enforces it. */
 const RULES = {
@@ -86,7 +103,6 @@ const RULES = {
   calendar: 'every event date falls in month',
   gantt: 'each item ends on or after its start',
   formKeys: 'field keys are unique',
-  formSelect: 'a select field needs options',
   poll: 'options are unique',
 } as const;
 
@@ -127,20 +143,19 @@ export const RICH_BLOCK_SCHEMAS = {
   person: block('person', { name: filled, role: text.optional(), avatar: url.optional(), note: text.optional(), links: list(obj({ label: filled, url }), 10, 0).optional() }),
   place: block('place', { name: filled, address: text.optional(), note: text.optional(), url: url.optional() }),
   actions: block('actions', { buttons: list(obj({ label: filled, prompt: filled.describe('text sent to the assistant when pressed') }), 6) }),
-  form: block('form', { title: namedTitle, fields: list(field, 20), submitLabel: text.optional(), prompt: filled })
-    .refine((b) => new Set(b.fields.map((f) => f.key)).size === b.fields.length, RULES.formKeys)
-    .refine((b) => b.fields.every((f) => f.type !== 'select' || !!f.options?.length), RULES.formSelect),
+  form: block('form', { title: namedTitle, fields: list(formFieldSchema, 20), submitLabel: text.optional(), prompt: filled })
+    .refine((b) => new Set(b.fields.map((f) => f.key)).size === b.fields.length, RULES.formKeys),
   poll: block('poll', { question: filled, options: list(filled, 50, 2), multi: z.boolean().optional() }).refine((b) => new Set(b.options).size === b.options.length, RULES.poll),
 } as const;
 export type RichBlockType = keyof typeof RICH_BLOCK_SCHEMAS;
 export type RichBlockContent = z.infer<(typeof RICH_BLOCK_SCHEMAS)[RichBlockType]>;
 
-const RULE_TEXTS = new Set<string>([...Object.values(RULES), ...Object.values(RICH_CHART_RULES)]);
+const RULE_TEXTS = new Set<string>([...Object.values(RULES), ...Object.values(RICH_CHART_RULES), ...Object.values(FORM_FIELD_RULES)]);
 
 /** Each type's rules beyond its fields, for tool descriptions. */
 export const RICH_BLOCK_RULES: Partial<Record<RichBlockType, string>> = {
   diff: RULES.diff, 'pros-cons': RULES['pros-cons'], choice: RULES.choice, stepper: RULES.stepper, gauge: RULES.gauge,
-  calendar: RULES.calendar, gantt: RULES.gantt, form: `${RULES.formKeys}; ${RULES.formSelect}`, poll: RULES.poll,
+  calendar: RULES.calendar, gantt: RULES.gantt, form: `${RULES.formKeys}; ${Object.values(FORM_FIELD_RULES).join('; ')}`, poll: RULES.poll,
 };
 
 export function parseRichBlock(value: unknown): RichBlockContent | null {

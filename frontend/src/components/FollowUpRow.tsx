@@ -10,6 +10,11 @@ export interface FollowUpRowProps {
   /** Already branched from here (phones): the button reads Branched and the
    *  row quiets; branching again still works. */
   branched?: boolean;
+  /** The turn it follows ended on screen: the row pops in, 90ms after the
+   *  one above it. Otherwise it renders settled (index.css). */
+  arriving?: boolean;
+  /** Its pop has ended. */
+  onArrived?: () => void;
 }
 
 export function FollowUpRow({
@@ -19,6 +24,8 @@ export function FollowUpRow({
   onBranch,
   disabled = false,
   branched = false,
+  arriving = false,
+  onArrived,
 }: FollowUpRowProps): React.JSX.Element {
   const ariaContinue = `Continue follow-up in current pane: ${question}. Press B to branch into a new pane.`;
   const ariaBranch = `Branch follow-up into new pane: ${question}`;
@@ -51,6 +58,8 @@ export function FollowUpRow({
       style={{ '--followup-delay': `${index * 90}ms` } as React.CSSProperties}
       data-disabled={disabled ? 'true' : undefined}
       data-branched={branched ? 'true' : undefined}
+      data-arriving={arriving ? '' : undefined}
+      onAnimationEnd={onArrived ? (e) => { if (e.target === e.currentTarget) onArrived(); } : undefined}
     >
       <button
         type="button"
@@ -71,7 +80,7 @@ export function FollowUpRow({
         onClick={handleBranchClick}
       >
         <span className="t-followup-branch-glyph" aria-hidden>
-          <BranchIcon size={15} />
+          <BranchIcon />
         </span>
         <span className="t-followup-branch-label">{branched ? 'Branched' : 'Branch'}</span>
       </button>

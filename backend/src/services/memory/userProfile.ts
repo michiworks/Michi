@@ -9,6 +9,7 @@ import { getMemorySettings, onMemoryRemoved } from './memoryService';
 import { normalizeText } from './memoryTerms';
 import { containsCredential } from './secrets';
 import { vouchedForRecall } from './typedText';
+import { isExpired } from './validity';
 
 /**
  * Michi's profile of the user: a short summary of what Michi knows about
@@ -21,7 +22,8 @@ import { vouchedForRecall } from './typedText';
  *
  * It is built from the user's active user-scope memories that Michi saved
  * itself (memoryRepository.profileMemoryRows; the user's own saved memories
- * are pinned word for word anyway), never from a memory that may not be
+ * are pinned word for word anyway), never from one past its end
+ * (validity.ts), never from a memory that may not be
  * recalled (typedText.vouchedForRecall), holds a credential or a sensitive
  * category (health, religion, ethnicity, politics, sexuality, a precise
  * address or phone number). A background automatic memory run rebuilds it
@@ -623,13 +625,16 @@ export function readUserProfile(ownerUserId: string): UserProfile | null {
 
 /**
  * The lines a pack may show now, in order: every memory a line cites is
- * still active at the version it cites, in the user scope and recallable.
- * cited: those memories, by id.
+ * still active at the version it cites, in the user scope, recallable and
+ * not past its end at `now` (validity.ts). cited: those memories, by id.
  */
-export function currentProfileLines(ownerUserId: string, profile: UserProfile): { lines: ProfileLine[]; cited: Map<string, StoredMemory> } {
+export function currentProfileLines(ownerUserId: string, profile: UserProfile, now = Date.now()): { lines: ProfileLine[]; cited: Map<string, StoredMemory> } {
   const ids = [...new Set(profile.lines.flatMap((line) => line.refs.map((ref) => ref.id)))];
   const stored = new Map(storedMemories(ownerUserId, ids).map((entry) => [entry.record.id, entry]));
-  const lines = profile.lines.filter((line) => line.refs.length > 0 && line.refs.every((ref) => citable(stored.get(ref.id), ref.version)));
+  const lines = profile.lines.filter((line) => line.refs.length > 0 && line.refs.every((ref) => {
+    const memory = stored.get(ref.id);
+    return citable(memory, ref.version) && !isExpired(memory.record.validUntil, now);
+  }));
   return { lines, cited: stored };
 }
 

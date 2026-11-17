@@ -8,7 +8,8 @@ import { readWorkspaceFile } from '../../services/workspaceFileReader';
 import { getElectron, type FilePreviewResult, type FileTreeEntry } from '../../lib/electronBridge';
 import { artifactHostPath, isAbsoluteFilePath } from '../../lib/workspaceFilePath';
 import MarkdownContent from '../MarkdownContent';
-import { ExternalLinkIcon } from './icons';
+import { DocIcon, ExternalLinkIcon, SearchIcon } from './icons';
+import { DisclosureChevron } from './primitives';
 import { isLocalProject } from '../../config/backendConnections';
 
 const MARKDOWN_EXTS = new Set(['md', 'mdx', 'markdown']);
@@ -107,9 +108,9 @@ const TreeRow = memo(function TreeRow({
           textAlign: 'left',
         }}
       >
-        <span aria-hidden style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>
-          {isDirectory ? (isExpanded ? '⌄' : '›') : '·'}
-        </span>
+        {isDirectory
+          ? <DisclosureChevron open={isExpanded} style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', textAlign: 'center' }} />
+          : <span aria-hidden style={{ color: 'var(--term-muted)', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>·</span>}
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.name}</span>
       </button>
       {isDirectory && isExpanded ? (
@@ -169,19 +170,19 @@ function Preview({ selection, project }: { selection: FileSelection | null; proj
           {selection ? selection.absolutePath ?? selection.artifactPath : '/'}
         </span>
         {state.phase === 'loaded' && state.result.kind === 'text' && isMarkdown ? (
-          <button type="button" className={`t-text-btn${viewMode === 'source' ? ' is-active' : ''}`} onClick={() => setViewMode((value) => value === 'rendered' ? 'source' : 'rendered')}>
-            {viewMode === 'rendered' ? 'source' : 'preview'}
+          <button type="button" className={`t-text-btn${viewMode === 'source' ? ' is-active' : ''}`} aria-pressed={viewMode === 'source'} onClick={() => setViewMode((value) => value === 'rendered' ? 'source' : 'rendered')}>
+            Source
           </button>
         ) : null}
         {selection?.absolutePath ? (
-          <button type="button" className="t-icon-btn" aria-label="Open file externally" title="Open externally" onClick={() => { void getElectron()?.openPath?.(selection.absolutePath!); }}><ExternalLinkIcon size={14} /></button>
+          <button type="button" className="t-icon-btn" aria-label="Open file externally" title="Open externally" onClick={() => { void getElectron()?.openPath?.(selection.absolutePath!); }}><ExternalLinkIcon /></button>
         ) : null}
       </div>
       <div className="term-scrollbar" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: state.phase === 'loaded' && state.result.kind === 'image' ? 18 : '20px 22px 28px', color: 'var(--term-fg)' }}>
         {state.phase === 'empty' ? (
           <div style={{ minHeight: '100%', display: 'grid', placeItems: 'center', color: 'var(--term-muted)', textAlign: 'center' }}>
             <div>
-              <div aria-hidden style={{ fontSize: 'var(--fs-5xl)', lineHeight: 1, marginBottom: 12 }}>▱</div>
+              <DocIcon size={30} aria-hidden="true" className="t-empty-glyph" style={{ display: 'block', margin: '0 auto 12px' }} />
               <div style={{ color: 'var(--term-fg)', fontSize: 'var(--fs-lg)', fontWeight: 500 }}>Open file</div>
               <div style={{ marginTop: 5, fontSize: 'var(--fs-sm)' }}>Select a file from the workspace tree</div>
             </div>
@@ -209,8 +210,8 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
   const project = projects.find((candidate) => candidate.id === item.projectId);
   const roots = useMemo(() => workspaceRoots(project), [project]);
   const rootsKey = roots.join('\0');
-  const shellStyle = usePaneShellStyle(item.id);
-  const side = useSideColumn('files-tree');
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
+  const side = useSideColumn('files-tree', 'Resize file tree');
   const [directories, setDirectories] = useState<Record<string, DirectoryState>>({});
   const directoriesRef = useRef(directories);
   directoriesRef.current = directories;
@@ -277,10 +278,10 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
     >
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: 'grid', gridTemplateColumns: side.columns }}>
         <Preview selection={selection} project={project} />
-        <aside ref={side.columnRef} style={{ position: 'relative', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--term-line)', background: 'var(--term-pane-bg)' }}>
+        <aside ref={side.columnRef} style={{ position: 'relative', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--term-line)' }}>
           <div style={{ height: 48, flexShrink: 0, display: 'flex', alignItems: 'center', padding: '0 9px', borderBottom: '1px solid var(--term-line)' }}>
             <label className="ui-search ui-search--compact">
-              <span aria-hidden>⌕</span>
+              <SearchIcon size="sm" style={{ flexShrink: 0 }} />
               <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter files…" aria-label="Filter files" />
             </label>
           </div>
@@ -288,8 +289,8 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
             {roots.length === 0 ? <div style={{ padding: '10px 12px', color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>No workspace folders</div> : null}
             {roots.map((root) => (
               <section key={root} style={{ marginBottom: 7 }}>
-                <button type="button" onClick={() => toggleDirectory(root)} title={root} style={{ width: '100%', height: 28, display: 'grid', gridTemplateColumns: '17px minmax(0, 1fr)', alignItems: 'center', gap: 4, padding: '0 8px', border: 0, background: 'transparent', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', fontWeight: 600, textAlign: 'left', cursor: 'pointer' }}>
-                  <span aria-hidden style={{ color: 'var(--term-muted)' }}>{expanded.has(root) ? '⌄' : '›'}</span>
+                <button type="button" onClick={() => toggleDirectory(root)} title={root} className="t-row-hover" style={{ width: '100%', height: 28, display: 'grid', gridTemplateColumns: '17px minmax(0, 1fr)', alignItems: 'center', gap: 4, padding: '0 8px', border: 0, background: 'transparent', color: 'var(--term-fg)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', fontWeight: 600, textAlign: 'left', cursor: 'pointer' }}>
+                  <DisclosureChevron open={expanded.has(root)} style={{ justifySelf: 'start', color: 'var(--term-muted)' }} />
                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{basename(root) || root}</span>
                 </button>
                 {expanded.has(root) ? (
@@ -307,8 +308,8 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
               <section style={{ borderTop: '1px solid var(--term-line)', paddingTop: 6 }}>
                 <div style={{ height: 25, display: 'flex', alignItems: 'center', padding: '0 9px', color: 'var(--term-muted)', fontSize: 'var(--fs-xs)', fontWeight: 600, letterSpacing: 'var(--ls-wide)' }}>ARTIFACTS</div>
                 {artifactSelections.filter((artifact) => !normalizedFilter || artifact.label.toLocaleLowerCase().includes(normalizedFilter)).map((artifact) => (
-                  <button key={artifact.id} type="button" onClick={() => setSelection(artifact)} title={artifact.absolutePath ?? artifact.artifactPath} style={{ width: '100%', minHeight: 28, display: 'grid', gridTemplateColumns: '20px minmax(0, 1fr)', alignItems: 'center', gap: 4, padding: '3px 9px', border: 0, background: selection?.id === artifact.id ? 'var(--term-alt)' : 'transparent', color: selection?.id === artifact.id ? 'var(--term-fg)' : 'var(--term-mid)', cursor: 'pointer', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', textAlign: 'left' }}>
-                    <span aria-hidden style={{ color: 'var(--term-accent)', textAlign: 'center' }}>◇</span>
+                  <button key={artifact.id} type="button" onClick={() => setSelection(artifact)} title={artifact.absolutePath ?? artifact.artifactPath} className={selection?.id === artifact.id ? 't-row-hover is-active' : 't-row-hover'} style={{ width: '100%', minHeight: 28, display: 'grid', gridTemplateColumns: '20px minmax(0, 1fr)', alignItems: 'center', gap: 4, padding: '3px 9px', border: 0, background: selection?.id === artifact.id ? 'var(--term-alt)' : 'transparent', color: selection?.id === artifact.id ? 'var(--term-fg)' : 'var(--term-mid)', cursor: 'pointer', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', textAlign: 'left' }}>
+                    <span aria-hidden style={{ color: 'var(--term-accent)', textAlign: 'center' }}>▤</span>
                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{artifact.label}</span>
                   </button>
                 ))}
@@ -318,6 +319,7 @@ export default function FilesPane({ item }: { item: FilesPaneItem }) {
           {side.handle}
         </aside>
       </div>
+      {recede}
     </div>
   );
 }

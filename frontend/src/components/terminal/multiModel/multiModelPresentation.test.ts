@@ -29,6 +29,7 @@ import {
   threadElapsed,
   type ActionOptions,
 } from './multiModelPresentation';
+import { CheckIcon, CloseIcon } from '../icons';
 
 function thread(key: string, runtimeLabel: string, statuses: MultiModelStepStatus[], patch: Partial<MultiModelThreadView> = {}): MultiModelThreadView {
   return {
@@ -54,8 +55,8 @@ describe('multi-model presentation', () => {
       .toEqual(['Queued', 'Answering', 'Needs you', 'Answered', 'Failed', 'Stopped', 'Skipped', 'Cancelled', 'Interrupted', 'Waiting']);
     expect(['running', 'completed', 'skipped', 'waiting'].map((status) => stepLabel('review', status as MultiModelStepStatus)))
       .toEqual(['Reviewing', 'Revised', 'Skipped', 'Needs you']);
-    expect(stepIcon('completed')).toEqual({ icon: '✓', tone: 'ok' });
-    expect(stepIcon('failed')).toEqual({ icon: '✕', tone: 'fail' });
+    expect(stepIcon('completed')).toEqual({ icon: CheckIcon, tone: 'ok' });
+    expect(stepIcon('failed')).toEqual({ icon: CloseIcon, tone: 'fail' });
     expect(stepIcon('stopped').tone).toBe('stop');
     expect(stepIcon('waiting')).toEqual({ icon: 'dot', tone: 'wait' });
   });

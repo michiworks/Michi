@@ -1,16 +1,16 @@
 import type { Route } from '@playwright/test';
 import type {
-  MemoryChangedEvent, MemoryMode, MemoryProfileResponse, MemoryRecord, MemoryScope, ReplyMemorySource,
+  MemoryChangedEvent, MemoryGuess, MemoryMode, MemoryProfileResponse, MemoryRecord, MemoryScope, ReplyMemorySource,
 } from '../../shared/src/memory';
 
 /**
  * Browser-only Michi Memory: /api/memories (with reset), /api/memory-settings,
- * the change feed, automatic memory's status and the profile of the user,
+ * the change feed, automatic memory's status, the profile of the user and
+ * the guesses,
  * answered from in-memory state. installMockApi uses an empty instance by
  * default; a spec that needs data seeds its own and passes `handle` as
  * `custom`. No backend or SQLite. With `sources`, what each reply was based
- * on (GET /nodes/:id/memory-sources) and Don't recall (POST
- * /memory-recall/hide) answer too.
+ * on (GET /nodes/:id/memory-sources) answers too.
  *
  * Temporary chats (nodes.memory_mode 'off'): the controller notes every
  * ensure-session and its `temporary`, leaving the answer to installMockApi,
@@ -41,6 +41,8 @@ export interface MemoryMockOptions {
   sources?: Record<string, ReplyMemorySource[]>;
   /** How long GET memory-sources waits before it answers (ms). */
   sourcesDelayMs?: number;
+  /** Pending guesses, each citing seeded records by id (GET /memory-guesses; confirm and reject answer too). None by default. */
+  guesses?: Array<{ id: string; body: string; refs: string[] }>;
 }
 
 export interface MemoryMockController {
@@ -94,12 +96,12 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
     notice: options.notice ? { ...options.notice } : null,
     profile: options.profile ? { ...options.profile, lines: [...options.profile.lines], rebuildRequested: false } : null,
     temporaryChats: new Set(options.temporaryChats ?? []),
+    guesses: [...(options.guesses ?? [])],
   };
   const writes: string[] = [];
   const writeBodies: unknown[] = [];
   const ensureSessions: Array<{ nodeId: string; temporary: boolean }> = [];
   const sourceRequests: string[][] = [];
-  const hiddenDocs = new Set<number>();
   let queued: MemoryChangedEvent[] = [];
   let feeds = 0;
   let next = 1;
@@ -133,9 +135,10 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
       return false;
     }
     const replySources = /^\/nodes\/([^/]+)\/memory-sources$/.exec(path);
-    if ((replySources || path === '/memory-recall/hide') && !options.sources) return false;
-    if (!replySources && path !== '/memory-recall/hide' && path !== '/memory-settings' && path !== '/memories'
-      && !path.startsWith('/memories/') && !path.startsWith('/memory-extraction/') && !path.startsWith('/memory-profile')) return false;
+    if (replySources && !options.sources) return false;
+    if (!replySources && path !== '/memory-settings' && path !== '/memories'
+      && !path.startsWith('/memories/') && !path.startsWith('/memory-extraction/') && !path.startsWith('/memory-profile')
+      && !path.startsWith('/memory-guesses')) return false;
     if (method !== 'GET') {
       writes.push(`${method} ${path}`);
       writeBodies.push(request.postData() ? request.postDataJSON() : null);
@@ -163,18 +166,12 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
       sourceRequests.push(ids);
       if (options.sourcesDelayMs) await new Promise((resolve) => setTimeout(resolve, options.sourcesDelayMs));
       const off = state.temporaryChats.has(nodeId) || state.mode === 'off';
-      const live = (source: ReplyMemorySource) => (source.kind === 'memory' ? !!find(source.memoryId) : !hiddenDocs.has(source.docId));
+      const live = (source: ReplyMemorySource) => !!find(source.memoryId);
       const messages = off ? [] : ids.flatMap((messageId) => {
         const listed = (options.sources?.[messageId] ?? []).filter(live);
         return listed.length ? [{ messageId, sources: listed }] : [];
       });
       await json(route, { messages });
-      return true;
-    }
-    if (path === '/memory-recall/hide' && method === 'POST') {
-      const { docId } = request.postDataJSON() as { docId: number };
-      hiddenDocs.add(docId);
-      await json(route, { hidden: true });
       return true;
     }
     if (path.startsWith('/memory-profile')) {
@@ -199,6 +196,24 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
         return true;
       }
       await json(route, profileView());
+      return true;
+    }
+    if (path === '/memory-guesses' && method === 'GET') {
+      const guesses: MemoryGuess[] = state.guesses.filter((guess) => guess.refs.every((id) => find(id))).map((guess) => ({
+        id: guess.id, body: guess.body, createdAt: 1, cites: guess.refs.map((id) => ({ ref: `m:${id}v1`, id, body: find(id)!.body })),
+      }));
+      await json(route, { guesses });
+      return true;
+    }
+    const answered = /^\/memory-guesses\/([^/]+)\/(confirm|reject)$/.exec(path);
+    if (answered && method === 'POST') {
+      const guess = state.guesses.find((entry) => entry.id === decodeURIComponent(answered[1]));
+      if (!guess) { await json(route, { error: 'Guess not found', code: 'not_found' }, 404); return true; }
+      state.guesses = state.guesses.filter((entry) => entry !== guess);
+      if (answered[2] === 'reject') { await route.fulfill({ status: 204, body: '' }); return true; }
+      const record = memoryRecord(`mem-guess-${next++}`, guess.body);
+      state.records.push(record);
+      await json(route, { memory: record });
       return true;
     }
     if (path.startsWith('/memory-extraction/')) {
@@ -229,8 +244,8 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
       return true;
     }
     if (method === 'POST' && path === '/memories') {
-      const input = request.postDataJSON() as { scope: MemoryScope; kind: MemoryRecord['kind']; body: string };
-      const record = memoryRecord(`mem-added-${next++}`, input.body.trim(), { scope: input.scope, kind: input.kind });
+      const input = request.postDataJSON() as { scope: MemoryScope; kind: MemoryRecord['kind']; body: string; topic?: string | null };
+      const record = memoryRecord(`mem-added-${next++}`, input.body.trim(), { scope: input.scope, kind: input.kind, topic: input.topic ?? null });
       state.records.push(record);
       await json(route, { memory: record }, 201);
       return true;
@@ -240,13 +255,16 @@ export function createMemoryMock(options: MemoryMockOptions = {}): MemoryMockCon
     const record = find(decodeURIComponent(match[1]));
     if (!record) { await notFound(route); return true; }
     if (method === 'PATCH') {
-      const patch = request.postDataJSON() as { body?: string; scope?: MemoryScope; expectedVersion: number };
+      const patch = request.postDataJSON() as { body?: string; scope?: MemoryScope; kind?: MemoryRecord['kind']; topic?: string | null; validUntil?: number | null; expectedVersion: number };
       if (patch.expectedVersion !== record.version) {
         await json(route, { error: 'The memory changed since it was read', code: 'version_conflict', currentVersion: record.version }, 409);
         return true;
       }
       if (patch.body !== undefined) record.body = patch.body;
       if (patch.scope) record.scope = patch.scope;
+      if (patch.validUntil !== undefined) record.validUntil = patch.validUntil;
+      if (patch.kind) record.kind = patch.kind;
+      if (patch.topic !== undefined) record.topic = patch.topic;
       record.version += 1;
       record.updatedAt = Date.now();
       await json(route, { memory: record });

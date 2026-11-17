@@ -1,5 +1,4 @@
 import React from 'react';
-import { Check, X } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   META_AGENT_DEFAULT_FIRST_RUN_DAYS,
@@ -10,6 +9,7 @@ import type { SpacesFirstRunStatus } from '../../../../services/api/spacesHome';
 import type { MetaAgentUpdateState } from '../../../../state/metaAgent/metaAgentUpdate';
 import { firstRunProgress, isFirstRunInProgress } from '../../../../state/metaAgent/spacesFirstRun';
 import { UPKEEP_HEADLINE } from '../../../../state/metaAgent/metaAgentStatus';
+import { CheckIcon, CloseIcon } from '../../icons';
 import { formatMichiAgo } from '../../content/michiFormat';
 import { useCompanionName } from '../../../../state/companion/companionName';
 import './metaAgentStatus.css';
@@ -118,11 +118,11 @@ function summaryText(firstRun: SpacesFirstRunStatus, homes: number, reading: boo
 
 function Mark({ run, problem }: { run: FirstRunProgressDto | null; problem?: MetaAgentCursorRow['problem'] }) {
   if (problem && (!run || run.state === 'done')) {
-    return <X size={13} strokeWidth={2} className="spaces-home-status__bad" aria-label={problem.stopped ? 'Stopped' : 'Failed'} />;
+    return <CloseIcon className="spaces-home-status__bad" aria-label={problem.stopped ? 'Stopped' : 'Failed'} />;
   }
-  if (run?.state === 'done') return <Check size={13} strokeWidth={2} className="spaces-home-status__ok" aria-label="Done" />;
+  if (run?.state === 'done') return <CheckIcon className="spaces-home-status__ok" aria-label="Done" />;
   if (run?.state === 'reading' || run?.state === 'writing') return <span className="agent-spinner" role="img" aria-label="In progress" />;
-  if (run?.state === 'failed') return <X size={13} strokeWidth={2} className="spaces-home-status__bad" aria-label="Failed" />;
+  if (run?.state === 'failed') return <CloseIcon className="spaces-home-status__bad" aria-label="Failed" />;
   return <span className="spaces-home-status__queued" aria-hidden="true">·</span>;
 }
 
@@ -161,7 +161,7 @@ function DetailList({ workspaces, firstRun, cursors, recentRuns, clock, days, sh
       })}
       {firstRun && firstRun.requestedAt !== null && (
         <li data-state={globalDone ? 'done' : 'global'} className={globalDone || firstRun.summary.state === 'running' ? undefined : 'is-dim'}>
-          {globalDone ? <Check size={13} strokeWidth={2} className="spaces-home-status__ok" aria-label="Done" />
+          {globalDone ? <CheckIcon className="spaces-home-status__ok" aria-label="Done" />
             : firstRun.summary.state === 'running' ? <span className="agent-spinner" role="img" aria-label="In progress" />
               : <span className="spaces-home-status__queued" aria-hidden="true">·</span>}
           <span className="spaces-home-status__name">Home (global)</span>
@@ -286,7 +286,7 @@ export function MetaAgentStatusLine({
     const doing = progress.current
       ? <>writing <b>{progress.current.workspaceName}</b>’s home</>
       : firstRun?.summary.state === 'running' ? 'writing the Pages Home' : 'waiting for its turn';
-    const percent = progress.total > 0 ? Math.round((progress.read / progress.total) * 100) : 0;
+    const fraction = progress.total > 0 ? progress.read / progress.total : 0;
     return <div className="spaces-home-status" data-mode="first-run">
       <Line mark={<Spinner />}>
         First time opening Pages · {name}{status.runtimeLabel ? ` (${status.runtimeLabel})` : ''} is reading the last {firstRunDaysOf(recentRuns, firstRunDays)} days
@@ -294,7 +294,7 @@ export function MetaAgentStatusLine({
         <Sep />{toggle}
       </Line>
       <div className="spaces-home-status__bar" role="progressbar" aria-label="First read" aria-valuemin={0} aria-valuemax={progress.total} aria-valuenow={progress.read}>
-        <i style={{ width: `${percent}%` }} />
+        <i style={{ transform: `scaleX(${fraction})` }} />
       </div>
       {list}
     </div>;

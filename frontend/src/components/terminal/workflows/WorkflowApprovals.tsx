@@ -1,6 +1,7 @@
 import React from 'react';
 import type { WorkflowApprovalDto, WorkflowRunDtoV1 } from 'michi-shared';
 import { workflowApprovalSource } from './workflowPresentation';
+import './WorkflowRunCard.css';
 
 /**
  * Tool approvals a workflow's steps wait on, answered in place. Mirrors the
@@ -11,19 +12,10 @@ import { workflowApprovalSource } from './workflowPresentation';
 
 const MONO = 'var(--font-mono)';
 
-function optionStyle(kind: string | undefined, primary: boolean): React.CSSProperties {
-  const reject = kind?.startsWith('reject');
-  return {
-    height: 22,
-    padding: '0 9px',
-    border: '1px solid var(--term-line)',
-    background: primary ? 'var(--term-alt)' : 'var(--term-surface)',
-    color: reject ? 'var(--term-mid)' : 'var(--term-fg)',
-    fontFamily: 'var(--ui-font)',
-    fontSize: 'var(--fs-sm)',
-    fontWeight: primary ? 600 : 400,
-    cursor: 'pointer',
-  };
+/** An answer's weight: the first is the one to give, a rejection stays quiet. */
+function optionVariant(kind: string | undefined, primary: boolean): 'reject' | 'primary' | undefined {
+  if (kind?.startsWith('reject')) return 'reject';
+  return primary ? 'primary' : undefined;
 }
 
 function ApprovalRow({ run, approval, busy, onAnswer }: {
@@ -56,9 +48,9 @@ function ApprovalRow({ run, approval, busy, onAnswer }: {
               key={option.optionId}
               type="button"
               disabled={busy}
-              className="t-hover-fg"
+              className="workflow-approval-option"
+              data-variant={optionVariant(option.kind, index === 0)}
               onClick={() => onAnswer(approval.id, option.optionId)}
-              style={{ ...optionStyle(option.kind, index === 0), opacity: busy ? 0.6 : 1 }}
             >
               {option.name}
             </button>

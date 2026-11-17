@@ -57,7 +57,6 @@ function streamProbeEnabled(): boolean {
 
 function writeStreamProbe(row: Record<string, unknown>): void {
   if (!streamProbeEnabled()) return;
-  // eslint-disable-next-line no-console
   console.info(JSON.stringify({ type: 'stream_probe', source: 'renderer', ...row }));
 }
 
@@ -530,7 +529,7 @@ export function cancelChatAndObserve(
       onDone: (reason, _assistantId, _turnId, persisted) => finish(
         reason === 'error' || persisted === false
           ? { state: 'error', detail: 'Cancellation cleanup failed. Retry to check the original session.' }
-          : { state: 'settled' },
+          : { state: 'settled', ...(reason ? { stopReason: reason } : {}) },
       ),
       onError: (detail) => finish({ state: 'error', detail }),
     }, { turnId, seq: 0 }, {

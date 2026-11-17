@@ -76,16 +76,19 @@ export function CellView({
   onToggle?: (checked: boolean) => void;
 }) {
   if (c.type === 'checkbox') {
+    // A live box's label fills its table cell; a click there toggles it and does not open the row.
     return (
-      <input
-        type="checkbox"
-        className="michi-db-check"
-        checked={value === true}
-        disabled={!onToggle}
-        aria-label={c.name}
-        onChange={(event) => onToggle?.(event.currentTarget.checked)}
-        onClick={(event) => event.stopPropagation()}
-      />
+      <label className="michi-db-check-hit" onClick={onToggle ? (event) => event.stopPropagation() : undefined}>
+        <input
+          type="checkbox"
+          className="michi-db-check"
+          checked={value === true}
+          disabled={!onToggle}
+          aria-label={c.name}
+          onChange={(event) => onToggle?.(event.currentTarget.checked)}
+          onClick={(event) => event.stopPropagation()}
+        />
+      </label>
     );
   }
   if (isBlank(value)) return null;

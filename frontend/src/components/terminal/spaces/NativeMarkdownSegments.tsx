@@ -1,7 +1,8 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Quote } from 'lucide-react';
 import { parsePageSegmentSources, splitPageMarkdown, uniquePageSources, type BlockSource, type PageMarkdownSegment } from 'michi-shared';
 import { HoverTip } from '../../ui/Popover';
+import { MenuPresence } from '../../ContextMenu';
+import { QuoteIcon } from '../icons';
 import { MarkdownBlock } from '../content/page/blocks/text';
 import { SourcesPopover, type SourceRow } from '../content/page/SourcesPopover';
 import { segmentId } from '../content/page/vendor-blocks/shared/markdown-segments';
@@ -102,8 +103,8 @@ function MarkdownSegment({ blockId, text, renderText, index, kind, rows, loadIma
     <MarkdownBlock block={{ type: 'markdown', text: renderText }} ctx={{ depth: 0, loadImages }} />
     {rows.length > 0 && <HoverTip label="Sources" delayMs={250}><button ref={button} type="button" className="native-md-segment__sources"
       aria-label={`Sources for item ${index + 1}`} aria-haspopup="dialog" aria-expanded={open} onClick={event => { event.stopPropagation(); setOpen(value => !value); }}>
-      <Quote size={14} aria-hidden="true" />
+      <QuoteIcon aria-hidden="true" />
     </button></HoverTip>}
-    {open && button.current && <SourcesPopover anchor={button.current} label={title} count={rows.length} rows={rows} onOpenThread={() => {}} onClose={() => setOpen(false)} />}
+    <MenuPresence>{open && button.current && <SourcesPopover key="sources" anchor={button.current} label={title} count={rows.length} rows={rows} onOpenThread={() => {}} onClose={() => setOpen(false)} />}</MenuPresence>
   </div>;
 }

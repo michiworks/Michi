@@ -42,7 +42,6 @@ import { log } from '../logger';
 import { readConversationMemoryMode } from '../memory/memoryRepository';
 import { withoutCredentials } from '../memory/secrets';
 import { getTurnTrust, isCompanionMaterial } from '../turnTrust';
-import { localDateKey } from './clock';
 import { companionContextStanding, companionContextText, type CompanionContextInput, type CompanionConversationLine } from './prompts';
 import * as repository from './repository';
 import { companionSourcesOff, getCompanionSettings } from './settings';
@@ -153,7 +152,6 @@ export function withCompanionContext(text: string, options: CompanionContextOpti
   const waiting = repository.listPendingCards(now).map(repository.cardDto);
   const posts = repository.listUntoldPosts(COMPANION_LIMITS.maxUntoldPosts).slice(0, COMPANION_LIMITS.maxUntoldPosts);
   const counts = repository.countOpenItems(now);
-  const brief = repository.briefForDate(localDateKey(now));
   const prefix = companionContextText({
     ...standingInput,
     displayName: settings.displayName,
@@ -162,7 +160,6 @@ export function withCompanionContext(text: string, options: CompanionContextOpti
     needsYou: counts.needsYou,
     newItems: counts.newItems,
     pendingCards: waiting.length,
-    briefPublishedAt: brief?.createdAt ?? null,
     posts,
     standing,
   });
@@ -254,7 +251,7 @@ function metadataOf(raw: string | null): Record<string, unknown> {
  *
  * It follows Michi Memory's Recent conversations: nothing while the
  * conversation does not learn (Use only, Off), nothing from a turn the user
- * kept out of recall (Don't recall, leaving learn, Delete all), no reply of a
+ * kept out of recall (leaving learn, Delete all), no reply of a
  * turn that read outside content other than Companion material (the user's
  * words stay), and no credentials.
  */

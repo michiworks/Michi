@@ -246,10 +246,11 @@ function eventLabel(event: NormalizedEvent): string {
   }
 }
 
-/** Stable placeholders for paths and generated ids, in order of first appearance. */
+/** Stable placeholders for paths, generated ids and a fork's time, in order of first appearance. */
 function normalize(value: unknown): unknown {
   let text = JSON.stringify(value, recordOwnerAsHost);
   text = text.split(cwd).join('<cwd>').split(claudeConfigDir).join('<claude-config>').split(root).join('<root>');
+  text = text.replace(/("CLAUDE_CODE_RESUME_SOURCE_ALIVE":")[^"]*"/g, '$1<fork-time>"');
   const ids = new Map<string, string>();
   text = text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, (id) => {
     if (!ids.has(id)) ids.set(id, `<uuid-${ids.size + 1}>`);

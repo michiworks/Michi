@@ -84,7 +84,8 @@ test('real HTTP and SQLite retain consecutive answers/skip with stable IDs and d
   assert.equal((await post({ requestId: 10, skip: true })).status, 409);
   assert.equal((await post({ requestId: 11, interactionId: 'stale-recreated-session', skip: true })).status, 409);
   const firstInteractionId = chatHub.getPendingUserInput(session.id)!.interactionId;
-  assert.equal((await post({ requestId: 11, interactionId: firstInteractionId, answers: [{ question: 'Question 11?', answer: 'Yes' }] })).status, 200);
+  assert.equal((await post({ requestId: 11, interactionId: firstInteractionId, answers: [{ question: 'Question 11?', answer: 'Yes', value: { not: 'a field value' } }] })).status, 400);
+  assert.equal((await post({ requestId: 11, interactionId: firstInteractionId, answers: [{ question: 'Question 11?', answer: 'Yes', value: true }] })).status, 200);
   await waitFor(() => chatHub.getPendingUserInput(session.id)?.requestId === 12);
   assert.equal((await post({ requestId: 11, skip: true })).status, 409, 'stale answer must not resolve the next question');
   assert.equal((await post({ requestId: 12, skip: true })).status, 200);
@@ -99,6 +100,7 @@ test('real HTTP and SQLite retain consecutive answers/skip with stable IDs and d
   assert.equal(interactions[1].status, 'skipped');
   assert.equal(interactions[0].answers[0].id, interactions[0].questions[0].id);
   assert.equal(interactions[0].answers[0].answer, 'Yes');
+  assert.equal(interactions[0].answers[0].value, true, 'a typed value is kept with its answer');
   assert.equal(JSON.parse(row.metadata ?? '{}').usageSummary.charge.unit, 'USD');
   assert.equal(JSON.parse(row.metadata ?? '{}').warnings[0].source, 'anthropic-api');
   const storedTools = JSON.parse(row.tool_calls ?? '[]');

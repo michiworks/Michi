@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Diff, FolderOpen, SquareTerminal } from 'lucide-react';
 import type { TerminalListResponse, TerminalSummary } from 'michi-shared';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
@@ -12,10 +11,7 @@ import { nodeDisplayTitle, threadDisplayTitle } from '../../state/displayTitle';
 import { terminalTargetForWorkspace } from '../../state/terminalTarget';
 import { buildTree, type TreeNode } from '../../state/tree';
 import { listTerminals } from '../../services/api/terminals';
-import { BranchIcon, ChatIcon } from './icons';
-
-// One line-icon set at one size and stroke (the topbar's).
-const ICON = { size: 16, strokeWidth: 1.6, absoluteStrokeWidth: true, 'aria-hidden': true } as const;
+import { BranchIcon, ChatIcon, DiffIcon, FolderOpenIcon, TerminalIcon } from './icons';
 
 const CHOICES: Array<{
   id: PaneLauncherChoice;
@@ -23,11 +19,11 @@ const CHOICES: Array<{
   label: string;
   description: string;
 }> = [
-  { id: 'review', icon: <Diff {...ICON} />, label: 'Review', description: 'Inspect workspace changes' },
-  { id: 'terminal', icon: <SquareTerminal {...ICON} />, label: 'Terminal', description: 'Start in this workspace' },
-  { id: 'files', icon: <FolderOpen {...ICON} />, label: 'Files', description: 'Browse workspace and artifacts' },
+  { id: 'review', icon: <DiffIcon size="lg" />, label: 'Review', description: 'Inspect workspace changes' },
+  { id: 'terminal', icon: <TerminalIcon size="lg" />, label: 'Terminal', description: 'Start in this workspace' },
+  { id: 'files', icon: <FolderOpenIcon size="lg" />, label: 'Files', description: 'Browse workspace and artifacts' },
   // The name the shortcut list gives it (Settings › Keyboard shortcuts), and its keys.
-  { id: 'side-chat', icon: <BranchIcon size={16} strokePx={1.6} />, label: 'Blank branch', description: `Branch off this thread, empty · ${kbd('mod', 'alt', 'T')}` },
+  { id: 'side-chat', icon: <BranchIcon size="lg" />, label: 'Blank branch', description: `Branch off this thread, empty · ${kbd('mod', 'alt', 'T')}` },
 ];
 
 /** How long after closing the pane that takes over may still focus its composer on its own. */
@@ -86,9 +82,10 @@ function unopenedInThread(nodes: Record<string, ChatNodeState>, project: Project
 
 const SECTION_STYLE: React.CSSProperties = { fontSize: 'var(--fs-2xs)', color: 'var(--term-muted)', padding: '0 10px', marginBottom: 2, fontFamily: 'var(--ui-font)', letterSpacing: 'var(--ls-wide)', textTransform: 'uppercase' };
 const RULE_STYLE: React.CSSProperties = { borderBottom: '1px solid var(--term-line)', margin: '4px 0' };
-const KEY_STYLE: React.CSSProperties = { minWidth: 18, height: 18, padding: '0 4px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--term-line-s)', borderRadius: 3, color: 'var(--term-mid)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)' };
+const KEY_STYLE: React.CSSProperties = { minWidth: 18, height: 18, padding: '0 4px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--term-line-s)', borderRadius: 'var(--ui-radius-sm)', color: 'var(--term-mid)', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)' };
 const HINTS: Array<[keys: string, label: string]> = [['↑↓', 'move'], ['↵', 'open'], ['1–4', 'pick'], ['esc', 'close']];
 
+/** A row's ink, cursor and busy look are its .pane-chooser-row class's (index.css). */
 const buttonStyle: React.CSSProperties = {
   minHeight: 52,
   display: 'grid',
@@ -97,11 +94,9 @@ const buttonStyle: React.CSSProperties = {
   gap: 10,
   padding: '7px 10px',
   borderRadius: 'var(--ui-radius)',
-  color: 'var(--term-fg)',
-  cursor: 'pointer',
   fontFamily: 'var(--ui-font)',
   textAlign: 'left' as const,
-  transition: 'background var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease), opacity var(--t-quick) var(--t-ease)',
+  transition: 'background var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease)',
 };
 
 /** The choice that is opening keeps the frame its hover had. */
@@ -151,7 +146,7 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
     [workspace, item.treeId, openSet],
   );
   const unopened = useStructuralSelector(selectUnopened, sameUnopened);
-  const shellStyle = usePaneShellStyle(item.id);
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
   const phone = usePhoneLayout();
   const [pending, setPending] = useState<PaneLauncherChoice | null>(null);
   const [adopting, setAdopting] = useState<string | null>(null);
@@ -279,12 +274,12 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
                 key={row.id}
                 type="button"
                 data-chooser-row=""
-                disabled={busy}
+                aria-disabled={busy || undefined}
                 onClick={() => openHere(row.id)}
                 className="t-hover-frame pane-chooser-row"
-                style={{ ...buttonStyle, minHeight: 40, opacity: busy ? 0.45 : 1, cursor: busy ? 'default' : 'pointer' }}
+                style={{ ...buttonStyle, minHeight: 40 }}
               >
-                <span aria-hidden style={{ color: 'var(--term-mid)', display: 'grid', placeItems: 'center' }}><ChatIcon size={16} /></span>
+                <span aria-hidden style={{ color: 'var(--chooser-icon)', display: 'grid', placeItems: 'center' }}><ChatIcon size="lg" /></span>
                 <span style={{ minWidth: 0, fontSize: 'var(--fs-lg)', fontWeight: 500, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.title}</span>
               </button>
             ))}
@@ -309,24 +304,20 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
                 <button
                   key={term.id}
                   type="button"
-                  disabled={busy}
+                  aria-disabled={busy || undefined}
+                  data-chosen={isAdopting || undefined}
                   aria-label={`Resume terminal — ${term.cwd || '~'}`}
                   onClick={() => adopt(term.id)}
                   data-chooser-row=""
                   className="t-hover-frame pane-chooser-row"
-                  style={{
-                    ...buttonStyle,
-                    ...(isAdopting ? CHOSEN : undefined),
-                    opacity: busy && !isAdopting ? 0.45 : 1,
-                    cursor: busy ? 'default' : 'pointer',
-                  }}
+                  style={{ ...buttonStyle, ...(isAdopting ? CHOSEN : undefined) }}
                 >
                   <span aria-hidden style={{ color: 'var(--term-digest)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', textAlign: 'center' }}>
                     {isAdopting ? '…' : '●'}
                   </span>
                   <span style={{ minWidth: 0 }}>
                     <span style={{ display: 'block', fontSize: 'var(--fs-lg)', fontWeight: 500, lineHeight: 1.3 }}>Terminal</span>
-                    <span style={{ display: 'block', marginTop: 2, color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ display: 'block', marginTop: 2, color: 'var(--chooser-note)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {shortCwd(term.cwd)}
                     </span>
                   </span>
@@ -339,24 +330,20 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
                 <button
                   key={terminal.terminalId}
                   type="button"
-                  disabled={busy}
+                  aria-disabled={busy || undefined}
+                  data-chosen={isAdopting || undefined}
                   aria-label={`Open terminal — ${terminal.cwd || '~'}`}
                   onClick={() => adoptBackend(terminal)}
                   data-chooser-row=""
                   className="t-hover-frame pane-chooser-row"
-                  style={{
-                    ...buttonStyle,
-                    ...(isAdopting ? CHOSEN : undefined),
-                    opacity: busy && !isAdopting ? 0.45 : 1,
-                    cursor: busy ? 'default' : 'pointer',
-                  }}
+                  style={{ ...buttonStyle, ...(isAdopting ? CHOSEN : undefined) }}
                 >
                   <span aria-hidden style={{ color: terminal.exited ? 'var(--term-muted)' : 'var(--term-digest)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)', textAlign: 'center' }}>
                     {isAdopting ? '…' : '●'}
                   </span>
                   <span style={{ minWidth: 0 }}>
                     <span style={{ display: 'block', fontSize: 'var(--fs-lg)', fontWeight: 500, lineHeight: 1.3 }}>Terminal</span>
-                    <span style={{ display: 'block', marginTop: 2, color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <span style={{ display: 'block', marginTop: 2, color: 'var(--chooser-note)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {shortCwd(terminal.cwd)} · {sharedNote(terminal, phone)}
                     </span>
                   </span>
@@ -378,25 +365,22 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
             <button
               type="button"
               data-chooser-row=""
-              disabled={busy}
+              aria-disabled={busy || undefined}
+              data-chosen={isPending || undefined}
+              data-off={off || undefined}
               aria-label={choice.label}
               aria-keyshortcuts={phone ? undefined : String(index + 1)}
               aria-expanded={off ? terminalNote : undefined}
               onClick={() => { void choose(choice.id); }}
               className="t-hover-frame pane-chooser-row"
-              style={{
-                ...buttonStyle,
-                ...(isPending ? CHOSEN : undefined),
-                opacity: busy && !isPending ? 0.45 : 1,
-                cursor: busy ? 'default' : 'pointer',
-              }}
+              style={{ ...buttonStyle, ...(isPending ? CHOSEN : undefined) }}
             >
-              <span aria-hidden style={{ color: 'var(--term-mid)', display: 'grid', placeItems: 'center', opacity: off ? 0.45 : 1 }}>
+              <span aria-hidden style={{ color: 'var(--chooser-icon)', display: 'grid', placeItems: 'center' }}>
                 {isPending ? <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-md)' }}>…</span> : choice.icon}
               </span>
               <span style={{ minWidth: 0 }}>
-                <span style={{ display: 'block', fontSize: 'var(--fs-lg)', fontWeight: 500, lineHeight: 1.3, opacity: off ? 0.45 : 1 }}>{choice.label}</span>
-                <span style={{ display: 'block', marginTop: 2, color: 'var(--term-muted)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{description}</span>
+                <span style={{ display: 'block', fontSize: 'var(--fs-lg)', fontWeight: 500, lineHeight: 1.3 }}>{choice.label}</span>
+                <span style={{ display: 'block', marginTop: 2, color: 'var(--chooser-note)', fontSize: 'var(--fs-sm)', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{description}</span>
               </span>
               {off ? (
                 <span style={{ color: 'var(--term-muted)', border: '1px solid var(--term-line)', borderRadius: 'var(--ui-radius-pill)', padding: '1px 7px', fontSize: 'var(--fs-xs)', whiteSpace: 'nowrap' }}>Off</span>
@@ -422,6 +406,7 @@ export default function PaneChooser({ item }: { item: LauncherPaneItem }) {
           </div>
         )}
       </div>
+      {recede}
     </div>
   );
 }

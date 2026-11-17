@@ -11,6 +11,7 @@ import {
   stageExtractionPayload, type ExtractionRunRecord,
 } from './extractionRepository';
 import { EXTRACTION_RUN_ID_PREFIX, MEMORY_EXTRACTION_LIMITS, PROFILE_RUN_ID_PREFIX } from './extractionRun';
+import { TopicsPayloadError, validateTopicsPayload } from './memoryTopics';
 import { ownsUnattendedRun } from '../scheduledJobs/repository';
 import { activeMichiNoteCount } from './memoryRepository';
 import { EXTRACTION_PAYLOAD_SCHEMA, ExtractionPayloadError, validateExtractionPayload, type ExtractionPayload } from './extractionV2';
@@ -91,6 +92,7 @@ const EXTRACT_DESCRIPTIONS: Record<string, Described> = {
       body: 'Required. At most 300 characters: the memory, self-contained, in the user\'s language, with absolute dates.',
       keywords: 'Required. 3-10 search terms in both Chinese and English.',
       event_date: 'Optional. YYYY-MM-DD of the event the memory describes, past or planned.',
+      valid_until: 'Optional. YYYY-MM-DD: the last day the memory is true, when the user said it ends.',
       quote: 'Required. The user\'s own words that state it, copied exactly from the turn\'s "user" text.',
       source_turn: 'Required. The "turn" id of the turn it comes from.',
     },
@@ -115,6 +117,13 @@ const CONSOLIDATE_DESCRIPTIONS: Record<string, Described> = {
       op: 'Required. keep (the default), duplicate (into already says everything it says) or outdated (into, said later, makes it no longer true).',
       into: 'Required. For duplicate or outdated, the ref of another note of the same group; null for keep.',
       why: 'Required. At most 80 characters: why.',
+    },
+  },
+  guesses: {
+    description: 'At most 2 things about the user that two or more listed everywhere notes show together and no note says; [] when none.',
+    items: {
+      text: 'Required. One short sentence, in the language of the notes it rests on.',
+      refs: 'Required. The refs (m:…) of the listed notes it rests on, two or more.',
     },
   },
 };
@@ -224,7 +233,22 @@ export function stageMemoryAnswer(run: ExtractionRunRecord, raw: unknown, now: n
       throw error;
     }
     if (!stageExtractionPayload(run.id, JSON.stringify(payload))) return { status: 'already_recorded', note: CONSOLIDATE_DONE_NOTE };
-    return { status: 'recorded', decisions: payload.decisions.length, note: CONSOLIDATE_DONE_NOTE };
+    return {
+      status: 'recorded', decisions: payload.decisions.length, ...(payload.guesses?.length ? { guesses: payload.guesses.length } : {}),
+      note: CONSOLIDATE_DONE_NOTE,
+    };
+  }
+  if (run.kind === 'topics') {
+    let payload;
+    try {
+      payload = validateTopicsPayload(raw, run.related.map(({ ref, memoryId }) => ({ ref, memoryId })),
+        { strict: run.invalidCalls < MEMORY_EXTRACTION_LIMITS.maxRepairs });
+    } catch (error) {
+      if (error instanceof TopicsPayloadError) throw new InvalidMemoryAnswer(error.message);
+      throw error;
+    }
+    if (!stageExtractionPayload(run.id, JSON.stringify(payload))) return { status: 'already_recorded', note: DONE_NOTE };
+    return { status: 'recorded', topics: payload.topics.length, note: DONE_NOTE };
   }
   if (run.kind === 'profile') {
     const sources = listedProfileSources(run.ownerUserId, run.related);
@@ -261,18 +285,20 @@ const PROFILE: typeof EXTRACT = {
 
 const CONSOLIDATE: typeof EXTRACT = {
   name: MEMORY_CONSOLIDATE_TOOL_NAME,
-  description: 'Record this run\'s decisions in one call: keep each listed note, or put Michi\'s own note into another note of its group that it duplicates or that replaced it.',
+  description: 'Record this run\'s decisions in one call: keep each listed note, or put Michi\'s own note into another note of its group that it duplicates or that replaced it; and any guesses.',
   schema: CONSOLIDATION_PAYLOAD_SCHEMA as Record<string, unknown>,
 };
 
 /** What a run of each kind does, and its tool, for a refusal of another kind's tool. */
-const RUN_TASK: Record<ExtractionRunRecord['kind'], { does: string; tool: MemoryExtractionToolName; failed: string }> = {
+const RUN_TASK: Record<ExtractionRunRecord['kind'], { does: string; tool: MemoryExtractionToolName | null; failed: string }> = {
   extract: {
     does: 'reads conversation turns', tool: MEMORY_EXTRACTION_TOOL_NAMES[0],
     failed: 'its turns are skipped and nothing will be saved',
   },
   profile: { does: 'writes the user\'s profile', tool: MEMORY_PROFILE_TOOL_NAME, failed: 'the profile stays as it was' },
   consolidate: { does: 'tidies Michi\'s own notes', tool: MEMORY_CONSOLIDATE_TOOL_NAME, failed: 'every note stays as it was' },
+  // Answered by a direct call only (memoryTopics.ts): no session's tool records it.
+  topics: { does: 'files memories under topics', tool: null, failed: 'the memories keep no topic' },
 };
 
 /**
@@ -287,7 +313,8 @@ function serve(
   let run: ExtractionRunRecord;
   try { run = authorize(context, now); } catch (error) { return failure(error instanceof Error ? error.message : String(error)); }
   if (run.kind !== kind) {
-    return failure(`This run ${RUN_TASK[run.kind].does}: answer with ${RUN_TASK[run.kind].tool}, not ${name}.`);
+    const task = RUN_TASK[run.kind];
+    return failure(`This run ${task.does}: ${task.tool ? `answer with ${task.tool}, not ${name}` : `no tool records it, not ${name}`}.`);
   }
   if (run.stoppedReason === 'invalid_limit') {
     return failure(kind === 'profile'

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { AlertCircle, ImageOff } from 'lucide-react';
+import { ErrorIcon, ImageOffIcon } from '../../../icons';
 import { loadableImageUrl } from '../../../../../lib/pictureAddress';
 import type { BlockProps } from '../blockTypes';
 import { httpsUrl, objects, str } from '../michiPageModel';
@@ -26,7 +26,7 @@ export function Picture({ url, alt, caption, load }: { url: string; alt: string;
           </a>
         ) : (
           <div className="michi-doc-picture__fallback">
-            {state === 'insecure' ? <AlertCircle size={14} strokeWidth={1.6} aria-hidden="true" /> : <ImageOff size={14} strokeWidth={1.6} aria-hidden="true" />}
+            {state === 'insecure' ? <ErrorIcon aria-hidden="true" /> : <ImageOffIcon aria-hidden="true" />}
             <span>{state === 'insecure' ? "HTTP pictures don't load" : state === 'failed' ? "Couldn't load" : 'Not loaded here'}</span>
             {https ? <a className="michi-doc-link-btn" href={https} target="_blank" rel="noopener noreferrer">Original link ↗</a>
               : <span className="michi-doc-picture__host">{url.trim()}</span>}

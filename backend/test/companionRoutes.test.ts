@@ -5,9 +5,9 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * the assistant's V, made on first use, with its assistant info), strict body validation with
  * `{ error, code }` refusals, item actions, settings, notes with their
  * revision, rules, reminders, demotions, goals, cards (Apply / Dismiss /
- * expired / failed), briefs, the injected service (check with its 409
+ * expired / failed), the injected service (check with its 409
  * not_owner, presence), Get started (Start, Not now; no welcome turn), Undo all of a check-in, "Ask before
- * sending" for a followed conversation, the view with its "Since you left",
+ * sending" for a followed conversation, the view that marks the messages read,
  * the local-only guard, and both SSE streams (current revision on connect,
  * notice replay with the backlog fold and acknowledgement, cleanup on close).
  * In-process express on 127.0.0.1; temp MICHI_DATA_DIR per test; the service
@@ -29,7 +29,7 @@ import {
   companionDelegationPath,
   companionPostId,
   companionStatusLine,
-  type CompanionCatchUpDto, type CompanionPresenceInput, type CompanionSnapshotDto, type CompanionTrayDto,
+  type CompanionPresenceInput, type CompanionSnapshotDto, type CompanionTrayDto,
 } from 'michi-shared';
 import { clearAllSessions } from '../src/agents/sessionRegistry';
 import { assistantPurposeOf, currentAssistantNodeId } from '../src/assistant/store';
@@ -42,19 +42,18 @@ import { CompanionEventBus } from '../src/services/companion/delivery';
 import { CompanionError, notOwner } from '../src/services/companion/errors';
 import { companionGetStarted, spacesVisitMayStartFirstRun, startCompanionGetStarted } from '../src/services/companion/getStarted';
 import { getMetaAgentSettings } from '../src/services/metaAgent/settings';
+import { getAgentConfig, updateAgentConfig } from '../src/services/agentConfig';
 import {
   COMPANION_CARD_TTL_MS,
   addGoal,
+  createReminder,
   demoteSubtype,
-  getBriefCurate,
   getCompanionMetaNumber,
   getCompanionNotes,
   getCompanionNotesState,
   getCompanionRules,
   getItem,
   getReminder,
-  createReminder,
-  insertBrief,
   markCompanionWelcomeDone,
   isSubtypeDemoted,
   listGoals,
@@ -91,8 +90,6 @@ let service: CompanionService;
 let calls: { checkNow: Array<readonly string[] | undefined>; presence: CompanionPresenceInput[]; welcome: number; firstRun: number; turnedOff: string[] };
 /** Conversations whose running turn waits on the user (the router's conversationWaiting). */
 let waiting: Set<string>;
-
-const CATCH_UP: CompanionCatchUpDto = { awaySince: T0 - 2 * HOUR, returnedAt: T0, changedItemIds: [], line: 'Nothing new since 10:00.' };
 
 function fakeService(): CompanionService {
   return {
@@ -217,7 +214,10 @@ describe('Companion routes', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  test('GET /companion is the snapshot; its conversation is the assistant\'s V, made once', async () => {
+  test('GET /companion is the snapshot; its conversation is the assistant\'s V, made once', async (t) => {
+    const previousConfig = getAgentConfig();
+    updateAgentConfig({ runtime: 'claude' });
+    t.after(() => { updateAgentConfig(previousConfig); });
     assert.equal(currentAssistantNodeId(), null);
     const first = await raw('GET', '/companion');
     assert.equal(first.status, 200);
@@ -229,21 +229,21 @@ describe('Companion routes', () => {
     const { assistant } = snapshot.conversation;
     assert.deepEqual([assistant.nodeId, assistant.workspaceId], [snapshot.conversation.nodeId, snapshot.conversation.workspaceId],
       'what an embedded pane needs as its assistant source');
-    assert.ok(assistant.treeId && typeof assistant.conversation.runtimeId === 'string' && Array.isArray(assistant.supportedRuntimes));
-    assert.deepEqual([snapshot.items, snapshot.cards, snapshot.goals, snapshot.activity, snapshot.brief, snapshot.catchUp, snapshot.notes, snapshot.revision],
-      [[], [], [], [], null, null, '', 0]);
+    assert.ok(assistant.treeId && Array.isArray(assistant.supportedRuntimes));
+    assert.equal(assistant.conversation.runtimeId, 'claude');
+    assert.deepEqual([snapshot.items, snapshot.cards, snapshot.goals, snapshot.activity, snapshot.notes, snapshot.revision],
+      [[], [], [], [], '', 0]);
     assert.deepEqual([snapshot.notesRevision, snapshot.rules, snapshot.reminders, snapshot.demotedSubtypes], [0, '', [], []]);
     assert.deepEqual(snapshot.counts, { needsYou: 0, newItems: 0, unreadMessages: 0 });
     assert.equal(snapshot.status.state, 'ok');
     assert.equal(snapshot.status.working, false);
     assert.deepEqual((await raw('GET', '/companion')).body.conversation, snapshot.conversation, 'idempotent');
 
-    // A live service's status and catch-up replace the stored ones.
+    // A live service's status replaces the stored one.
     const status = { ...snapshot.status, state: 'degraded' as const, turnsToday: 7 };
-    service = { ...fakeService(), status: () => status, catchUp: () => CATCH_UP };
+    service = { ...fakeService(), status: () => status };
     const live = (await raw('GET', '/companion')).body as CompanionSnapshotDto;
     assert.deepEqual(live.status, status);
-    assert.deepEqual(live.catchUp, CATCH_UP);
   });
 
   test('only this machine\'s app (or the authenticated remote owner) reaches the routes', async () => {
@@ -396,32 +396,35 @@ describe('Companion routes', () => {
     assert.deepEqual((await raw('POST', '/companion/check')).body, { queued: true }, 'without a lease check every check is accepted');
   });
 
-  test('the view marks the Companion\'s messages read and answers "Since you left" after half an hour away', async () => {
+  test('the view marks the Companion\'s messages read; nothing is summarized for the return any more (2026-11-17)', async () => {
     const events = await stream('/companion/events');
     try {
       await events.waitFor((frames) => framesOf(frames, 'companion_changed').length === 1, 'the connect frame');
-      assert.deepEqual((await raw('POST', '/companion/view')).body, { catchUp: null }, 'the first look has nothing to catch up on');
+      const first = await raw('POST', '/companion/view');
+      assert.deepEqual([first.status, first.body], [204, undefined], 'the panel opened: nothing to answer');
       const spoke = recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 + 1000, outcome: 'spoke', finishedAt: T0 + 2000 });
       recordRunPost(spoke.id, { messageId: companionPostId(spoke.id), at: T0 + 2000, changes: [] });
       assert.equal((await raw('GET', '/companion')).body.counts.unreadMessages, 1, 'its post is unread');
       now = T0 + 10 * 60_000;
-      assert.deepEqual((await raw('POST', '/companion/view', {})).body, { catchUp: null }, 'back after 10 minutes');
+      assert.equal((await raw('POST', '/companion/view', {})).status, 204);
       assert.equal((await raw('GET', '/companion')).body.counts.unreadMessages, 0);
-      await events.waitFor((frames) => framesOf(frames, 'companion_changed').some((event) => event.reason === 'catch_up'), 'the unread badge changed');
+      await events.waitFor((frames) => framesOf(frames, 'companion_changed').some((event) => event.reason === 'view'), 'the unread badge changed');
 
-      const item = upsertItem(draft(), now + 60_000).item;
-      const awaySince = now;
+      // A look with nothing unread changes nothing, so no window is woken. A later real change proves the stream was live.
       now += HOUR;
-      const back = await raw('POST', '/companion/view');
-      assert.deepEqual(back.body.catchUp, { awaySince, returnedAt: now, changedItemIds: [item.id], line: '1 thing needs you.' });
-      assert.deepEqual((await raw('GET', '/companion')).body.catchUp, back.body.catchUp, 'the snapshot shows it while it is recent');
+      assert.equal((await raw('POST', '/companion/view')).status, 204);
+      const item = upsertItem(draft(), now).item;
+      assert.equal((await raw('POST', '/companion/items/seen', { ids: [item.id] })).status, 204);
+      await events.waitFor((frames) => framesOf(frames, 'companion_changed').some((event) => event.reason === 'items'), 'the item frame');
+      assert.equal(framesOf(events.frames, 'companion_changed').filter((event) => event.reason === 'view').length, 1,
+        'nothing was unread the second time: no event of its own');
     } finally {
       events.close();
     }
     await refused(raw('POST', '/companion/view', { focused: true }), 400, 'invalid_request');
   });
 
-  test('notes with their revision, and the brief\'s focus', async () => {
+  test('notes with their revision', async () => {
     const saved = await raw('PUT', '/companion/notes', { notes: ' Watch CR-1\r\n ' });
     assert.deepEqual([saved.status, saved.body], [200, { notes: 'Watch CR-1', notesRevision: 1, origin: 'user' }]);
     assert.equal(getCompanionNotes(), 'Watch CR-1');
@@ -436,11 +439,6 @@ describe('Companion routes', () => {
     await refused(raw('PUT', '/companion/notes', {}), 400, 'invalid_request');
     await refused(raw('PUT', '/companion/notes', { notes: 5 }), 400, 'invalid_request');
     await refused(raw('PUT', '/companion/notes', { notes: 'x', append: true }), 400, 'invalid_request');
-
-    assert.equal((await raw('POST', '/companion/brief/curate', { text: 'More on reviews' })).status, 204);
-    assert.equal(getBriefCurate(), 'More on reviews');
-    await refused(raw('POST', '/companion/brief/curate', { text: 'x'.repeat(501) }), 400, 'invalid_request');
-    await refused(raw('POST', '/companion/brief/curate', {}), 400, 'invalid_request');
   });
 
   test('rules: the user replaces them and the snapshot shows them', async () => {
@@ -560,20 +558,6 @@ describe('Companion routes', () => {
     assert.deepEqual((await raw('GET', '/companion')).body.cards, [], 'no card is left waiting');
   });
 
-  test('brief card feedback', async () => {
-    const brief = insertBrief({ date: '2026-11-05', headline: '1 thing needs you today', origin: 'fallback', now: T0, closing: "That's all for today.",
-      cards: [{ title: 'MyService is blocked', body: 'Gamma is blocked.', itemIds: [], action: null }] })!;
-    assert.equal((await raw('GET', '/companion')).body.brief.id, brief.id);
-    const voted = await raw('POST', `/companion/brief/${brief.id}/feedback`, { index: 0, feedback: 'up' });
-    assert.deepEqual([voted.status, voted.body.cardFeedback], [200, { 0: 'up' }]);
-    assert.deepEqual((await raw('POST', `/companion/brief/${brief.id}/feedback`, { index: 0, feedback: null })).body.cardFeedback, {});
-    await refused(raw('POST', `/companion/brief/${brief.id}/feedback`, { index: 1, feedback: 'up' }), 400, 'invalid_request');
-    await refused(raw('POST', `/companion/brief/${brief.id}/feedback`, { index: '0', feedback: 'up' }), 400, 'invalid_request');
-    await refused(raw('POST', `/companion/brief/${brief.id}/feedback`, { index: 0, feedback: 'love' }), 400, 'invalid_request');
-    await refused(raw('POST', `/companion/brief/${brief.id}/feedback`, { index: 0 }), 400, 'invalid_request');
-    await refused(raw('POST', '/companion/brief/cmb-missing/feedback', { index: 0, feedback: 'up' }), 404, 'not_found');
-  });
-
   test('there is no reset any more: New conversation is the assistant\'s own', async () => {
     const first = (await raw('GET', '/companion')).body as CompanionSnapshotDto;
     assert.equal((await raw('POST', '/companion/reset')).status, 404);
@@ -678,10 +662,10 @@ describe('Companion routes', () => {
   test('GET /companion/tray: the panel\'s status line, badge and welcome rule, and five Needs you rows by title only; it makes no conversation', async () => {
     const empty = await raw('GET', '/companion/tray');
     assert.equal(empty.status, 200);
-    assert.deepEqual(Object.keys(empty.body).sort(), ['badge', 'briefReady', 'conversationWaiting', 'displayName', 'enabled', 'needsYou', 'needsYouTotal',
-      'paused', 'revision', 'statusLine', 'welcomeWanted'], 'no welcomeDone any more (W3)');
-    assert.deepEqual([empty.body.displayName, empty.body.welcomeWanted, empty.body.conversationWaiting, empty.body.needsYou, empty.body.briefReady],
-      ['Michi', true, false, [], false]);
+    assert.deepEqual(Object.keys(empty.body).sort(), ['badge', 'conversationWaiting', 'displayName', 'enabled', 'needsYou', 'needsYouTotal',
+      'paused', 'revision', 'statusLine', 'welcomeWanted'], 'no welcomeDone any more (W3), and no briefReady since 2026-11-17');
+    assert.deepEqual([empty.body.displayName, empty.body.welcomeWanted, empty.body.conversationWaiting, empty.body.needsYou],
+      ['Michi', true, false, []]);
     assert.equal(currentAssistantNodeId(), null, 'a fetch from the menu bar creates nothing');
 
     const snapshot = (await raw('GET', '/companion')).body as CompanionSnapshotDto;
@@ -696,7 +680,6 @@ describe('Companion routes', () => {
       severity: 'digest', target: { kind: 'node', workspaceId: 'ws-1', nodeId: 'n-9' }, observedAt: T0 + 30 }), T0 + 30).item;
     upsertItem(draft({ source: 'email', subtype: 'email_unread', itemKey: 'email:1', title: 'Salary review', summary: 'Confidential', observedAt: T0 + 40 }), T0 + 40);
     patchCompanionSettings({ sources: { email: { enabled: false } } });
-    insertBrief({ date: '2026-11-05', headline: 'Your day', origin: 'fallback', now: T0, closing: "That's all for today.", cards: [] });
     const run = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 });
     service = { ...fakeService(), status: () => ({ ...snapshot.status, working: true }) };
     waiting.add(vNodeId);
@@ -720,9 +703,6 @@ describe('Companion routes', () => {
     for (const secret of ['Gamma is blocked by an alarm', 'builds.example.com', 'Salary review', 'Confidential']) {
       assert.ok(!text.includes(secret), `no summary, link or hidden source in the tray: ${secret}`);
     }
-    assert.equal(tray.briefReady, true, 'today\'s brief, not looked at');
-    await raw('POST', '/companion/view', {});
-    assert.equal(((await raw('GET', '/companion/tray')).body as CompanionTrayDto).briefReady, false, 'the panel was opened since');
     waiting.clear();
     assert.equal(((await raw('GET', '/companion/tray')).body as CompanionTrayDto).conversationWaiting, false);
   });

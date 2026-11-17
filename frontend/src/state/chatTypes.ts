@@ -4,7 +4,7 @@ import type { AgentStatus, PermissionRequest, TreeMessagePageEntry } from '../se
 import type { MentionRecord } from '../components/mentions';
 import type { AttachmentRef } from '../lib/composerAttachments';
 import type { UserInputAnswer, UserInputQuestion } from '../services/chatStreamEvents';
-import type { BranchOverviewEntry, LeanNodeField, SteeringReport } from 'michi-shared';
+import type { AutoContinueSource, BranchOverviewEntry, LeanNodeField, SteeringReport, TurnEndMark } from 'michi-shared';
 import type { CompanionPostMetadata, CompanionSendSource, CompanionTurnMetadata, DurableMessageMetadata, NarrationOption, ThreadMessageSource, TurnStartAssistantMetadata } from 'michi-shared';
 import type { PaneItem, PaneLauncherChoice } from './paneItems';
 
@@ -66,6 +66,14 @@ export interface ToolCallState {
   startedAt?: number;
   /** Wall-clock ms when the tool first reached a terminal status. */
   endedAt?: number;
+  /**
+   * A display page left part of this finished call on the server: its output
+   * (`hasOutput`) and long input or detail values. Its rows read what came;
+   * opening it loads the rest (useDeferredToolCalls). Never written back.
+   */
+  deferred?: boolean;
+  /** The output a deferred call left on the server. */
+  hasOutput?: boolean;
 }
 
 /** Backend-clock ms (shared turnProjection appendText/closeTrailingTextBlock):
@@ -88,6 +96,8 @@ export type AssistantBlock =
       rawOffset: number;
     }
   | { id: string; kind: 'image'; workspaceId: string; path: string; caption?: string; mimeType: string; size: number }
+  /** Rich blocks the agent showed (show_blocks), each with the id Michi gave it; see shared DurableAssistantBlock. */
+  | { id: string; kind: 'blocks'; blocks: unknown[]; title?: string; fallbackText: string }
   | {
       id: string;
       kind: 'user-input';
@@ -125,6 +135,8 @@ export interface UserSendMeta {
   permissionMode?: import('michi-shared').ChatPermissionMode;
   /** Approve for me on top of `permissionMode: 'ask'` (Kiro V3). */
   approveForMe?: boolean;
+  /** This message answers a block a reply showed (ChatMessage.blockAnswer). */
+  blockAnswer?: import('michi-shared').BlockAnswerSource;
   /** Quoted passage for this turn. Rendered as a chip in the bubble. */
   quotedText?: string;
   /** Where quotedText came from (ChatMessage.quoteSource), for a retry's framing. */
@@ -222,6 +234,14 @@ export interface ChatMessage {
   plan?: PlanEntry[];
   /** Subagents this assistant turn delegated to; durable, persisted in metadata. */
   subagents?: SubagentInfo[];
+  /**
+   * Assistant messages: the turn ended before it finished its answer (a Stop
+   * the server confirmed, or a limit). From the confirmed `done` frame live,
+   * from the stored metadata after a reload.
+   */
+  turnEnd?: TurnEndMark;
+  /** User messages: Michi sent this one to continue the turn before it (services/autoContinue.ts). */
+  autoContinue?: AutoContinueSource;
   /** Unix ms when this message was created (user) or when the assistant turn began. Optional - legacy persisted messages lack it. */
   createdAt?: number;
   /**
@@ -294,6 +314,8 @@ export interface ChatMessage {
   metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
   /** User messages to the agent: the references they carried (stored as userMetadata.companionRefs). */
   companionRefs?: import('michi-shared').CompanionTurnRef[];
+  /** A user message that answered a block a reply showed (stored as userMetadata.blockAnswer): drawn as one line, its text on demand. */
+  blockAnswer?: import('michi-shared').BlockAnswerSource;
   /**
    * The Pages upkeep's first-run question (`mna-` narration, its end): its
    * options, one of which may open another conversation with a draft
@@ -407,6 +429,11 @@ export interface ChatNodeState {
    * session's to say (sessionState.ultracode).
    */
   ultracode?: boolean;
+  /**
+   * The chat's speed tier (Codex: `ultrafast`); absent for standard.
+   * Server-owned, like ultracode; a turn uses it only while the model lists it.
+   */
+  serviceTier?: string;
   /** Stable id used as the key in the nodes map. */
   nodeId: string;
   /** 'chat' for normal agent-backed threads; 'digest' for generated markdown docs. */
@@ -624,17 +651,19 @@ export interface ChatNodeState {
   pendingComments?: PendingComment[];
   /**
    * Messages the user wrote while this node was streaming. Flushed as
-   * one combined message when the current turn finishes (done/cancel);
-   * preserved + flagged via `queueErrored` if the stream errored. See
+   * one combined message when the current turn finishes; kept and paused
+   * (`queueErrored`) if it errored or was stopped. See
    * `docs/superpowers/specs/2026-05-07-composer-queue-design.md`.
    */
   pendingQueued?: PendingQueuedMessage[];
   /**
-   * Set true by the stream-error handler when the queue is non-empty
-   * at error time. UI shows a paused/danger rail until the user
-   * either dequeues everything or re-sends manually.
+   * Set when the turn the queue waited for ended in an error, or in a Stop
+   * (queueStopped), with the queue non-empty. The queue waits for the user
+   * (Send now, or × each entry), whatever turn ends next.
    */
   queueErrored?: boolean;
+  /** With queueErrored: the user stopped that turn, here or in another window. */
+  queueStopped?: boolean;
   /**
    * Wall-clock ms of the last assistant `done`. Bumped only on the final
    * response, not on streaming chunks. Mirrors `digest.generatedAt`.
@@ -663,6 +692,13 @@ export interface ChatNodeState {
   lastCompletedAt?: number;
   lastCompletedTurnId?: string;
   /**
+   * Completions this window marked seen before a pane showed them: opening a
+   * thread marks them seen in the same click, before its pane mounts. The
+   * pane that shows the node next opens on the first of these replies, then
+   * clears it (`unread-on-open-shown`). In memory only.
+   */
+  unreadOnOpen?: number;
+  /**
    * Node-level pin. Unix ms when the user pinned this branch node; absent =
    * not pinned. A pinned node floats to the top of its sibling group in the
    * sidebar (most recently pinned first), mirroring `Tree.pinnedAt` one level
@@ -688,9 +724,8 @@ export interface PendingComment {
 /**
  * A message the user composed while node N was streaming. Held in
  * memory on N until the stream ends, then flushed as one combined
- * user message via sendMessage. Cleared on stream-error (with the
- * `queueErrored` flag set so the UI can prompt for manual re-send),
- * or on dequeue (when the user × the pill — TPane restores the
+ * user message via sendMessage. Paused on stream error or Stop (the
+ * `queueErrored` flag) until the user sends it, or on dequeue (when the user × the pill — TPane restores the
  * entry to the composer draft).
  */
 export interface PendingQueuedMessage {
@@ -714,6 +749,8 @@ export interface PendingQueuedMessage {
   comments?: PendingComment[];
   /** The / menu row its `/name` was picked from (UserSendMeta.slash). */
   slash?: import('./slashEntries').SlashPick;
+  /** It answers a block a reply showed (UserSendMeta.blockAnswer): it drains alone, so the answer stays one message. */
+  blockAnswer?: import('michi-shared').BlockAnswerSource;
   /**
    * The agent's conversation: the metaAgentContext read when the user queued
    * it (its chips, the post it replies to, the area), sent when it flushes,
@@ -856,6 +893,7 @@ export type ChatAction =
   | { type: 'create'; nodeId: string; projectId: string; parentNodeId?: string; mergeSources?: string[]; modeId?: string; temporary?: boolean }
   | { type: 'set-permission-mode'; nodeId: string; mode: import('michi-shared').ChatPermissionMode; approveForMe?: boolean }
   | { type: 'set-ultracode'; nodeId: string; enabled: boolean }
+  | { type: 'set-service-tier'; nodeId: string; serviceTier: string | null }
   | {
       type: 'bind-chat';
       nodeId: string;
@@ -883,6 +921,7 @@ export type ChatAction =
       skill?: import('michi-shared').SkillMessageMetadata;
       /** A message to the agent: the context it carries, kept on the message for a retry (ChatMessage.metaAgentContext). */
       metaAgentContext?: import('michi-shared').MetaAgentChatTurnContext | null;
+      blockAnswer?: import('michi-shared').BlockAnswerSource;
     }
   | { type: 'chunk'; nodeId: string; assistantId: string; text: string; observedAt?: number }
   | { type: 'steering-report'; nodeId: string; assistantId: string; reports: SteeringReport[] }
@@ -893,6 +932,7 @@ export type ChatAction =
   | { type: 'tool-call'; nodeId: string; assistantId: string; tool: ToolCallState; observedAt?: number }
   | { type: 'tool-call-update'; nodeId: string; assistantId: string; tool: ToolCallState; observedAt?: number }
   | { type: 'image-block'; nodeId: string; assistantId: string; path: string; caption?: string; mimeType: string; size: number }
+  | { type: 'chat-blocks'; nodeId: string; assistantId: string; blocks: unknown[]; title?: string; fallbackText: string; observedAt?: number }
   | {
       type: 'done';
       nodeId: string;
@@ -901,6 +941,8 @@ export type ChatAction =
       /** The turn was cancelled (Stop / abort). Still-active tool calls are
        *  finalized as 'interrupted' instead of 'completed'. */
       aborted?: boolean;
+      /** The stop reason the server's `done` frame gave; absent for a Stop this window only asked for. */
+      stopReason?: string;
       /** The turn that ended, when the stream named it: its completion counts once. */
       turnId?: string;
       /** The node's completion facts the server committed with this turn (completionFacts.ts). */
@@ -958,6 +1000,8 @@ export type ChatAction =
     }
   | { type: 'history-page-loaded'; nodeId: string; expectedBefore: { seq: number; id: string };
       before: { seq: number; id: string } | null; messages: ChatMessage[]; total: number }
+  /** Deferred calls' bodies (DeferredToolCalls), by message: they replace the calls still deferred. */
+  | { type: 'tool-calls-loaded'; nodeId: string; byMessage: Record<string, ToolCallState[]> }
   | { type: 'retry-trim'; nodeId: string; fromIndex?: number }
   | { type: 'heartbeat'; nodeId: string; idleMs: number }
   | { type: 'set-minimized'; nodeId: string; minimized: boolean }
@@ -986,6 +1030,7 @@ export type ChatAction =
   | { type: 'digest-viewed'; nodeId: string; viewedAt: number }
   /** `seen`: a focused window had the node on screen, so its completions count as seen. */
   | { type: 'node-viewed'; nodeId: string; viewedAt: number; seen?: boolean }
+  | { type: 'unread-on-open-shown'; nodeId: string }
   | { type: 'mark-all-read'; viewedAt: number }
   | { type: 'set-title'; nodeId: string; title: string }
   | { type: 'set-branch-overview'; nodeId: string; overview: string; assistantId?: string }
@@ -1039,7 +1084,7 @@ export type ChatAction =
   | { type: 'optimistic-cancel'; nodeId: string }
   | { type: 'compaction'; nodeId: string; active: boolean }
   | { type: 'runtime-activity'; nodeId: string; assistantId?: string; detail?: string }
-  | { type: 'cancel-recovery'; nodeId: string; assistantId: string; state: 'pending' | 'settled' | 'error'; detail?: string }
+  | { type: 'cancel-recovery'; nodeId: string; assistantId: string; state: 'pending' | 'settled' | 'error'; detail?: string; stopReason?: string }
   | { type: 'warning'; nodeId: string; assistantId?: string; warning: import('michi-shared').RuntimeWarning }
   | { type: 'mcp-server-error'; nodeId: string; serverName: string; error: string }
   | { type: 'set-composer-draft'; nodeId: string; draft: ComposerDraft | null; preserveExisting?: boolean }
@@ -1052,7 +1097,8 @@ export type ChatAction =
   | { type: 'queue-message'; nodeId: string; message: PendingQueuedMessage }
   | { type: 'dequeue-message'; nodeId: string; messageId: string }
   | { type: 'flush-queue'; nodeId: string }
-  | { type: 'mark-queue-errored'; nodeId: string };
+  | { type: 'mark-queue-errored'; nodeId: string; stopped?: boolean }
+  | { type: 'resume-queue'; nodeId: string };
 
 export type ProjectAction =
   | { type: 'create-tree'; treeId: string; rootNodeId: string; now: number; kind?: 'normal' | 'merge' }
@@ -1149,7 +1195,7 @@ export interface ChatContextValue {
   retryLastTurn: (nodeId: string, fromIndex?: number, binding?: SendBindingMeta) => void;
   /** Explicitly execute again; an uncertain original attempt keeps its existing output and anchors. */
   rerunLastTurn: (nodeId: string, fromIndex?: number, binding?: SendBindingMeta) => void;
-  /** Carry on a turn a restart or expired credentials cut short with a continuation prompt; the original request is not re-sent. */
+  /** Carry on a turn a restart or expired credentials cut short, or one its answer marks stopped or ended early, with a continuation prompt; the original request is not re-sent. */
   resumeLastTurn: (nodeId: string, binding?: SendBindingMeta) => void;
   /** Trim from a given user message index and resend with new (edited) text. */
   editAndResend: (nodeId: string, fromIndex: number, newText: string, binding?: SendBindingMeta) => void;
@@ -1183,6 +1229,13 @@ export interface ChatContextValue {
    * every new retry.
    */
   agentStatusUnreachable: boolean;
+  /**
+   * The backend connection `agentStatus` and `agentStatusUnreachable` describe:
+   * the one the status reads go to. A notice about that backend keys off this,
+   * not off `activeProject`, which is resolved separately and can disagree
+   * (e.g. none yet while a window reloads onto a remote workspace).
+   */
+  agentStatusConnectionId: string;
   /**
    * Error message recorded when /api/ready reports `failed` during boot
    * (e.g. kiro-cli ENOENT). null when warm is pending or has succeeded.
@@ -1343,6 +1396,8 @@ export interface ChatContextValue {
   setChatPermissionMode: (nodeId: string, choice: import('michi-shared').ChatPermissionChoice) => Promise<void>;
   /** Save the chat's Ultracode choice; its live session takes it at once. */
   setChatUltracode: (nodeId: string, enabled: boolean) => Promise<void>;
+  /** Save the chat's speed tier (null: standard); its next turn uses it. */
+  setChatServiceTier: (nodeId: string, serviceTier: string | null) => Promise<void>;
   archiveTree: (treeId: string) => void;
   unarchiveTree: (treeId: string) => void;
   pinTree: (treeId: string) => void;
@@ -1423,6 +1478,8 @@ export interface ChatContextValue {
   flushQueue: (nodeId: string) => void;
   /** Mark the queue paused after a stream error. */
   markQueueErrored: (nodeId: string) => void;
+  /** Send a paused queue's next batch now (its turn errored or was stopped). */
+  sendQueuedNow: (nodeId: string) => void;
   /** Whether the sidebar is filtered to unread-only. Session-scoped (not persisted). */
   unreadFilterOn: boolean;
   setUnreadFilterOn: (on: boolean) => void;
@@ -1460,6 +1517,7 @@ export type ChatProjectsValue = Pick<
   | 'retryAgentModes'
   | 'agentStatus'
   | 'agentStatusUnreachable'
+  | 'agentStatusConnectionId'
   | 'warmFailedError'
   | 'refreshAgentStatus'
   | 'focusedNodeId'
@@ -1550,6 +1608,7 @@ export type ChatActionsValue = Pick<
   | 'resolvePermission'
   | 'setChatPermissionMode'
   | 'setChatUltracode'
+  | 'setChatServiceTier'
   | 'denyPermission'
   | 'resolveUserInputRequest'
   | 'skipUserInputRequest'
@@ -1560,6 +1619,7 @@ export type ChatActionsValue = Pick<
   | 'steerMessage'
   | 'queueMessage'
   | 'dequeueMessage'
+  | 'sendQueuedNow'
   | 'setComposerDraft'
   | 'createContext'
   | 'reorderPane'

@@ -199,8 +199,8 @@ test('a Pages view in a phone drawer reads at the size of the page inline', asyn
   await page.getByRole('button', { name: 'Release work', exact: true }).first().click();
   await page.locator('.spaces-home-space-card').filter({ hasText: 'Live release' }).click();
   const main = page.getByRole('main', { name: 'Live release', exact: true });
-  const inline = await px(main.locator('.michi-doc-block[data-block-id="rollout"] .michi-doc-code-lang'));
+  const inline = await px(main.locator('.michi-doc-block[data-block-id="rollout"] .michi-code-language'));
   await main.getByRole('link', { name: 'Read the evidence', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: 'Recommendation evidence', exact: true });
-  expect(await px(drawer.locator('.michi-doc-block[data-block-id="pilot"] .michi-doc-code-lang'))).toBe(inline);
+  expect(await px(drawer.locator('.michi-doc-block[data-block-id="pilot"] .michi-code-language'))).toBe(inline);
 });

@@ -7,6 +7,7 @@ import { getElectron, type GitChangeEntry } from '../../lib/electronBridge';
 import { workspaceRoots } from './FilesPane';
 import { UnifiedDiff } from './diff/UnifiedDiff';
 import { useWorkspaceDiff } from './diff/useWorkspaceDiff';
+import { SearchIcon } from './icons';
 
 type ChangesState =
   | { phase: 'loading'; changes: GitChangeEntry[] }
@@ -19,8 +20,8 @@ export default function ReviewPane({ item }: { item: ReviewPaneItem }) {
   const project = projects.find((candidate) => candidate.id === item.projectId);
   const roots = useMemo(() => workspaceRoots(project), [project]);
   const cwd = project?.cwd ?? roots[0] ?? '';
-  const shellStyle = usePaneShellStyle(item.id);
-  const side = useSideColumn('review-changes');
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
+  const side = useSideColumn('review-changes', 'Resize changes list');
   const [changes, setChanges] = useState<ChangesState>({ phase: 'loading', changes: [] });
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
@@ -66,7 +67,7 @@ export default function ReviewPane({ item }: { item: ReviewPaneItem }) {
         <aside ref={side.columnRef} style={{ position: 'relative', minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: '1px solid var(--term-line)' }}>
           <div style={{ height: 48, display: 'flex', alignItems: 'center', padding: '0 9px', borderBottom: '1px solid var(--term-line)' }}>
             <label className="ui-search ui-search--compact">
-              <span aria-hidden>⌕</span>
+              <SearchIcon size="sm" style={{ flexShrink: 0 }} />
               <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Filter changes…" aria-label="Filter changes" />
             </label>
           </div>
@@ -75,7 +76,7 @@ export default function ReviewPane({ item }: { item: ReviewPaneItem }) {
             {changes.phase === 'error' ? <div style={{ padding: '8px 11px', color: 'var(--term-danger-text)', fontSize: 'var(--fs-sm)' }}>{changes.message}</div> : null}
             {changes.phase === 'loaded' && changes.changes.length === 0 ? <div style={{ padding: '8px 11px', color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>Working tree is clean</div> : null}
             {visibleChanges.map((change) => (
-              <button key={`${change.status}:${change.path}`} type="button" onClick={() => setSelectedPath(change.path)} title={change.path} style={{ width: '100%', minHeight: 29, display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr)', alignItems: 'center', gap: 3, padding: '3px 9px', border: 0, background: selectedPath === change.path ? 'var(--term-alt)' : 'transparent', color: selectedPath === change.path ? 'var(--term-fg)' : 'var(--term-mid)', cursor: 'pointer', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', textAlign: 'left' }}>
+              <button key={`${change.status}:${change.path}`} type="button" onClick={() => setSelectedPath(change.path)} title={change.path} className={selectedPath === change.path ? 't-row-hover is-active' : 't-row-hover'} style={{ width: '100%', minHeight: 29, display: 'grid', gridTemplateColumns: '28px minmax(0, 1fr)', alignItems: 'center', gap: 3, padding: '3px 9px', border: 0, background: selectedPath === change.path ? 'var(--term-alt)' : 'transparent', color: selectedPath === change.path ? 'var(--term-fg)' : 'var(--term-mid)', cursor: 'pointer', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', textAlign: 'left' }}>
                 <span style={{ color: 'var(--term-digest)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)' }}>{change.status}</span>
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{change.path}</span>
               </button>
@@ -84,6 +85,7 @@ export default function ReviewPane({ item }: { item: ReviewPaneItem }) {
           {side.handle}
         </aside>
       </div>
+      {recede}
     </div>
   );
 }

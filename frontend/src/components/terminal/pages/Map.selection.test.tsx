@@ -7,6 +7,7 @@ const createMergedChat = vi.hoisted(() => vi.fn(async () => 'merged'));
 const clearSelection = vi.hoisted(() => vi.fn());
 const deleteNode = vi.hoisted(() => vi.fn());
 const archiveNode = vi.hoisted(() => vi.fn());
+const toggleSelection = vi.hoisted(() => vi.fn());
 const storeState = vi.hoisted(() => ({
   project: null as any,
   nodes: {} as Record<string, any>,
@@ -27,7 +28,7 @@ vi.mock('../../../state/chatStore', async () => {
       activeProject: storeState.project,
       edges: storeState.project?.edges ?? [],
       openPane: vi.fn(),
-      toggleSelection: vi.fn(),
+      toggleSelection,
       clearSelection,
       selection: storeState.selection,
       createBlankChild: vi.fn(),
@@ -404,5 +405,18 @@ describe('Map card expand', () => {
     expect(wrap()?.getAttribute('data-expanded')).toBe('true');
     fireEvent.click(card);
     expect(wrap()?.getAttribute('data-expanded')).toBe('false');
+  });
+
+  it('gives each card a head button the keyboard reaches: Enter expands it, Space selects it', () => {
+    storeState.nodes = { n1: node('n1'), n2: node('n2') };
+    toggleSelection.mockClear();
+    render(<TerminalMap />);
+    const head = screen.getByRole('button', { name: 'Node n1' });
+    expect(head.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(head); // Enter on a button is its click
+    expect(head.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.keyDown(head, { key: ' ' });
+    expect(toggleSelection).toHaveBeenCalledWith('n1');
+    expect(head.getAttribute('aria-expanded')).toBe('true');
   });
 });

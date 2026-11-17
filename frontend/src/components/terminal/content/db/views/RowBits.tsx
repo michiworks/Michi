@@ -152,7 +152,7 @@ export function RowFacts({
           <span key={c.id} className="michi-db-fact" data-column={c.builtin ? c.id : undefined} title={place ? optionName(db, c, value) : columnName(db, c)}>
             {place ? (
               <span className="michi-db-place">
-                <FolderIcon size={12} />
+                <FolderIcon size="sm" />
                 <span className="michi-db-text">{optionName(db, c, value)}</span>
               </span>
             ) : (

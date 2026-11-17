@@ -44,6 +44,8 @@ export type {
 export interface CancelRecoveryStatus {
   state: 'pending' | 'settled' | 'error';
   detail?: string;
+  /** With `settled`: how the stopped turn ended, from its `done` frame. */
+  stopReason?: string;
 }
 
 export interface StreamHandlers {
@@ -68,6 +70,7 @@ export interface StreamHandlers {
   /** An agent removed an artifact's registration (delete_artifact); its file is kept. */
   onArtifactDeleted?: (name: string, contextId?: string) => void;
   onImage?: (data: ChatStreamPayloads['image']) => void;
+  onBlocks?: (data: ChatStreamPayloads['blocks'] & ChatStreamEnvelope) => void;
   onPermissionResolved?: (data: ChatStreamPayloads['permission_resolved']) => void;
   onPermissionRequest?: (data: ChatStreamPayloads['permission_request']) => void;
   onUserInputRequest?: (data: ChatStreamPayloads['user_input_request'] & ChatStreamEnvelope) => void;
@@ -182,6 +185,9 @@ export function dispatchChatStreamEvent(
       return;
     case CHAT_STREAM_EVENTS.image:
       handlers.onImage?.(streamEvent.data);
+      return;
+    case CHAT_STREAM_EVENTS.blocks:
+      handlers.onBlocks?.(streamEvent.data);
       return;
     case CHAT_STREAM_EVENTS.permissionResolved:
       handlers.onPermissionResolved?.(streamEvent.data);

@@ -4,6 +4,10 @@ import { getElectron } from '../../../lib/electronBridge';
 import { appendFolders, FOLDER_OVERLAP_MESSAGE, MAX_WORKSPACE_FOLDERS, pathBasename } from '../../../lib/workspaceFolders';
 import type { FolderEntry } from '../../../state/chatTypes';
 import { InlineRenameInput } from '../../ui/InlineRenameInput';
+import { Button } from '../../ui/controls';
+import { HoverTip } from '../../ui/Popover';
+import { CloseIcon, FolderIcon, LockIcon } from '../icons';
+import './manage.css';
 
 interface Props {
   folders: FolderEntry[];
@@ -95,9 +99,9 @@ export default function FolderList({
             aria-label="Remote folder path"
             style={{ flex: 1, minWidth: 0, border: '1px solid var(--term-line)', background: 'var(--term-alt)', color: 'var(--term-fg)', padding: '5px 7px', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)' }}
           />
-          <button type="button" onClick={() => { void handleAdd(); }} style={{ border: '1px solid var(--term-line)', background: 'transparent', color: 'var(--term-mid)', padding: '4px 8px', cursor: 'pointer', fontSize: 'var(--fs-sm)' }}>
+          <Button size="sm" onClick={() => { void handleAdd(); }}>
             add server path
-          </button>
+          </Button>
         </div>
       )}
       {folders.map((f, idx) => (
@@ -113,10 +117,10 @@ export default function FolderList({
         >
           {/* Lock icon for first (cwd) folder */}
           {idx === 0 ? (
-            <LockIcon />
+            <LockIcon size="sm" aria-label="locked" style={{ flexShrink: 0, color: 'var(--term-muted)' }} />
           ) : (
             <span style={{ width: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-              <FolderIcon />
+              <FolderIcon size="sm" aria-label="folder" style={{ flexShrink: 0, color: 'var(--term-muted)' }} />
             </span>
           )}
 
@@ -124,6 +128,7 @@ export default function FolderList({
             {editingId === f.id ? (
               <InlineRenameInput
                 autoFocus
+                aria-label="Folder name"
                 value={f.label || pathBasename(f.path)}
                 onCommit={(label) => onUpdateLabel(projectId, f.id, label)}
                 onEnd={() => setEditingId(null)}
@@ -132,7 +137,8 @@ export default function FolderList({
                   fontSize: 'var(--fs-md)',
                   fontFamily: 'var(--ui-font)',
                   background: 'var(--term-alt)',
-                  border: '1px solid var(--term-line)',
+                  // Mounted only while it holds focus: the accent border is its focus cue.
+                  border: '1px solid var(--term-accent)',
                   color: 'var(--term-fg)',
                   padding: '1px 4px',
                   outline: 'none',
@@ -140,22 +146,13 @@ export default function FolderList({
               />
             ) : (
               <>
-                <div
-                  style={{
-                    fontSize: 'var(--fs-md)',
-                    fontWeight: 500,
-                    color: 'var(--term-fg)',
-                    fontFamily: 'var(--ui-font)',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    cursor: idx > 0 ? 'pointer' : 'default',
-                  }}
-                  onClick={() => idx > 0 && setEditingId(f.id)}
-                  title={idx > 0 ? 'Click to rename' : undefined}
-                >
-                  {f.label || pathBasename(f.path)}
-                  {idx === 0 && (
+                {idx > 0 ? (
+                  <button type="button" className="manage-folder__name" title="Click to rename" onClick={() => setEditingId(f.id)}>
+                    {f.label || pathBasename(f.path)}
+                  </button>
+                ) : (
+                  <div className="manage-folder__name">
+                    {f.label || pathBasename(f.path)}
                     <span style={{
                       fontSize: 'var(--fs-xs)',
                       color: 'var(--term-muted)',
@@ -164,8 +161,8 @@ export default function FolderList({
                     }}>
                       (working directory)
                     </span>
-                  )}
-                </div>
+                  </div>
+                )}
                 <div
                   style={{
                     fontSize: 'var(--fs-sm)',
@@ -185,84 +182,29 @@ export default function FolderList({
 
           {/* Delete button (not for index 0) */}
           {idx > 0 && editingId !== f.id && (
-            <button
-              type="button"
-              onClick={() => onRemoveFolder(projectId, f.id)}
-              title="Remove folder"
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--term-muted)',
-                cursor: 'pointer',
-                fontSize: 'var(--fs-xl)',
-                lineHeight: 1,
-                padding: '2px 4px',
-                flexShrink: 0,
-              }}
-            >
-              ×
-            </button>
+            <HoverTip label="Remove folder">
+              <button
+                type="button"
+                className="t-icon-btn manage-icon-btn"
+                onClick={() => onRemoveFolder(projectId, f.id)}
+                aria-label="Remove folder"
+                style={{ flexShrink: 0 }}
+              >
+                <CloseIcon aria-hidden="true" />
+              </button>
+            </HoverTip>
           )}
         </div>
       ))}
 
       {/* Add folder button */}
-      {!remote && <button
-        type="button"
+      {!remote && <Button
+        className="manage-folder__add"
         onClick={() => { void handleAdd(); }}
         disabled={folders.length >= MAX_WORKSPACE_FOLDERS}
-        style={{
-          marginTop: 8,
-          width: '100%',
-          padding: '5px 10px',
-          fontFamily: 'var(--ui-font)',
-          fontSize: 'var(--fs-sm)',
-          color: folders.length >= MAX_WORKSPACE_FOLDERS ? 'var(--term-muted)' : 'var(--term-fg)',
-          background: 'transparent',
-          border: '1px dashed var(--term-line)',
-          cursor: folders.length >= MAX_WORKSPACE_FOLDERS ? 'default' : 'pointer',
-          opacity: folders.length >= MAX_WORKSPACE_FOLDERS ? 0.5 : 1,
-        }}
       >
         + Add folder{folders.length >= MAX_WORKSPACE_FOLDERS ? ` (limit: ${MAX_WORKSPACE_FOLDERS})` : ''}
-      </button>}
+      </Button>}
     </div>
-  );
-}
-
-function LockIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="var(--term-muted)"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-      aria-label="locked"
-    >
-      <rect x="3" y="7" width="10" height="7" rx="1" />
-      <path d="M5 7V5a3 3 0 0 1 6 0v2" />
-    </svg>
-  );
-}
-
-function FolderIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="var(--term-muted)"
-      strokeWidth="1.3"
-      strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-      aria-label="folder"
-    >
-      <path d="M2 4h4l1.5 1.5H14v8H2z" />
-    </svg>
   );
 }

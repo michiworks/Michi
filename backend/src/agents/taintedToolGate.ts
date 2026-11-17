@@ -1,11 +1,12 @@
 /**
  * Michi's own tools hold the consequence rule themselves (D19, Q26; w3-fix
- * D23): a call of a Michi tool that leaves the machine (`egress`,
- * assistant/toolEffects.ts), or that makes other work run where the outside
- * content it holds would not travel with it (`indirect` but for
- * MARK_CARRYING), from a guarded turn (services/turnGuard.ts: Michi drove
- * it, or it holds outside content), runs only with the user's approval for
- * that call, whatever runtime brought it.
+ * D23; narrowed 2026-11-13): a call of a Michi tool that makes other work run
+ * where Michi's work would not travel with it (`indirect` but for
+ * MARK_CARRYING, assistant/toolEffects.ts), from a turn Michi drove
+ * (services/turnGuard.ts), runs only with the user's approval for that call,
+ * whatever runtime brought it. One that leaves the machine (`egress`:
+ * open_url) is not a dangerous kind there and runs. A check-in's own turn
+ * refuses both.
  *
  * The runtime gate asks for such a call on Pi (in process: every call goes
  * through resolveChatPolicy) and on Claude (Michi's PreToolUse hook, D4), and
@@ -19,6 +20,7 @@
  * themselves (SELF_ASKING) are left to their own question.
  */
 
+import type { FormFieldValue } from 'michi-shared';
 import { activeTurnTrust } from '../services/turnTrust';
 import { isGuarded, turnGuard } from '../services/turnGuard';
 import { michiBareToolName, michiToolEffect } from '../assistant/toolEffects';
@@ -46,7 +48,7 @@ const SELF_ASKING: ReadonlySet<string> = new Set([
 const MARK_CARRYING: ReadonlySet<string> = new Set(['send_to_thread', 'start_conversation']);
 
 /** Why such a call asks, in the question the user sees. */
-export const TAINTED_TOOL_ASK_REASON = 'This leaves the machine or starts work the conversation\'s outside content would reach, and Michi is doing this work for you or the conversation read content from outside, so Michi asks before this runs.';
+export const TAINTED_TOOL_ASK_REASON = 'This starts other work that would not count as Michi\'s, and Michi is doing this work for you, so Michi asks before this runs.';
 
 const RUN_LABEL = 'Run it';
 const DECLINE_LABEL = "Don't run it";
@@ -135,6 +137,7 @@ export function taintedMichiToolGate(nodeId: string | null | undefined, toolName
   const guard = turnGuard(nodeId);
   if (!isGuarded(guard)) return RUN;
   if (guard.background) return { kind: 'refuse', reason: BACKGROUND_TOOL_REFUSAL };
+  if (michiToolEffect(bare) === 'egress') return RUN;
   if (takeRuntimeToolApproval(nodeId, bare)) return RUN;
   return { kind: 'ask', reason: TAINTED_TOOL_ASK_REASON };
 }
@@ -144,7 +147,7 @@ type AskUser = (questions: Array<{
   header?: string;
   options: Array<{ label: string; description?: string }>;
   multiSelect: boolean;
-}>) => Promise<Record<string, string> | null>;
+}>) => Promise<Record<string, FormFieldValue> | null>;
 
 type ToolTextResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -182,7 +185,9 @@ export async function askBeforeTaintedTool(askUser: AskUser | undefined, toolNam
     ],
     multiSelect: false,
   }]);
-  const answer = answers ? (answers[question] ?? Object.values(answers)[0] ?? '').trim() : null;
+  // A choice question: the answer is text.
+  const given = answers ? answers[question] ?? Object.values(answers)[0] : null;
+  const answer = answers ? (typeof given === 'string' ? given.trim() : '') : null;
   if (answer === RUN_LABEL) return null;
   const note = answer && answer !== DECLINE_LABEL ? answer.slice(0, 500) : null;
   return {

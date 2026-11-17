@@ -10,6 +10,7 @@ import { scheduleCompanionRefresh, updateCompanionSnapshot } from '../../../stat
 import { Switch } from '../../ui/controls';
 import { InfoTip } from '../../ui/InfoTip';
 
+// 'brief' and 'catch_up' no longer run (2026-11-17); the runs they left still read.
 const RUN_KIND_LABEL: Record<CompanionRunDto['kind'], string> = {
   poll: 'Check', heartbeat: 'Check-in', brief: 'Brief', welcome: 'Welcome', catch_up: 'Catch-up', worker_report: 'Worker report', wake: 'Alert',
   send: 'Follow-up',
@@ -35,7 +36,7 @@ function listWords(parts: readonly string[]): string {
   return parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
 }
 
-const ITEM_VERB: Record<string, string> = { snooze: 'snoozed', dismiss: 'dismissed', restore: 'restored' };
+const ITEM_VERB: Record<string, string> = { snooze: 'snoozed', dismiss: 'dismissed', restore: 'restored', raise: 'raised', lower: 'stopped raising' };
 const GOAL_VERB: Record<string, string> = { add: 'added', reword: 'reworded', remove: 'removed' };
 
 /**

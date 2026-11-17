@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageBlockOf, ThreadCardItem } from 'michi-shared';
 import { fetchThreadCards } from '../../../services/api/spacesHome';
 import { openThreadCard } from '../../../state/sourceNav/sourceNav';
@@ -16,10 +16,12 @@ const REFRESH_MS = 60_000;
 interface CardsState { key: string; items: readonly ThreadCardItem[] | null; failed: boolean }
 
 /** Where each conversation a block names stands now, read from the page's backend; ones gone from the workspace are left out. */
-export function useThreadCardItems(connectionId: string, workspaceId: string, nodeIds: readonly string[]): CardsState {
+export function useThreadCardItems(connectionId: string, workspaceId: string, nodeIds: readonly string[]): CardsState & { retry(): void } {
   const ids = nodeIds.join(',');
   const key = `${connectionId}\n${workspaceId}\n${ids}`;
   const [state, setState] = useState<CardsState>({ key, items: null, failed: false });
+  const loadRef = useRef<(() => void) | null>(null);
+  const retry = useCallback(() => loadRef.current?.(), []);
   useEffect(() => {
     let live = true;
     let latest = 0;
@@ -32,14 +34,16 @@ export function useThreadCardItems(connectionId: string, workspaceId: string, no
       );
     };
     load();
+    loadRef.current = load;
     const stopPolling = startVisiblePoll(load, { intervalMs: REFRESH_MS });
     return () => {
       live = false;
       controller.abort();
       stopPolling();
+      loadRef.current = null;
     };
   }, [connectionId, workspaceId, ids, key]);
-  return state.key === key ? state : { key, items: null, failed: false };
+  return { ...(state.key === key ? state : { key, items: null, failed: false }), retry };
 }
 
 // One glyph per conversation state, shared with task boards.
@@ -51,11 +55,13 @@ export { threadCardKind } from '../content/db/liveThreads';
  * the conversation. One deleted, or moved to another workspace, shows that it
  * is no longer here.
  */
-export function NativeThreadCards({ block, items, failed, onOpen, now }: {
+export function NativeThreadCards({ block, items, failed, onOpen, onRetry, now }: {
   block: ThreadsBlock;
   items: readonly ThreadCardItem[] | null;
   failed?: boolean;
   onOpen(item: ThreadCardItem): void;
+  /** Reads the cards again after a failed read. */
+  onRetry?: () => void;
   now?: number;
 }) {
   const byNode = new Map((items ?? []).map((item) => [item.nodeId, item]));
@@ -65,8 +71,13 @@ export function NativeThreadCards({ block, items, failed, onOpen, now }: {
       <h2 className="michi-doc-h2" style={{ marginBottom: 12 }}>
         {title}<span className="michi-doc-h2__count michi-doc-mono">{block.nodeIds.length}</span>
       </h2>
-      {items === null ? (
-        <p className="michi-doc-unknown" role={failed ? 'alert' : 'status'}>{failed ? 'These conversations could not be read.' : 'Reading these conversations…'}</p>
+      {items === null && failed ? (
+        <div className="michi-doc-retry">
+          <p className="michi-doc-unknown" role="alert">These conversations could not be read.</p>
+          {onRetry && <button type="button" className="michi-doc-link-btn" onClick={onRetry}>Retry</button>}
+        </div>
+      ) : items === null ? (
+        <p className="michi-doc-unknown" role="status">Reading these conversations…</p>
       ) : (
         <ul className="michi-doc-threads">
           {block.nodeIds.map((nodeId) => {
@@ -107,5 +118,5 @@ export function LiveThreadCards({ block, connectionId, workspaceId, onOpen }: {
   onOpen(item: ThreadCardItem): void;
 }) {
   const state = useThreadCardItems(connectionId, workspaceId, block.nodeIds);
-  return <NativeThreadCards block={block} items={state.items} failed={state.failed} onOpen={(item) => openThreadCard(connectionId, item, onOpen)} />;
+  return <NativeThreadCards block={block} items={state.items} failed={state.failed} onRetry={state.retry} onOpen={(item) => openThreadCard(connectionId, item, onOpen)} />;
 }

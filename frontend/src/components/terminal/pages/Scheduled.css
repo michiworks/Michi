@@ -72,8 +72,8 @@
   content: ''; position: absolute; top: 0; left: 51px; right: 12px; height: 1px; background: var(--trash-line); pointer-events: none;
 }
 /* Pausing or resuming dims the row over a moment rather than at once. */
-.sched-row .trash-row-title { transition: color 100ms ease; }
-.sched-row .trash-row-icon { transition: opacity 100ms ease; }
+.sched-row .trash-row-title { transition: color var(--t-soft) ease; }
+.sched-row .trash-row-icon { transition: opacity var(--t-soft) ease; }
 .sched-row[data-paused] .trash-row-title { color: var(--term-mid); }
 .sched-row[data-paused] .trash-row-icon { opacity: .6; }
 /* A run's state swapping in place (ScheduledRunSwap): the old and new value share one cell. */
@@ -88,7 +88,7 @@
 .sched-last-time { font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .sched-switch { display: inline-flex; align-items: center; padding: 0 5px; }
 
-.sched-status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--term-faint); flex-shrink: 0; }
+.sched-status-dot { width: 7px; height: 7px; border-radius: var(--ui-radius-pill); background: var(--term-faint); flex-shrink: 0; }
 .sched-status-dot[data-tone='ok'] { background: var(--term-digest); }
 .sched-status-dot[data-tone='error'] { background: var(--term-danger); }
 .sched-status-dot[data-tone='active'] { background: var(--term-run); animation: sched-pulse var(--t-loop) ease-in-out infinite; }
@@ -119,15 +119,6 @@
 .sched-number { width: 84px; }
 .sched-auto { width: auto; }
 
-.sched-segmented {
-  display: flex; flex-wrap: wrap; gap: 2px; width: fit-content; max-width: 100%; padding: 2px;
-  border: 1px solid var(--term-line); border-radius: var(--ui-radius); background: var(--term-alt);
-}
-.sched-segment {
-  padding: 5px 11px; border: 0; border-radius: var(--ui-radius-sm); background: transparent;
-  color: var(--term-mid); font: var(--fs-md) var(--ui-font); cursor: pointer;
-}
-.sched-segment[aria-checked='true'] { background: var(--term-surface); color: var(--term-fg); font-weight: 500; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
 .sched-schedule-body { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .sched-schedule-body > .ui-select { width: auto; max-width: 260px; }
 .sched-schedule-body > input[type='datetime-local'], .sched-schedule-body > .sched-mono { width: auto; min-width: 220px; }
@@ -137,26 +128,9 @@
   min-width: 42px; padding: 5px 8px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm);
   background: var(--term-surface); color: var(--term-mid); font: var(--fs-sm) var(--ui-font); cursor: pointer;
 }
-.sched-day[aria-pressed='true'] { border-color: color-mix(in srgb, var(--term-accent) 60%, var(--term-line)); background: var(--term-accent-f); color: var(--term-fg); font-weight: 500; }
+.sched-day[aria-pressed='true'] { border-color: color-mix(in srgb, var(--term-accent) 60%, var(--term-line)); background: var(--term-accent-f); color: var(--term-fg); }
 
 .sched-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.sched-choices { display: flex; flex-direction: column; border: 1px solid var(--term-line); }
-.sched-choice {
-  display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px;
-  border: 0; border-bottom: 1px solid var(--term-line); background: var(--term-surface);
-  color: inherit; text-align: left; font-family: var(--ui-font); cursor: pointer;
-}
-.sched-choice:last-child { border-bottom: 0; }
-.sched-choice[aria-checked='true'] { background: var(--term-alt); }
-.sched-choice-dot {
-  position: relative; width: 12px; height: 12px; margin-top: 3px; flex-shrink: 0;
-  border: 1px solid var(--term-line-s); background: var(--term-surface-glass);
-}
-.sched-choice[aria-checked='true'] .sched-choice-dot { border-color: var(--term-accent); }
-.sched-choice[aria-checked='true'] .sched-choice-dot::after { content: ''; position: absolute; inset: 2px; background: var(--term-accent); }
-.sched-choice-label { display: block; font-size: var(--fs-md); color: var(--term-mid); }
-.sched-choice[aria-checked='true'] .sched-choice-label { color: var(--term-fg); }
-.sched-choice-desc { display: block; margin-top: 2px; font-size: var(--fs-sm); line-height: 1.5; color: var(--term-muted); }
 .sched-toggle { display: flex; align-items: center; gap: 10px; min-height: 32px; font-size: var(--fs-md); color: var(--term-mid); cursor: pointer; }
 .sched-editor-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px; border-top: 1px solid var(--term-line); }
 .sched-editor-actions { display: flex; gap: 8px; flex-shrink: 0; }
@@ -184,7 +158,7 @@
   border: 0; border-top: 1px solid var(--term-line); background: transparent;
   color: inherit; text-align: left; font-family: inherit; cursor: pointer;
 }
-.sched-run:disabled { cursor: default; }
+.sched-run:disabled { cursor: not-allowed; }
 .sched-run .sched-status-dot { margin-top: 6px; }
 .sched-run-main { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .sched-run-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: var(--fs-md); font-weight: 500; }
@@ -230,9 +204,8 @@
 
 
 @media (hover: hover) and (pointer: fine) {
-  .terminal-scheduled .sched-row:hover, .sched-run:not(:disabled):hover { background: var(--trash-hover); }
-  .sched-segment:not([aria-checked='true']):hover, .sched-day:not([aria-pressed='true']):hover { color: var(--term-fg); }
-  .sched-choice:not([aria-checked='true']):hover { background: color-mix(in srgb, var(--term-alt) 55%, var(--term-surface)); }
+  .terminal-scheduled .sched-row:hover, .sched-run:not(:disabled):hover { background: color-mix(in srgb, var(--term-fg) 4%, transparent); }
+  .sched-day:not([aria-pressed='true']):hover { color: var(--term-fg); }
   .sched-run:not(:disabled):hover .sched-run-open { color: var(--term-accent); }
 }
 
@@ -259,7 +232,7 @@
 
 @media (pointer: coarse) {
   .terminal-scheduled .sched-row { grid-template-columns: minmax(0, 1fr) 150px 152px; }
-  .sched-segment, .sched-day, .sched-choice { min-height: 44px; }
+  .sched-day, .sched-editor .settings-radio__option { min-height: 44px; }
   /* A narrow page hides the last-run column (above), so the title and the
      actions share the row; without this the wide three columns return and the
      actions land on top of the title. */

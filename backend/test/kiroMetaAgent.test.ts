@@ -17,9 +17,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { AcpClient } from 'michi-runtime/internal/adapters/kiro/acpClient';
 import {
-    KIRO_CHECKIN_SETTINGS, KIRO_META_AGENT_EXTRA_ALLOWED, KIRO_META_AGENT_NAMES, ensureKiroCheckinHome, ensureKiroMetaAgent, isKiroMetaAgentDir,
-    kiroCheckinHome, kiroMetaAgentClientOptions, kiroMetaAgentConfig, kiroMetaAgentDir, kiroMetaAgentRunOptions, kiroV2MetaAgentCatalog,
-    kiroV3MetaAgentCatalog, verifyKiroMetaAgentCatalog,
+    KIRO_CHECKIN_SETTINGS, KIRO_META_AGENT_EXTRA_ALLOWED, KIRO_META_AGENT_NAMES, ensureKiroCheckinHome, ensureKiroMetaAgent, excludeRefusedKiroTools,
+    isKiroMetaAgentDir, kiroCheckinHome, kiroMetaAgentClientOptions, kiroMetaAgentConfig, kiroMetaAgentDir, kiroMetaAgentExtraAllowed,
+    kiroMetaAgentRunOptions, kiroV2MetaAgentCatalog, kiroV3MetaAgentCatalog, verifyKiroMetaAgentCatalog,
 } from '../src/agents/kiro/kiroMetaAgent';
 import { KiroProcessCapError, AcpAgentRuntime } from 'michi-runtime/internal/adapters/kiro/AcpAgentRuntime';
 import { MetaAgentGuardError, assertMetaAgentToolCatalog, isMetaAgentGuardError } from '../src/agents/metaAgentGuard';
@@ -32,6 +32,15 @@ import { chatOwner } from './helpers/owners';
 
 const bridge = { spawnBranches: async () => [], saveContext: () => null, updateContext: () => null } as any;
 const michi = (names: readonly string[]) => names.map((name) => ({ source: 'mcp', tag: `@michi/${name}` }));
+const agentConfig = (agent: { dir: string; agentName: string }) =>
+    JSON.parse(fs.readFileSync(path.join(agent.dir, '.kiro', 'agents', `${agent.agentName}.json`), 'utf8'));
+/** config.json's backgroundToolOverrides for this test (the runner isolates MICHI_CONFIG_DIR). */
+function writeOverrides(t: TestContext, overrides: Record<string, string>): void {
+    const file = path.join(process.env.MICHI_CONFIG_DIR!, 'config.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ backgroundToolOverrides: overrides }));
+    t.after(() => fs.rmSync(file, { force: true }));
+}
 
 describe('the generated Kiro agent', () => {
     let dataDir: string;
@@ -68,6 +77,54 @@ describe('the generated Kiro agent', () => {
         ensureKiroMetaAgent(dataDir, 'chat', ['read_node', 'read_page']);
         assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).allowedTools, ['@michi/read_node', '@michi/read_page']);
         assert.deepEqual(fs.readdirSync(path.dirname(file)), [`${chat.agentName}.json`], 'no temp file is left');
+    });
+
+    test('external tools are refused unless an override makes a tool read-only, and then for Pages upkeep only', (t) => {
+        const check = (toolset: 'maintenance' | 'chat' | 'memory', observed: string[]) => () => assertMetaAgentToolCatalog({
+            runtimeId: 'kiro', profile: { metaAgentToolset: toolset, allowedToolNames: ['read_node'] }, observed, extraAllowed: kiroMetaAgentExtraAllowed(toolset),
+        });
+        const before = ensureKiroMetaAgent(dataDir, 'maintenance', ['read_node']);
+        for (const toolset of ['maintenance', 'chat', 'memory'] as const) {
+            const config = agentConfig(ensureKiroMetaAgent(dataDir, toolset, ['read_node']));
+            assert.deepEqual([config.tools, config.excludedTools], [['@michi'], undefined], toolset);
+            assert.throws(check(toolset, ['read_node', 'mcp:@example-search-mcp/search_documents']), (error: unknown) => error instanceof MetaAgentGuardError
+                && error.violation.unexpectedTools.join() === 'mcp:@example-search-mcp/search_documents', toolset);
+        }
+
+        writeOverrides(t, { 'example-search-mcp/search_documents': 'read-only' });
+        const after = ensureKiroMetaAgent(dataDir, 'maintenance', ['read_node']);
+        assert.notEqual(after.revision, before.revision, 'a new config, so a new worker');
+        const config = agentConfig(after);
+        const trusted = ['@example-search/search_documents', '@example-search-mcp/search_documents'];
+        assert.deepEqual(config.tools, ['@michi', ...trusted]);
+        assert.deepEqual(config.allowedTools, ['@michi/read_node', ...trusted], 'trusted, so no permission request Michi would reject');
+        assert.deepEqual(config.permissions.rules[0].match, ['michi/read_node', 'example-search/search_documents', 'example-search-mcp/search_documents']);
+        assert.equal(config.excludedTools, undefined);
+        assert.doesNotThrow(check('maintenance', ['read_node', 'mcp:@example-search-mcp/search_documents']));
+        assert.doesNotThrow(check('maintenance', ['read_node', 'mcp:example-search-mcp:search_documents']), 'v2 terms');
+        assert.throws(check('maintenance', ['read_node', 'mcp:@example-search-mcp/other']), MetaAgentGuardError, 'only the named tool');
+        for (const toolset of ['chat', 'memory'] as const) {
+            assert.deepEqual(agentConfig(ensureKiroMetaAgent(dataDir, toolset, ['read_node'])).excludedTools, undefined, toolset);
+            assert.throws(check(toolset, ['read_node', 'mcp:@example-search-mcp/search_documents']), MetaAgentGuardError, toolset);
+        }
+    });
+
+    test('a refused catalog excludes the other servers\' tools for its toolset, never Michi\'s or built-ins', (t) => {
+        const refused = (...unexpectedTools: string[]) => new MetaAgentGuardError({ runtimeId: 'kiro', toolset: 'maintenance', unexpectedTools });
+        const first = ensureKiroMetaAgent(dataDir, 'maintenance', ['read_node']);
+        assert.equal(excludeRefusedKiroTools(dataDir, 'maintenance', refused('builtin:read', 'built-in:execute_bash', 'send_to_thread', 'mcp:@michi')), false);
+        assert.equal(excludeRefusedKiroTools(dataDir, 'maintenance', new Error('mcp:@example-tools/run')), false);
+        assert.equal(excludeRefusedKiroTools(dataDir, 'maintenance', refused('builtin:read', 'mcp:@example-tools/run', 'mcp:other:get')), true);
+        assert.equal(excludeRefusedKiroTools(dataDir, 'maintenance', refused('mcp:@example-tools/write')), false, 'already excluded');
+        const next = ensureKiroMetaAgent(dataDir, 'maintenance', ['read_node']);
+        assert.notEqual(next.revision, first.revision);
+        assert.deepEqual(agentConfig(next).excludedTools, ['@example-tools', '@other']);
+        assert.deepEqual(agentConfig(ensureKiroMetaAgent(dataDir, 'chat', ['read_node'])).excludedTools, undefined, 'per toolset');
+
+        writeOverrides(t, { 'example-search-mcp/search_documents': 'read-only' });
+        assert.equal(excludeRefusedKiroTools(dataDir, 'maintenance', refused('mcp:@example-search-mcp/delete_document')), true);
+        assert.deepEqual(agentConfig(ensureKiroMetaAgent(dataDir, 'maintenance', ['read_node'])).excludedTools,
+            ['@example-search-mcp/delete_document', '@example-tools', '@other'], 'a server with an allowed tool loses only the refused one');
     });
 
     test('v3 preserves caller settings while refusing unexpected builtin tools', () => {
@@ -565,6 +622,35 @@ describe('AcpAgentRuntime Meta agent sessions', () => {
         await assert.rejects(env.runtime.newSession({ sessionId: 'n-v2bad', cwd: '/x', workspaceId: 'ws-1', toolProfile: maintenanceToolProfile() }),
             (error: unknown) => error instanceof MetaAgentGuardError && error.violation.toolset === 'maintenance'
                 && error.violation.unexpectedTools.join() === 'built-in:execute_bash');
+        assert.equal(env.opened.length, 1, 'a built-in is not excluded and reopened');
+    });
+
+    /** v2 maintenance whose kiro-cli lists `@example-tools/run` unless the agent config excludes it (`honored`) or whatever it says. */
+    function injecting(t: TestContext, honored: boolean) {
+        const script: Script = { engine: 'v2', currentModeId: KIRO_META_AGENT_NAMES.maintenance };
+        const excluded = () => agentConfig({ dir: kiroMetaAgentDir(tmpDir, 'maintenance'), agentName: KIRO_META_AGENT_NAMES.maintenance }).excludedTools ?? [];
+        Object.defineProperty(script, 'v2Tools', { get: () => [{ name: 'maintenance_no_change', source: 'mcp:michi' },
+            ...(honored && excluded().includes('@example-tools') ? [] : [{ name: 'run', source: 'mcp:example-tools' }])] });
+        return setup(t, script);
+    }
+
+    test('a tool Kiro adds from another server is excluded and the session reopens once, on a new worker', async (t) => {
+        const env = injecting(t, true);
+        const session = await maintain(env.runtime, 'n-heal');
+        assert.equal(env.opened.length, 2);
+        assert.notEqual(env.opened[1].runtime, env.opened[0].runtime);
+        assert.equal(env.opened[0].runtime.closing, true, 'the refused worker is stopped');
+        assert.equal(env.runtime.getBinding('n-heal')?.nativeSessionId, session.nativeSessionId);
+        assert.equal(env.registry.slots.size, 1, 'only the reopened session\'s slot');
+    });
+
+    test('a reopened session that still lists the tool is refused, without a third try', async (t) => {
+        const env = injecting(t, false);
+        await assert.rejects(maintain(env.runtime, 'n-stuck'),
+            (error: unknown) => error instanceof MetaAgentGuardError && error.violation.unexpectedTools.join() === 'mcp:example-tools:run');
+        assert.equal(env.opened.length, 2);
+        assert.equal(env.registry.slots.size, 0);
+        assert.equal(env.runtime.getBinding('n-stuck'), undefined);
     });
 
     test('a restored session is selected and checked again', async (t) => {

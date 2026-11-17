@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { AnimatePresence } from 'motion/react';
-import { Maximize2, Minimize2 } from 'lucide-react';
 import { Dot } from './primitives';
 import ContextMenu, { menuOpenKey } from '../ContextMenu';
 import { kbd } from '../../lib/platform';
@@ -9,12 +8,15 @@ import { openBackgroundWork } from './backgroundWork/backgroundWorkEvents';
 import { HoverTip } from '../ui/Popover';
 import type { PaneItemKind } from '../../state/paneItems';
 import { TemporaryChatGlyph } from './TemporaryChat';
+import { AgentRunGlyph, CloseIcon, MaximizeIcon, WarningIcon } from './icons';
+import PaneZoomExit, { type ZoomHiddenPane } from './PaneZoomExit';
 
 const PANE_DRAG_MIME = 'application/x-michi-pane-id';
 const PANE_ZOOM_KEYS = kbd('shift', 'mod', 'enter');
 // The caption's controls share one height (the icon buttons are square), so
 // boxes shown side by side line up: the exit control beside a hovered × or ◆.
 const CONTROL_SIZE = 22;
+const NO_HIDDEN_PANES: readonly ZoomHiddenPane[] = [];
 
 function dotColorFor(streaming: boolean, error: boolean, focused: boolean): string {
   if (streaming) return 'var(--term-run)';
@@ -44,8 +46,8 @@ interface Props {
   zoomed?: boolean;
   /** There is more than one pane, so zooming would hide something. */
   canZoom?: boolean;
-  /** Panes the zoom hides, shown on the exit control. */
-  hiddenPaneCount?: number;
+  /** Panes the zoom hides, listed from the exit control. */
+  hiddenPanes?: readonly ZoomHiddenPane[];
   /** Zoom this pane, or end the zoom with null. Absent where panes cannot zoom. */
   onZoom?: (id: string | null) => void;
 }
@@ -70,11 +72,10 @@ export default function PaneCaption({
   onReorder: _onReorder,
   zoomed = false,
   canZoom = false,
-  hiddenPaneCount = 0,
+  hiddenPanes = NO_HIDDEN_PANES,
   onZoom,
 }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [hovered, setHovered] = useState(false);
   const zoomable = !!onZoom && (zoomed || canZoom);
   const toggleZoom = () => { if (zoomable) onZoom?.(zoomed ? null : nodeId); };
 
@@ -82,7 +83,7 @@ export default function PaneCaption({
   const kindGlyph = kind === 'launcher' ? '+'
     : kind === 'files' ? '▱'
     : kind === 'review' ? '±'
-    : kind === 'file' ? '◇'
+    : kind === 'file' ? '▤'
     : kind === 'diff' ? '±'
     : kind === 'terminal' ? '>_'
     : kind === 'browser' ? '◎'
@@ -103,9 +104,6 @@ export default function PaneCaption({
     ? { animation: 'pane-entrance-dot var(--t-slow) cubic-bezier(.34, 1.56, .64, 1) forwards' }
     : {};
 
-  const titleColor = focused ? 'var(--term-fg)' : 'var(--term-mid)';
-  const titleWeight = focused ? 600 : 400;
-
   return (
     <>
       <div
@@ -124,12 +122,14 @@ export default function PaneCaption({
         }}
         data-context-target=""
         data-pane-zoomed={zoomed || undefined}
+        data-focused={focused || undefined}
+        // Hover and keyboard focus show the ⤢ and × (.t-reveal) and light the
+        // caption, all in CSS (index.css .pane-caption): no render on hover.
+        className="pane-caption t-reveal-host"
         onContextMenu={(e) => {
           e.preventDefault();
           setMenu({ x: e.clientX, y: e.clientY });
         }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
         style={{
           display: 'inline-flex',
           alignItems: 'center',
@@ -139,18 +139,12 @@ export default function PaneCaption({
           minWidth: 0,
           boxSizing: 'border-box',
           padding: '0 11px',
-          border: hovered
-            ? '1px solid var(--term-line)'
-            : '1px solid transparent',
           borderRadius: 0,
           fontFamily: 'var(--ui-font)',
           fontSize: 'var(--fs-lg)',
-          color: titleColor,
-          background: hovered ? 'var(--term-hover-bg, var(--term-alt))' : 'transparent',
           userSelect: 'none',
           cursor: 'pointer',
           WebkitAppRegion: 'no-drag',
-          transition: 'background var(--t-quick) var(--t-ease)',
         } as React.CSSProperties}
       >
         <Dot color={dotColor} size={6} pulse={streaming && !isDigest} extraStyle={dotStyle} />
@@ -178,7 +172,6 @@ export default function PaneCaption({
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
-            fontWeight: titleWeight,
           }}
           title={title}
         >
@@ -204,52 +197,37 @@ export default function PaneCaption({
           </span>
         )}
         {error && (
-          <span
-            aria-hidden
-            style={{ color: 'var(--term-danger)', fontSize: 'var(--fs-sm)', flexShrink: 0 }}
-          >
-            ⚠
-          </span>
+          <WarningIcon size="sm" data-testid="pane-caption-error" style={{ color: 'var(--term-danger)', flexShrink: 0 }} />
         )}
         {zoomed && onZoom ? (
-          <HoverTip label="Exit zoom" kbd={PANE_ZOOM_KEYS}>
-            <button
-              type="button"
-              data-testid="pane-zoom-exit"
-              aria-label={`Exit zoom, ${hiddenPaneCount} more ${hiddenPaneCount === 1 ? 'pane' : 'panes'}`}
-              onClick={(e) => { e.stopPropagation(); onZoom(null); }}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="pane-caption-zoom-exit"
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 4,
-                height: CONTROL_SIZE,
-                padding: '0 7px 0 5px',
-                flexShrink: 0,
-                borderRadius: 'var(--ui-radius-sm)',
-                fontFamily: 'var(--font-mono)',
-                fontSize: 'var(--fs-xs)',
-                lineHeight: 1,
-                cursor: 'pointer',
-                WebkitAppRegion: 'no-drag',
-              } as React.CSSProperties}
-            >
-              <Minimize2 size={11} aria-hidden />
-              {hiddenPaneCount > 0 && <span>+{hiddenPaneCount}</span>}
-            </button>
-          </HoverTip>
+          <PaneZoomExit
+            hiddenPanes={hiddenPanes}
+            shortcut={PANE_ZOOM_KEYS}
+            onZoom={onZoom}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              height: CONTROL_SIZE,
+              padding: '0 7px 0 5px',
+              flexShrink: 0,
+              borderRadius: 'var(--ui-radius-sm)',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--fs-xs)',
+              lineHeight: 1,
+              cursor: 'pointer',
+              WebkitAppRegion: 'no-drag',
+            } as React.CSSProperties}
+          />
         ) : zoomable && (
-          <HoverTip label="Zoom pane" kbd={PANE_ZOOM_KEYS} disabled={!hovered}>
+          <HoverTip label="Zoom pane" kbd={PANE_ZOOM_KEYS}>
             <button
               type="button"
               data-testid="pane-zoom"
               aria-label={`Zoom ${title}`}
-              tabIndex={hovered ? 0 : -1}
-              aria-hidden={!hovered}
               onClick={(e) => { e.stopPropagation(); onZoom?.(nodeId); }}
               onMouseDown={(e) => e.stopPropagation()}
-              className="pane-caption-icon"
+              className="pane-caption-icon t-reveal"
               style={{
                 width: CONTROL_SIZE,
                 height: CONTROL_SIZE,
@@ -261,25 +239,21 @@ export default function PaneCaption({
                 padding: 0,
                 borderRadius: 'var(--ui-radius-sm)',
                 cursor: 'pointer',
-                opacity: hovered ? 1 : 0,
-                pointerEvents: hovered ? 'auto' : 'none',
               }}
             >
-              <Maximize2 size={12} aria-hidden />
+              <MaximizeIcon />
             </button>
           </HoverTip>
         )}
         <button
           type="button"
           aria-label={`Close ${title}`}
-          tabIndex={hovered ? 0 : -1}
-          aria-hidden={!hovered}
           onClick={(e) => {
             e.stopPropagation();
             onClose(nodeId);
           }}
           onMouseDown={(e) => e.stopPropagation()}
-          className="pane-caption-icon"
+          className="pane-caption-icon t-reveal"
           style={{
             width: CONTROL_SIZE,
             height: CONTROL_SIZE,
@@ -294,11 +268,9 @@ export default function PaneCaption({
             fontSize: 'var(--fs-xl)',
             lineHeight: 1,
             cursor: 'pointer',
-            opacity: hovered ? 1 : 0,
-            pointerEvents: hovered ? 'auto' : 'none',
           }}
         >
-          ×
+          <CloseIcon />
         </button>
       </div>
       <AnimatePresence>{menu && (
@@ -342,7 +314,6 @@ export default function PaneCaption({
  */
 function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: RunningWorkCounts }) {
   const label = describeRunningWork(counts);
-  const [hover, setHover] = useState(false);
   if (!label) return null;
   const total = counts.subagents + counts.workflows;
   const waiting = !!counts.waiting;
@@ -365,8 +336,7 @@ function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: Runni
         e.preventDefault();
         e.stopPropagation();
       }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      className="pane-caption-badge"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -374,19 +344,15 @@ function BackgroundWorkBadge({ nodeId, counts }: { nodeId: string; counts: Runni
         height: CONTROL_SIZE,
         padding: '0 5px',
         flexShrink: 0,
-        border: hover ? '1px solid var(--term-line)' : '1px solid transparent',
         borderRadius: 'var(--ui-radius-sm)',
-        background: waiting ? 'var(--term-select-f)' : hover ? 'var(--term-alt2, var(--term-alt))' : 'transparent',
-        color: waiting ? 'var(--term-select)' : hover ? 'var(--term-fg)' : 'var(--term-mid)',
         fontFamily: 'var(--font-mono)',
         fontSize: 'var(--fs-xs)',
         lineHeight: 1,
         cursor: 'pointer',
         WebkitAppRegion: 'no-drag',
-        transition: 'background var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease), border-color var(--t-quick) var(--t-ease)',
       } as React.CSSProperties}
     >
-      <span aria-hidden className={waiting ? undefined : 'agent-glyph-run'} style={{ color: waiting ? 'inherit' : 'var(--term-mauve)', fontSize: 'var(--fs-2xs)' }}>◆</span>
+      <AgentRunGlyph running={!waiting} style={{ color: waiting ? 'inherit' : 'var(--term-mauve)', flexShrink: 0 }} />
       <span>{waiting ? `${total} · needs you` : total}</span>
     </button>
   );

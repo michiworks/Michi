@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText } from 'lucide-react';
+import { DocIcon } from '../../icons';
 import { remoteEntityIdentity } from '../../../../config/backendIdentity';
 import { openSpacesPage } from '../../../../state/metaChat/spacesPages';
 import { useMetaChatRevealPage } from './metaChatRevealPage';
@@ -39,7 +39,7 @@ export function PageLinkChip({ id, blockId, children }: { id: string; blockId?: 
           .then((result) => { if (result === 'deleted') setGone(true); });
       }}
     >
-      <span className="assistant-cite__icon" aria-hidden="true"><FileText size={11} /></span>
+      <span className="assistant-cite__icon" aria-hidden="true"><DocIcon size="sm" /></span>
       <span className="assistant-cite__text">{label}</span>
       {gone && <span className="assistant-cite__note">deleted</span>}
     </button>

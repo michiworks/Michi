@@ -9,6 +9,7 @@ import * as agentConfig from '../services/agentConfig';
 import * as agentOwner from '../services/agentOwner';
 import * as backgroundSubagentRegistry from '../services/backgroundSubagentRegistry';
 import * as branchBoundary from '../services/branchBoundary';
+import * as chatServiceTier from '../services/chatServiceTier';
 import * as chatUltracode from '../services/chatUltracode';
 import * as claudeForkAnchors from '../services/claudeForkAnchors';
 import * as crewMemory from '../services/crewMemory';
@@ -78,6 +79,11 @@ export function createMichiRuntimeHost(): RuntimeHost {
           const nodeId = chatNodeOf(owner);
           return nodeId !== undefined && chatUltracode.resolveChatUltracode(nodeId, permissionPolicy.permissionOwnerUserId(owner!, ownerUserId));
         },
+        // A chat node's own tier (null: standard); Agent Runs and anonymous warm sessions have none.
+        serviceTier: (owner, ownerUserId) => {
+          const nodeId = chatNodeOf(owner);
+          return nodeId === undefined ? undefined : chatServiceTier.resolveChatServiceTier(nodeId, permissionPolicy.permissionOwnerUserId(owner!, ownerUserId));
+        },
         // Michi Memory is the one store: no session keeps the runtime's own (its notes are imported, nativeMemoryImport.ts).
         nativeMemory: () => false,
       },
@@ -139,6 +145,8 @@ export function createMichiRuntimeHost(): RuntimeHost {
           kiroForkAnchors.readKiroForkAnchor(nodeId, nativeSessionId, engine, messageId),
         saveClaudeForkAnchor: (input) => claudeForkAnchors.saveClaudeForkAnchor(input),
         readClaudeForkAnchor: (input) => claudeForkAnchors.readClaudeForkAnchor(input),
+        saveClaudeForkBoundary: (input) => claudeForkAnchors.saveClaudeForkBoundary(input),
+        readClaudeForkBoundary: (nodeId, nativeSessionId) => claudeForkAnchors.readClaudeForkBoundary(nodeId, nativeSessionId),
       },
       crewMemory: {
         defaultMode: (userId) => crewMemory.defaultCrewMemory(userId),

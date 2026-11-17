@@ -105,8 +105,8 @@ for (const palette of ['bone', 'monokai']) test(`Pages settings, the panel's His
   await expect(panel.locator('.terminal-composer')).toHaveCount(1);
   await expect(panel.getByRole('button', { name: /^Model settings:/ })).toBeEnabled();
   await expect(panel.getByRole('button', { name: /^Permissions:/ })).toBeVisible();
-  await expect(panel.getByTitle('Attach file', { exact: true })).toBeVisible();
-  await expect(panel.getByTitle('Mention context or node', { exact: true })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Attach file', exact: true })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Mention context or node', exact: true })).toBeVisible();
   // A model picked in the composer is this conversation's own, not the global settings (fad4308f).
   await panel.getByRole('button', { name: /^Model settings:/ }).click();
   const picker = page.getByRole('dialog', { name: 'Model settings', exact: true });

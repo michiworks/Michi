@@ -38,7 +38,6 @@ import {
   companionOffNoticeAt,
   companionWelcomeState,
   createReminder,
-  getCompanionMetaNumber,
   getReminder,
   isCompanionItemSubtype,
   markCompanionOffNotice,
@@ -46,8 +45,6 @@ import {
   recordCompanionView,
   reminderDto,
   removeGoal,
-  setBriefCardFeedback,
-  setBriefCurate,
   setCompanionRules,
   setNotesByUser,
   setReminderStatus,
@@ -205,7 +202,7 @@ export interface CompanionRouterDeps {
 
 /**
  * The Companion (shared/src/companion.ts, DESIGN R2.17): its feed, goals,
- * notes, rules, reminders, cards, brief and settings, and its change stream.
+ * notes, rules, reminders, cards and settings, and its change stream.
  * Mounted under /api after the access middleware, in the desktop app only
  * (never in cloud mode).
  *
@@ -215,7 +212,7 @@ export interface CompanionRouterDeps {
  *   POST   /companion/items/seen                {ids ≤ 100} → 204
  *   POST   /companion/items/:id                 CompanionItemAction → CompanionItemDto
  *   POST   /companion/presence                  CompanionPresenceInput (a window's), or {systemIdleSeconds} (Electron main's) → 204
- *   POST   /companion/view                      {} → {catchUp} (the panel opened: messages read; "Since you left" after 30 min away)
+ *   POST   /companion/view                      {} → 204 (the panel opened: its messages are read)
  *   POST   /companion/welcome                   → {started: false}: there is no welcome turn any more (D17); kept for older windows
  *   POST   /companion/get-started               CompanionGetStartedInput → snapshot (Get started's Start); 409 scheduler_off
  *   POST   /companion/get-started/later         {} → snapshot (Not now)
@@ -227,8 +224,6 @@ export interface CompanionRouterDeps {
  *   POST   /companion/reminders                 {text, at?, dailyAt?, itemId?, until?} → 201 reminder
  *   PATCH  /companion/reminders/:id             {status: active|paused} → reminder;  DELETE → 204 (cancelled)
  *   DELETE /companion/demotions/:subtype        → 204 (the feedback demotion is undone)
- *   POST   /companion/brief/curate              {text ≤ 500} → 204
- *   POST   /companion/brief/:id/feedback        {index, feedback} → brief
  *   POST   /companion/runs/:runId/undo          {} → CompanionRunUndoResult (Undo all of a check-in's changes; 404 for any other run)
  *   PATCH  /companion/delegations/:id           {autoSend: false} → CompanionDelegationDto (404 when there is none)
  *   GET    /companion/tray                      → CompanionTrayDto: the tray menu's data, titles only (DESIGN-v2 §5.1)
@@ -270,8 +265,6 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
       // No live status: the engine does not run here, so no work of the Companion's own does either (B4). The
       // user's own reply in its conversation is not "Working…": nothing would tell this snapshot when it ends.
       working: false,
-      // Without a live one, the snapshot shows the latest stored "Since you left".
-      catchUp: service.catchUp?.(),
     });
     return { ...dto, getStarted: companionGetStarted(current?.nodeId ?? null), offNoticeAt: companionOffNoticeAt() };
   };
@@ -297,11 +290,10 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
     } catch {
       nodeId = null;
     }
-    const base = snapshotDto({ now, conversation: null, status: service.status?.(), working: false, catchUp: null });
+    const base = snapshotDto({ now, conversation: null, status: service.status?.(), working: false });
     const tray: CompanionTrayDto = companionTrayDto({ ...base, welcome: companionWelcomeState(nodeId) }, {
       now,
       conversationWaiting: nodeId !== null && (deps.conversationWaiting?.(nodeId) ?? false),
-      lastViewedAt: getCompanionMetaNumber('companion:last_viewed_at'),
     });
     res.json(tray);
   }));
@@ -393,8 +385,9 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
   router.post('/companion/view', handle((req, res) => {
     body(req, []);
     const view = recordCompanionView(clock.now());
-    if (view.catchUp || view.hadUnread) events.emitChanged('catch_up');
-    res.json({ catchUp: view.catchUp });
+    // The badge counts unread messages, so reading them is a change every window must see.
+    if (view.hadUnread) events.emitChanged('view');
+    res.status(204).end();
   }));
 
   // Get started's Start (D17) takes the welcome's place; a window from before it still asks here, and nothing starts.
@@ -521,23 +514,6 @@ export function createCompanionRouter(deps: CompanionRouterDeps): Router {
     if (!isCompanionItemSubtype(subtype)) throw invalidRequest('subtype is not a Companion item subtype');
     if (clearSubtypeDemotion(subtype, clock.now())) events.emitChanged('settings');
     res.status(204).end();
-  }));
-
-  router.post('/companion/brief/curate', handle((req, res) => {
-    const input = body(req, ['text']);
-    if (input.text === undefined) throw invalidRequest('text is required');
-    setBriefCurate(input.text);
-    res.status(204).end();
-  }));
-
-  router.post('/companion/brief/:id/feedback', handle((req, res) => {
-    const id = idParam(req);
-    const input = body(req, ['index', 'feedback']);
-    if (typeof input.index !== 'number' || !Number.isInteger(input.index)) throw invalidRequest('index must be a card index');
-    if (input.feedback !== null && input.feedback !== 'up' && input.feedback !== 'down') throw invalidRequest('feedback must be up, down or null');
-    const brief = setBriefCardFeedback(id, input.index, input.feedback);
-    events.emitChanged('brief');
-    res.json(brief);
   }));
 
   // Undo all (DESIGN-v2 §2.7): only a check-in's run, the local owner's.

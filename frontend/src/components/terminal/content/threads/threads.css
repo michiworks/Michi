@@ -214,7 +214,7 @@
   color: var(--term-faint);
 }
 .michi-cal__day[data-today='true'] .michi-cal__num {
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-weight: 600;
 }
 .michi-cal__item {

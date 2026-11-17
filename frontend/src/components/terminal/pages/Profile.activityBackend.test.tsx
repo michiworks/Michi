@@ -17,7 +17,7 @@ vi.mock('../../../services/auth', () => ({
 vi.mock('../../../services/signOut', () => ({ signOutAndReset: vi.fn() }));
 vi.mock('../../../state/chatStore', () => ({
   useChatStore: () => ({ projects: state.projects }),
-  useNodesSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}),
+  useStructuralSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}),
 }));
 vi.mock('../../../state/prefs', () => ({
   usePrefs: () => ({ prefs: { terminalPalette: 'bone' }, setPref: vi.fn() }),

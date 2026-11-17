@@ -52,6 +52,14 @@ can initialize or restore a cold chat without sending a model prompt. Agent Run
 restrictions continue to apply before tool execution, including when native
 settings would automatically approve a tool.
 
+An idle Claude chat gives back its CLI after 15 minutes
+(`MICHI_CLAUDE_SESSION_IDLE_TTL_MS`; `0` keeps them all), and the next message
+resumes it natively. It keeps the CLI while a turn, question, approval or
+queued steer is open, while a background agent, workflow, shell or Monitor
+runs in it, and when Native Resume is off. Archiving or deleting a Claude or
+Kiro chat, its thread or its workspace gives back its session at once, unless
+something still runs in it or idle release is off.
+
 A Claude chat can turn on **Ultracode** in the composer's model picker, under
 the effort slider: Claude Code's multi-agent mode, which runs a workflow for
 each substantive task and uses many more tokens. It is per chat and off for new

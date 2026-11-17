@@ -41,7 +41,7 @@ describe('BedrockConfigPanel', () => {
     render(<BedrockConfigPanel provider={provider} onChanged={onChanged} />);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByText('Failed to fetch')).toBeTruthy();
+    expect((await screen.findByRole('alert')).textContent).toBe('Failed to fetch');
     expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(false);
     expect(onChanged).not.toHaveBeenCalled();
   });

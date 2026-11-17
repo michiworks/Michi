@@ -32,3 +32,11 @@ export const exportPanelEvent = defineWindowEvent<ExportPanelRequest>('michi:tog
     digestNodeId: id(digestNodeId),
   };
 });
+
+/**
+ * A notification's click (a toast, an OS notification, Electron main's
+ * banner) is about to open its target. Overlays that would cover it leave:
+ * the ones that only show something close, drawers in one frame (TR-39).
+ * Dialogs holding the user's input do not listen.
+ */
+export const leaveOverlaysEvent = defineWindowEvent<Record<string, never>>('michi:leave-overlays', () => ({}));

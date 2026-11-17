@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { PageComponent, PageComponentInput, PageComponentSource, PageComponentVersionSource, PageBlockInput } from 'michi-shared';
 import { deletePageComponent, listPageComponentReferences, listPageComponents, readPageComponent, savePageComponent, updatePageComponent } from '../../../../services/api/pageComponents';
 import { confirmDialog } from '../../../ui/ConfirmDialog';
+import { Button } from '../../../ui/controls';
 import { BuiltinComponents } from './BuiltinComponents';
 import { ComponentPreview } from './ComponentPreview';
 import { ComponentSourceAttribution } from './ComponentSourceAttribution';
@@ -33,6 +34,8 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  // Whether the library has been read yet: until it has, it is not empty (ST-15).
+  const [listed, setListed] = useState<'loading' | 'ready' | 'error'>('loading');
   const [requiresVersionReview, setRequiresVersionReview] = useState(false);
   const draftDirty = useRef(false);
   const versionChosen = useRef(false);
@@ -57,6 +60,7 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
         if (!mounted.current) return;
         setItems(result.items);
         setRevision(result.revision);
+        setListed('ready');
         const currentSelection = selectedRef.current;
         if (currentSelection) {
           const current = result.items.find(item => item.id === currentSelection.id);
@@ -69,7 +73,11 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
             setError(`“${currentSelection.name}” is no longer in this workspace library. Refresh the page or select another component.`);
           }
         }
-      } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Could not load components'); }
+      } catch (cause) {
+        if (!mounted.current) return;
+        setError(cause instanceof Error ? cause.message : 'Could not load components');
+        setListed((current) => current === 'ready' ? current : 'error');
+      }
       finally { refreshingRef.current = false; if (mounted.current) setRefreshing(false); }
     })();
     refreshPromise.current = request;
@@ -120,7 +128,7 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
   };
   const choose = async (item: PageComponent) => { setEditing(true); draftDirty.current = false; versionChosen.current = false; setRequiresVersionReview(false); setSelected(item); setSelectedVersion(item.activeVersion); setError(null); };
   return <section className="page-component-library" aria-label="Native components">
-    <header><div><h2>Components</h2><p>Browse building blocks and manage components made for this workspace.</p></div><div><button type="button" disabled={refreshing || busy} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>{onClose && <button type="button" onClick={onClose}>Close</button>}</div></header>
+    <header><div><h2>Components</h2><p>Browse building blocks and manage components made for this workspace.</p></div><div><Button size="sm" disabled={refreshing || busy} onClick={() => void refresh()}>{refreshing ? 'Refreshing…' : 'Refresh'}</Button>{onClose && <Button size="sm" onClick={onClose}>Close</Button>}</div></header>
     {error && <p role="alert" className="page-component-notice">{error}</p>}
     {!editing && <BuiltinComponents onInsert={onInsertBlock} />}
     <div className="component-catalog__heading"><h2>Workspace components</h2><span>{items.length}</span></div>
@@ -130,19 +138,20 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
         {items.map(item => <button type="button" key={item.id} aria-current={selected?.id === item.id ? 'true' : undefined} onClick={() => void choose(item)}>
           <strong>{item.name}</strong><span>{item.description}</span><small>{item.enabled ? `v${item.activeVersion} · enabled` : 'Disabled'} · {item.versions} versions</small>
         </button>)}
-        {!items.length && <p className="page-component-empty">No components saved yet.</p>}
+        {!items.length && listed === 'loading' && <p className="page-component-empty" role="status">Loading components…</p>}
+        {!items.length && listed === 'ready' && <p className="page-component-empty">No components saved yet.</p>}
         <button type="button" className="page-component-new" onClick={() => { setEditing(true); draftDirty.current = false; versionChosen.current = false; setRequiresVersionReview(false); setSelected(null); setSelectedVersion(null); setDraft(blank); setReferences([]); }}>＋ New component</button>
       </nav>
       {editing && <div className="page-component-editor">
-        <button type="button" className="page-component-back" onClick={() => setEditing(false)}>Back to components</button>
+        <Button variant="ghost" size="sm" className="page-component-back" onClick={() => setEditing(false)}>Back to components</Button>
         <label>Name<input value={draft.name} onChange={event => { draftDirty.current = true; setDraft({ ...draft, name: event.target.value }); }} maxLength={40} /></label>
         <label>Description<input value={draft.description} onChange={event => { draftDirty.current = true; setDraft({ ...draft, description: event.target.value }); }} maxLength={500} /></label>
         {selected && <label>Version<select value={selectedVersion ?? selected.activeVersion} onChange={event => { draftDirty.current = false; versionChosen.current = true; setRequiresVersionReview(false); setSelectedVersion(Number(event.target.value)); }}>{Array.from({ length: selected.versions }, (_, index) => selected.versions - index).map(itemVersion => <option key={itemVersion} value={itemVersion}>v{itemVersion}{itemVersion === selected.activeVersion ? ' · active' : ''}</option>)}</select></label>}
         {requiresVersionReview && <p role="alert" className="page-component-notice">The active version changed in another window. Review the version list before inserting.</p>}
         {selected && <ComponentSourceAttribution source={versionSource} onOpenSource={onOpenSource} />}
         <label>Component code<textarea spellCheck={false} value={draft.code} onChange={event => { draftDirty.current = true; setDraft({ ...draft, code: event.target.value }); }} rows={12} /></label>
-        <div className="page-component-actions"><button type="button" disabled={busy} onClick={() => void save()}>{busy ? 'Saving…' : selected ? 'Save new version' : 'Save component'}</button>
-          {selected && <button type="button" disabled={busy || !selected.enabled || !onInsert || requiresVersionReview} onClick={() => {
+        <div className="page-component-actions"><Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>{busy ? 'Saving…' : selected ? 'Save new version' : 'Save component'}</Button>
+          {selected && <Button size="sm" disabled={busy || !selected.enabled || !onInsert || requiresVersionReview} onClick={() => {
             if (!onInsert || !mounted.current) return;
             const version = selectedVersion ?? selected.activeVersion;
             if (!Number.isSafeInteger(version) || version < 1 || version > selected.versions) {
@@ -168,10 +177,10 @@ function ComponentLibrarySession({ workspaceId, connectionId, onClose, onSaved, 
               } catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Could not insert component'); }
               finally { if (mounted.current) setBusy(false); }
             })();
-          }}>Insert selected component</button>}
-          {selected && <><button type="button" disabled={busy} onClick={() => void action(selected, selected.enabled ? 'disable' : 'enable')}>{selected.enabled ? 'Disable' : 'Enable'}</button>
-            {selectedVersion !== selected.activeVersion && <><button type="button" disabled={busy} onClick={() => void action(selected, 'activate', selectedVersion ?? undefined)}>Activate v{selectedVersion}</button><button type="button" disabled={busy} onClick={() => void action(selected, 'rollback', selectedVersion ?? undefined)}>Rollback to v{selectedVersion}</button></>}
-            <button type="button" disabled={busy} onClick={() => void confirmDialog({ title: 'Delete component', message: `Delete ${selected.name}? Existing references will show a fallback.`, confirmLabel: 'Delete' }).then(ok => { if (ok) void action(selected, 'delete'); })}>Delete</button></>}
+          }}>Insert selected component</Button>}
+          {selected && <><Button size="sm" disabled={busy} onClick={() => void action(selected, selected.enabled ? 'disable' : 'enable')}>{selected.enabled ? 'Disable' : 'Enable'}</Button>
+            {selectedVersion !== selected.activeVersion && <><Button size="sm" disabled={busy} onClick={() => void action(selected, 'activate', selectedVersion ?? undefined)}>Activate v{selectedVersion}</Button><Button size="sm" disabled={busy} onClick={() => void action(selected, 'rollback', selectedVersion ?? undefined)}>Rollback to v{selectedVersion}</Button></>}
+            <Button size="sm" disabled={busy} onClick={() => void confirmDialog({ title: 'Delete component', message: `Delete ${selected.name}? Existing references will show a fallback.`, confirmLabel: 'Delete' }).then(ok => { if (ok) void action(selected, 'delete'); })}>Delete</Button></>}
         </div>
         {selected && <div className="page-component-usage"><strong>Usage locations</strong>{references.length ? <ul>{references.map(ref => <li key={`${ref.kind}:${ref.pageId ?? ref.databaseId}:${ref.blockId ?? ref.viewId}`}>{ref.kind === 'page_block' ? `Page ${ref.pageId} · block ${ref.blockId}` : `Database ${ref.databaseId} · view ${ref.viewId}`}{ref.pinnedVersion ? ` · pinned v${ref.pinnedVersion}` : ' · follows active version'}{ref.protected ? ' · protected' : ''}</li>)}</ul> : <p>No active references found. Disable immediately stops every mounted version.</p>}</div>}
         <ComponentPreview connectionId={connectionId} name={draft.name || 'Component'} code={draft.code} />

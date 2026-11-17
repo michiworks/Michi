@@ -1,27 +1,30 @@
 /**
  * Which approval rules hold for a chat's running turn (design D19, Q26,
- * lane D 2026-11-12). Michi asks by consequence (agents/callConsequence.ts):
- * this module says which turns the consequence rules apply to.
+ * lane D 2026-11-12; narrowed 2026-11-13). Michi asks by consequence
+ * (agents/callConsequence.ts): this module says which turns the consequence
+ * rules apply to. Only turns Michi drives or a check-in's own turn: a turn
+ * the user sent follows the chat's mode, whatever it read (KiroCrew decides
+ * by who started the turn too).
  *
  * - michiDriven: Michi, not the user, sent the turn's message: a follow-up
  *   (`companionSend`), a message relayed from another conversation
  *   (`threadMessage`), or the first message of a conversation Michi started
  *   (start_conversation notes it before the turn starts, and a followed
  *   delegation the user has not written in says so durably). These are the
- *   "work conversations": local, undoable work runs without asking whatever
- *   the chat's mode; whatever leaves the machine asks, even in Trust or YOLO.
+ *   "work conversations": they run without asking whatever the chat's mode,
+ *   except a dangerous call that leaves the machine (a push, a deploy, a code
+ *   review or its comments, a message or email), which asks even in Trust or
+ *   YOLO.
  * - outsideContent: the turn holds Companion material (turnTrust
  *   activeCompanionTaint: its own reads, or what its live session took in
  *   earlier), or read web pages, another MCP server's results or content
- *   passed in from another conversation. Its own shell output does not count:
- *   turn trust records every command's output as outside content, and the
- *   rule would then hold for nearly every turn. In such a turn whatever
- *   leaves the machine asks, even in Trust or YOLO; everything else follows
- *   the chat's mode.
+ *   passed in from another conversation. Its own shell output does not count.
+ *   On its own it guards nothing; a conversation it starts records it
+ *   (turnHoldsOutsideContent), which makes that conversation outsideSourced.
  * - outsideSourced: a Michi-driven conversation that started from content
  *   someone else wrote (Companion material, or content passed in with a
- *   message from a turn that held outside content): network reads and
- *   credential reads ask too. Sticky for the conversation.
+ *   message from a turn that held outside content). Sticky for the
+ *   conversation; the approval card says so.
  * - background: a check-in's own turn (a check-in node, however the
  *   scheduler's lane or the coordinator started it: check-ins and the work
  *   heartbeat). Nobody is there to answer, so whatever leaves the machine,
@@ -52,9 +55,9 @@ const FAIL_CLOSED: TurnGuard = Object.freeze({ michiDriven: true, outsideContent
 /** A check-in's own turn: Michi's, from collector material, with nobody to ask. */
 const BACKGROUND: TurnGuard = Object.freeze({ michiDriven: true, outsideContent: true, outsideSourced: true, background: true });
 
-/** Whether any consequence rule holds for the turn. */
+/** Whether any consequence rule holds for the turn: Michi drove it, or it is a check-in's own (outsideSourced implies michiDriven). */
 export function isGuarded(guard: TurnGuard): boolean {
-  return guard.michiDriven || guard.outsideContent || guard.outsideSourced || guard.background;
+  return guard.michiDriven || guard.background;
 }
 
 /** A check-in node, by its id prefix or recorded purpose; one that cannot be read counts as one (fail closed). */
@@ -160,16 +163,32 @@ function sentByMichi(metadata: Record<string, unknown> | null): boolean {
 /**
  * A conversation Michi started and still follows, which the user has not
  * written in (its first message is Michi's; a second one without Michi's
- * metadata is the user's).
+ * metadata is the user's). Michi's automatic continuations are not the
+ * user's: a continued turn keeps the rules of the turn it continues.
  */
 function followedWorkConversation(db: DatabaseSync, nodeId: string): boolean {
   const followed = db.prepare("SELECT 1 FROM companion_delegations WHERE node_id = ? AND state = 'following' LIMIT 1").get(nodeId);
   if (!followed) return false;
   const human = db.prepare(`SELECT COUNT(*) AS n FROM messages WHERE node_id = ? AND role = 'user'
       AND (metadata IS NULL OR NOT json_valid(metadata)
-        OR (json_extract(metadata, '$.companionSend') IS NULL AND json_extract(metadata, '$.threadMessage') IS NULL))`)
+        OR (json_extract(metadata, '$.companionSend') IS NULL AND json_extract(metadata, '$.threadMessage') IS NULL
+          AND json_extract(metadata, '$.autoContinue') IS NULL))`)
     .get(nodeId) as { n: number } | undefined;
   return Number(human?.n ?? 0) <= 1;
+}
+
+/**
+ * A work conversation (followedWorkConversation): one Michi started and
+ * follows, which the user has not written in. False when it cannot be read.
+ */
+export function isMichiWorkConversation(nodeId: string): boolean {
+  const db = openDbOrNull();
+  if (!db || !nodeId) return false;
+  try {
+    return followedWorkConversation(db, nodeId);
+  } catch {
+    return false;
+  }
 }
 
 function michiDriven(db: DatabaseSync, nodeId: string, turn: TurnRow | null): boolean {

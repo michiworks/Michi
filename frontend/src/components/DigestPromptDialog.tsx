@@ -47,6 +47,7 @@ export default function DigestPromptDialog({ open, onConfirm, onCancel }: Digest
 
       <div style={{ padding: '8px 14px 14px' }}>
         <div
+          className="t-field-frame"
           style={{
             display: 'flex',
             alignItems: 'flex-start',
@@ -86,7 +87,6 @@ export default function DigestPromptDialog({ open, onConfirm, onCancel }: Digest
               flex: 1,
               minWidth: 0,
               border: 'none',
-              outline: 'none',
               background: 'transparent',
               fontFamily: 'var(--ui-font)',
               fontSize: 'var(--fs-xl)',

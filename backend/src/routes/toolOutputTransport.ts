@@ -1,4 +1,4 @@
-import { CHAT_STREAM_EVENTS, type ChatStreamEvent } from 'michi-shared';
+import { CHAT_STREAM_EVENTS, isTurnMetadataToolTitle, type ChatStreamEvent } from 'michi-shared';
 import { omitInlineImagesInText } from 'michi-runtime/internal/contract/toolPayload';
 
 /**
@@ -38,7 +38,7 @@ export const PARSED_OUTPUT_TOOLS: ReadonlySet<string> = new Set([
   'list_scheduled_jobs', 'create_scheduled_job', 'update_scheduled_job', 'run_scheduled_job', 'delete_scheduled_job',
   'propose_multi_model_plan',
   'companion_items', 'companion_item', 'companion_check_now', 'companion_update_item', 'companion_save_notes',
-  'companion_goal_progress', 'companion_propose', 'companion_publish_brief', 'companion_set_name',
+  'companion_goal_progress', 'companion_propose', 'companion_set_name',
   'companion_set_notifications', 'companion_cr_detail', 'companion_pipeline_detail', 'companion_email_search', 'companion_headline', 'nothing_to_do',
   'memory_save', 'memory_update', 'memory_delete',
 ]);
@@ -240,13 +240,142 @@ function projectToolCallsJson(encoded: string): string {
   return changed ? JSON.stringify(projected) : encoded;
 }
 
+/** One message row for a response body: a copy where a tool output changes, the stored row untouched. */
+export function projectMessageRowForTransport<T extends { tool_calls?: string | null }>(row: T): T {
+  if (typeof row.tool_calls !== 'string') return row;
+  const tool_calls = projectToolCallsJson(row.tool_calls);
+  return tool_calls === row.tool_calls ? row : { ...row, tool_calls };
+}
+
 /** Message rows for a response body: copies where a tool output changes, the stored rows untouched. */
 export function projectMessageRowsForTransport<T extends { tool_calls?: string | null }>(rows: readonly T[]): T[] {
-  return rows.map((row) => {
-    if (typeof row.tool_calls !== 'string') return row;
-    const tool_calls = projectToolCallsJson(row.tool_calls);
-    return tool_calls === row.tool_calls ? row : { ...row, tool_calls };
+  return rows.map(projectMessageRowForTransport);
+}
+
+/*
+ * Display pages (`toolCalls=lean`) leave the body of a finished call on the
+ * server: what its rows, group lines and the turn's "Worked for…" line do not
+ * read. GET …/tool-calls brings it when one of them opens.
+ */
+
+/** An output this short travels whole; so does an input this short. */
+const LEAN_OUTPUT_CHARS = 200;
+const LEAN_INPUT_CHARS = 160;
+/**
+ * A detail this short that is not JSON travels whole: it is the agent's stated
+ * purpose, which a step row shows. A JSON detail repeats the input or holds a
+ * result.
+ */
+const LEAN_DETAIL_CHARS = 160;
+/** What a deferred input keeps of each string value: a command or raw input, a path or pattern, anything else. */
+const LEAN_COMMAND_CHARS = 300;
+const LEAN_SUBJECT_CHARS = 200;
+const LEAN_VALUE_CHARS = 80;
+/** The keys a row's summary reads (toolCallGrouping toolInput.ts toolPath, toolPattern, toolCommand). */
+const LEAN_SUBJECT_KEYS: ReadonlySet<string> = new Set(['file_path', 'filePath', 'path', 'notebook_path', 'pattern', 'query', 'glob', 'url']);
+const LEAN_RUNNING = new Set(['running', 'in_progress', 'pending']);
+const LEAN_FAILED = new Set(['error', 'failed']);
+/** The frontend's exit line (toolCallGrouping/toolStatus.ts EXIT_LINE): a row shows "exit 1" from it. */
+const EXIT_LINE = /^\s*(?:exit(?:ed with)? code|exit status)[:\s]+(-?\d+)\b.*$/i;
+const SUBAGENT_TITLES = new Set(['agent', 'task', 'subagent']);
+const SUBAGENT_TYPE_KEY = /"(?:subagent_type|subagentType|agent_type|agentType)"\s*:/;
+
+function clipText(value: string, chars: number): string {
+  if (value.length <= chars) return value;
+  const end = isHighSurrogate(value.charCodeAt(chars - 1)) ? chars - 1 : chars;
+  return `${value.slice(0, end)}…`;
+}
+
+/** A long input with each string value clipped, keys and structure kept; still valid JSON when it was. */
+function leanToolInput(inputJson: string): string {
+  if (inputJson.length <= LEAN_INPUT_CHARS) return inputJson;
+  let input: unknown;
+  try {
+    input = JSON.parse(inputJson);
+  } catch {
+    return clipText(inputJson, LEAN_COMMAND_CHARS);
+  }
+  const clip = (value: unknown, chars: number): unknown => {
+    if (typeof value === 'string') return clipText(value, chars);
+    if (Array.isArray(value)) return value.map((item) => clip(item, chars));
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clip(item,
+      WHOLE_INPUT_KEYS.has(key) ? LEAN_COMMAND_CHARS : LEAN_SUBJECT_KEYS.has(key) ? LEAN_SUBJECT_CHARS : LEAN_VALUE_CHARS)]));
+  };
+  const lean = JSON.stringify(clip(input, LEAN_VALUE_CHARS));
+  return lean.length < inputJson.length ? lean : inputJson;
+}
+
+/**
+ * A call as a display page carries it. Kept whole: a call still running, a
+ * failed one (its error line and exit code come from its output), and every
+ * call a frontend parser reads (cards, receipts, file edits, wrappers,
+ * delegations, Michi's turn metadata). Any other call keeps what its collapsed
+ * rows read (title, kind, status, times, a short purpose, the input's keys
+ * with short values, an exit line) and says what it left out (`deferred`;
+ * `hasOutput` when that includes an output).
+ */
+export function deferToolCallBody(call: unknown): unknown {
+  if (!call || typeof call !== 'object') return call;
+  const c = call as Record<string, unknown>;
+  const status = typeof c.status === 'string' ? c.status : '';
+  if (!status || LEAN_RUNNING.has(status) || LEAN_FAILED.has(status)) return call;
+  const titles = [c.title, c.toolName];
+  if (passesWhole(titles, c.inputJson)
+    || isParsedInputTool(undefined, c.kind) || titles.some((title) => isParsedInputTool(title))
+    || titles.some((title) => titleNames(title, WRAPPER_TOOLS))) return call;
+  const title = typeof c.title === 'string' ? c.title : '';
+  if (isTurnMetadataToolTitle(title) || SUBAGENT_TITLES.has(title.trim().toLowerCase()) || c.kind === 'subagent'
+    || [c.detail, c.inputJson].some((text) => typeof text === 'string' && SUBAGENT_TYPE_KEY.test(text))) return call;
+
+  const output = typeof c.output === 'string' ? c.output : undefined;
+  const dropOutput = output !== undefined && output.length > LEAN_OUTPUT_CHARS;
+  const hasInput = typeof c.inputJson === 'string' && c.inputJson.trim() !== '';
+  const inputJson = hasInput ? leanToolInput(c.inputJson as string) : c.inputJson;
+  let detail = c.detail;
+  if (typeof detail === 'string') {
+    const json = /^\s*[[{]/.test(detail);
+    // Without an input, a JSON detail is the input the rows read.
+    if (json && !hasInput) detail = leanToolInput(detail);
+    else if (json || detail.length > LEAN_DETAIL_CHARS) detail = undefined;
+  }
+  if (!dropOutput && inputJson === c.inputJson && detail === c.detail) return call;
+  const { output: _output, detail: _detail, ...rest } = c;
+  const exitLine = dropOutput ? output!.split('\n').slice(0, 8).find((line) => EXIT_LINE.test(line)) : undefined;
+  return {
+    ...rest,
+    ...(dropOutput ? (exitLine ? { output: exitLine } : {}) : output !== undefined ? { output } : {}),
+    ...(inputJson !== undefined ? { inputJson } : {}),
+    ...(detail !== undefined ? { detail } : {}),
+    deferred: true,
+    ...(dropOutput ? { hasOutput: true } : {}),
+  };
+}
+
+/**
+ * A message row for a display page: the transport projection, and in a
+ * finished turn's assistant message each call's body left on the server
+ * (deferToolCallBody). `active`: the assistant message of a turn still
+ * running, which a replay continues; it travels as the transport carries it.
+ */
+export function projectMessageRowForDisplay<T extends { role?: string; tool_calls?: string | null }>(row: T,
+  context: { active: boolean }): T {
+  const projected = projectMessageRowForTransport(row);
+  if (context.active || projected.role !== 'assistant' || typeof projected.tool_calls !== 'string') return projected;
+  let calls: unknown;
+  try {
+    calls = JSON.parse(projected.tool_calls);
+  } catch {
+    return projected;
+  }
+  if (!Array.isArray(calls)) return projected;
+  let changed = false;
+  const lean = calls.map((call) => {
+    const next = deferToolCallBody(call);
+    if (next !== call) changed = true;
+    return next;
   });
+  return changed ? { ...projected, tool_calls: JSON.stringify(lean) } : projected;
 }
 
 /** A workspace snapshot (or a tree's messages) for a response body. */

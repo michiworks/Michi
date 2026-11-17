@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render } from '@testing-library/react';
 import { MessageBlock } from './MessageBlock';
-import { AgentBlockStyleOverride, type AgentBlockStyle } from '../../state/prefs';
 import type { AssistantBlock, ChatMessage, SubagentInfo, ToolCallState } from '../../state/chatTypes';
 
 const NOTE = 'No file overlap with dev. Committing and merging.';
@@ -20,22 +19,19 @@ const blocks: AssistantBlock[] = [
 ];
 const message: ChatMessage = { id: 'a1', role: 'assistant', text: NOTE + FINAL, toolCalls: tools, blocks, streaming: false };
 
-function renderTurn(m: ChatMessage, opts: { variant?: AgentBlockStyle; hideActions?: boolean; subagents?: SubagentInfo[] } = {}) {
+function renderTurn(m: ChatMessage, opts: { hideActions?: boolean; subagents?: SubagentInfo[] } = {}) {
   return render(
-    <AgentBlockStyleOverride.Provider value={opts.variant ?? 'line'}>
-      <MessageBlock
-        m={m}
-        index={1}
-        isDark={false}
-        copyText={() => ''}
-        showThoughts
-        fontFamily="inherit"
-        density="comfortable"
-        usageInfo={m.streaming ? undefined : { durationMs: 64_900 }}
-        hideActions={opts.hideActions}
-        subagents={opts.subagents}
-      />
-    </AgentBlockStyleOverride.Provider>,
+    <MessageBlock
+      m={m}
+      index={1}
+      isDark={false}
+      copyText={() => ''}
+      showThoughts
+      density="comfortable"
+      usageInfo={m.streaming ? undefined : { durationMs: 64_900 }}
+      hideActions={opts.hideActions}
+      subagents={opts.subagents}
+    />,
   );
 }
 
@@ -65,9 +61,7 @@ describe('MessageBlock — Work fold', () => {
     expect(queryByRole('button', { name: /Worked for/ })).toBeNull();
 
     rerender(
-      <AgentBlockStyleOverride.Provider value="line">
-        <MessageBlock m={message} index={1} isDark={false} copyText={() => ''} showThoughts fontFamily="inherit" density="comfortable" usageInfo={{ durationMs: 64_900 }} />
-      </AgentBlockStyleOverride.Provider>,
+      <MessageBlock m={message} index={1} isDark={false} copyText={() => ''} showThoughts density="comfortable" usageInfo={{ durationMs: 64_900 }} />,
     );
     expect(queryByRole('button', { name: /Worked for/ })).not.toBeNull();
   });
@@ -94,11 +88,5 @@ describe('MessageBlock — Work fold', () => {
     };
     const row = renderTurn(withRelayed, { subagents: [agent] }).getByRole('button', { name: /Worked for/ });
     expect(row.textContent).not.toMatch(/failed/);
-  });
-
-  it('leaves the other chromes as they were', () => {
-    const { queryByRole, getByText } = renderTurn(message, { variant: 'card' });
-    expect(queryByRole('button', { name: /Worked for/ })).toBeNull();
-    getByText(NOTE);
   });
 });

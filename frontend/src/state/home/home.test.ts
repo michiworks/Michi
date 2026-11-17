@@ -89,13 +89,20 @@ describe('Jump back in (Q46)', () => {
 });
 
 describe('the work strip (Q44)', () => {
-  it('counts the conversations Michi follows, what needs the user and today\'s finished ones', () => {
-    const item = (subtype: string, changedAt: number) => ({ subtype, changedAt }) as never;
+  it('counts the conversations Michi follows, what waits on the user and today\'s finished ones', () => {
+    const item = (subtype: string, changedAt: number) => ({ subtype, changedAt, severity: 'digest', facts: {}, id: subtype + changedAt }) as never;
     const counts = homeWorkCounts({
       delegations: [{ state: 'following' }, { state: 'following' }, { state: 'closed' }] as never,
       counts: { needsYou: 3, newItems: 0, unreadMessages: 0 },
-      items: [item('michi_done', at(2026, 11, 12, 9)), item('michi_done', at(2026, 11, 11, 23)), item('cr_merged', NOW)],
+      items: [
+        // Waiting is counted from the items, the way Today counts them: not from the backend's buckets.
+        item('cr_needs_attention', NOW),
+        item('michi_waiting', NOW),
+        item('michi_done', at(2026, 11, 12, 9)),
+        item('michi_done', at(2026, 11, 11, 23)),
+        item('cr_merged', NOW),
+      ],
     }, NOW);
-    expect(counts).toEqual({ working: 2, waiting: 3, doneToday: 1 });
+    expect(counts).toEqual({ working: 2, waiting: 2, doneToday: 1 });
   });
 });

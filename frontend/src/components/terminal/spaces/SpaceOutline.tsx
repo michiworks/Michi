@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
-import { FileText, Home, Plus, Table2 } from 'lucide-react';
+import { AnimatePresence } from 'motion/react';
+import { menuOpenKey } from '../../ContextMenu';
+import { DocIcon, HomeIcon, PlusIcon, TableIcon } from '../icons';
 import { pageBlockTitle, type PageBlock, type PageBlockType, type PageSummaryDto } from 'michi-shared';
 import { MichiMenu } from '../content/page/MichiMenu';
 import { RowKebab } from '../primitives';
@@ -81,7 +83,7 @@ function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, 
 
   const row = (page: PageSummaryDto, depth: number): React.ReactNode => {
     const current = page.id === activePageId;
-    const Glyph = depth === 0 ? Home : page.title && /list|checklist|清单|行程|database/i.test(page.title) ? Table2 : FileText;
+    const Glyph = depth === 0 ? HomeIcon : page.title && /list|checklist|清单|行程|database/i.test(page.title) ? TableIcon : DocIcon;
     return (
       <React.Fragment key={page.id}>
         <div className="space-outline__row t-reveal-host" data-current={current || undefined}
@@ -95,7 +97,7 @@ function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, 
             style={{ paddingLeft: 14 + depth * 16 }}
             onClick={() => onOpen(page.id)}
           >
-            <Glyph size={13} strokeWidth={1.6} aria-hidden="true" />
+            <Glyph aria-hidden="true" />
             <span>{depth === 0 ? 'Home' : page.title || 'Untitled page'}</span>
             {page.pendingProposals > 0 && <span className="space-outline__count" aria-label={`${page.pendingProposals} waiting for you`}>{page.pendingProposals}</span>}
           </button>
@@ -119,7 +121,7 @@ function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, 
       {(children.get(null) ?? []).map((page) => row(page, 0))}
       {!readOnly && rootId && (
         <button type="button" className="branches-directory__item space-outline__item space-outline__add" style={{ paddingLeft: 30 }} onClick={() => onCreateChild(activePageId)}>
-          <Plus size={13} strokeWidth={1.6} aria-hidden="true" />
+          <PlusIcon aria-hidden="true" />
           <span>New page</span>
         </button>
       )}
@@ -142,8 +144,10 @@ function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, 
           ))}
         </>
       )}
-      {menu && (
+      {/* Inside the page panel: a menu still open when the panel closes leaves with it. */}
+      <AnimatePresence propagate>{menu && (
         <MichiMenu
+          key={menuOpenKey(menu)}
           anchor={menu.anchor}
           label={`Actions for ${menu.page.title}`}
           width={200}
@@ -156,7 +160,7 @@ function SpaceOutline({ pages, activePageId, rootId, blocks, readOnly, loading, 
           ]}
           onClose={(restore) => { const anchor = menu.anchor; setMenu(null); if (restore) anchor.focus({ preventScroll: true }); }}
         />
-      )}
+      )}</AnimatePresence>
     </nav>
   );
 }

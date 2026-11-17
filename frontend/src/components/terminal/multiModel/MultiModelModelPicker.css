@@ -4,7 +4,7 @@
    its content and sits in a scrolling drawer, keeps it in the flow. */
 .mm-card .picker {
   position: absolute;
-  z-index: 10;
+  z-index: var(--z-popover);
   left: 24px;
   right: 0;
 }
@@ -62,7 +62,7 @@
   color: var(--term-fg);
   cursor: pointer;
 }
-:is(.mm-card, .mm-dpick) .picker .opt:focus-visible { background: var(--term-alt); outline: none; }
+:is(.mm-card, .mm-dpick) .picker .opt:focus-visible { background: var(--term-alt); outline: var(--focus-ring); outline-offset: -2px; }
 @media (hover: hover) {
   :is(.mm-card, .mm-dpick) .picker .opt:not(:disabled):hover { background: var(--term-alt); }
 }

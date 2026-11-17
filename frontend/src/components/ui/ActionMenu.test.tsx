@@ -24,7 +24,7 @@ describe('ActionMenu', () => {
     const original = HTMLElement.prototype.getBoundingClientRect;
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
       if (this.textContent === 'More') return { left: 900, right: 924, top: 700, bottom: 724, width: 24, height: 24, x: 900, y: 700, toJSON() {} };
-      if (this.classList.contains('trash-menu')) return { left: 0, right: 208, top: 0, bottom: 120, width: 208, height: 120, x: 0, y: 0, toJSON() {} };
+      if (this.getAttribute('role') === 'menu') return { left: 0, right: 208, top: 0, bottom: 120, width: 208, height: 120, x: 0, y: 0, toJSON() {} };
       return original.call(this);
     });
     setup();

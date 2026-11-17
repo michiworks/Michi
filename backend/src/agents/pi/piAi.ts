@@ -1,5 +1,6 @@
 import path from "path";
 import { pathToFileURL } from "url";
+import { applyOutboundProxyFromEnv } from "../../services/outboundProxy";
 // pi 0.80.0 moved the free-function catalog API (getModel/getModels/streamSimple/…)
 // off the "@earendil-works/pi-ai" ROOT entrypoint. The root now exposes only the
 // Models class / createModels() instance API; the free functions we call
@@ -74,5 +75,10 @@ export function loadPiTypebox(): Promise<{ Type: any }> {
 
 let bundledPi: Promise<any> | undefined;
 export function loadPiBundle(): Promise<any> {
-    return bundledPi ??= nativeDynamicImport(pathToFileURL(path.join(__dirname, 'pi-sdk', 'sdk.mjs')).href);
+    return bundledPi ??= nativeDynamicImport(pathToFileURL(path.join(__dirname, 'pi-sdk', 'sdk.mjs')).href)
+        .then((bundle) => {
+            // The SDK's undici swaps in a direct global dispatcher as it loads.
+            applyOutboundProxyFromEnv();
+            return bundle;
+        });
 }

@@ -5,6 +5,10 @@ import { deriveTreeRows, deriveArchivedTreeRows, firstUserSnippet, type TreeRow 
 import { relativeTime } from '../../../lib/relativeTime';
 import ContextMenu, { menuOpenKey } from '../../ContextMenu';
 import { buildThreadRowContextMenu } from '../../../lib/threadRowContextMenu';
+import { HoverTip } from '../../ui/Popover';
+import { BranchIcon, MoreIcon, StarIcon } from '../icons';
+import ManageListEmpty from './ManageListEmpty';
+import './manage.css';
 
 export interface ChatTreeListMenuActions {
   activateTree: (id: string) => void;
@@ -31,21 +35,12 @@ interface Props {
   workspace: Project;
   nodes: Record<string, ChatNodeState>;
   filter: string;
+  onClearFilter?: () => void;
   onOpen: (chatId: string) => void;
   menuActions?: ChatTreeListMenuActions;
   bulkActions?: BulkActions;
   manageMode?: boolean;
 }
-
-// A touch screen cannot hover, and a tap on a row opens the thread, so the
-// row's ⋯ stays visible there instead of waiting for a hover.
-const NO_HOVER = '(hover: none)';
-function subscribeNoHover(notify: () => void) {
-  const query = window.matchMedia?.(NO_HOVER);
-  query?.addEventListener?.('change', notify);
-  return () => query?.removeEventListener?.('change', notify);
-}
-const cannotHover = () => window.matchMedia?.(NO_HOVER).matches ?? false;
 
 interface TreeGroup {
   treeId: string;
@@ -98,6 +93,7 @@ export default function ChatTreeList({
   workspace,
   nodes,
   filter,
+  onClearFilter,
   onOpen,
   menuActions,
   bulkActions,
@@ -116,12 +112,11 @@ export default function ChatTreeList({
   const pinned = groups.filter((g) => g.pinned);
   const rest = groups.filter((g) => !g.pinned);
 
-  const [hoveredId, setHoveredId] = React.useState<string | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [menu, setMenu] = React.useState<{ x: number; y: number; tree: Tree } | null>(null);
   const [archivedExpanded, setArchivedExpanded] = React.useState(false);
+  const archivedListId = React.useId();
   const lastClickedRef = React.useRef<string | null>(null);
-  const touch = React.useSyncExternalStore(subscribeNoHover, cannotHover, () => false);
 
   const treeById = React.useMemo(() => {
     const m = new Map<string, Tree>();
@@ -138,10 +133,9 @@ export default function ChatTreeList({
     return ids;
   }, [groups, archivedGroups, archivedExpanded]);
 
-  const handleTreeClick = React.useCallback((treeId: string, e: React.MouseEvent) => {
+  const handleTreeCheck = React.useCallback((treeId: string, shiftKey: boolean) => {
     if (!bulkActions || !manageMode) return;
-    e.preventDefault();
-    if (e.shiftKey && lastClickedRef.current) {
+    if (shiftKey && lastClickedRef.current) {
       const startIdx = allVisibleTreeIds.indexOf(lastClickedRef.current);
       const endIdx = allVisibleTreeIds.indexOf(treeId);
       if (startIdx >= 0 && endIdx >= 0) {
@@ -185,18 +179,7 @@ export default function ChatTreeList({
     : [];
 
   if (groups.length === 0 && archivedGroups.length === 0) {
-    return (
-      <div
-        style={{
-          padding: '20px 0',
-          fontFamily: 'var(--ui-font)',
-          fontSize: 'var(--fs-lg)',
-          color: 'var(--term-muted)',
-        }}
-      >
-        no chats yet — start one above
-      </div>
-    );
+    return <ManageListEmpty query={filter.trim()} empty="no chats yet — start one above" onClearFilter={onClearFilter} />;
   }
 
   const renderGroup = (g: TreeGroup, isArchived?: boolean) => (
@@ -204,9 +187,7 @@ export default function ChatTreeList({
       key={g.treeId}
       group={g}
       tree={treeById.get(g.treeId)}
-      hoveredId={hoveredId}
       selectedId={selectedId}
-      onHover={setHoveredId}
       onSelect={(id) => {
         if (manageMode && bulkActions) return;
         setSelectedId(id);
@@ -219,29 +200,20 @@ export default function ChatTreeList({
       }}
       onMoreClick={(rect, tree) => openMenuForTree(tree, rect.right, rect.bottom)}
       menuEnabled={!!menuActions && !manageMode}
-      alwaysShowMore={touch}
+      menuOpen={menu?.tree.id === g.treeId}
       manageMode={manageMode}
       checked={bulkActions ? bulkActions.treeSelection.has(g.treeId) : false}
-      onCheck={(e) => handleTreeClick(g.treeId, e)}
+      onCheck={(shiftKey) => handleTreeCheck(g.treeId, shiftKey)}
       isArchived={isArchived}
     />
   );
 
   return (
     <>
-      <style>{`
-        .chat-tree-block + .chat-tree-block {
-          border-top: 1px solid color-mix(in srgb, var(--term-line) 45%, transparent);
-        }
-        .chat-tree-block:has([data-hovered="true"]) { border-top-color: transparent; }
-        .chat-tree-block:has([data-hovered="true"]) + .chat-tree-block { border-top-color: transparent; }
-      `}</style>
-
-
       <div role="list" style={manageMode ? { userSelect: 'none' } : undefined}>
         {pinned.length > 0 && (
           <>
-            <SectionLabel icon={<StarGlyph filled />} text="PINNED" tone="pin" />
+            <SectionLabel icon={<StarIcon size="sm" fill="currentColor" />} text="PINNED" tone="pin" />
             {pinned.map((g) => renderGroup(g))}
             <div style={{ height: 6 }} />
             <SectionLabel text="RECENT" />
@@ -255,6 +227,8 @@ export default function ChatTreeList({
         <div style={{ marginTop: 16 }}>
           <button
             type="button"
+            aria-expanded={archivedExpanded}
+            aria-controls={archivedListId}
             onClick={() => setArchivedExpanded((v) => !v)}
             style={{
               display: 'flex',
@@ -284,7 +258,7 @@ export default function ChatTreeList({
             </span>
           </button>
           {archivedExpanded && (
-            <div role="list" style={manageMode ? { userSelect: 'none' } : undefined}>
+            <div role="list" id={archivedListId} style={manageMode ? { userSelect: 'none' } : undefined}>
               {archivedGroups.map((g) => renderGroup(g, true))}
             </div>
           )}
@@ -348,31 +322,29 @@ function SectionLabel({
 interface TreeBlockProps {
   group: TreeGroup;
   tree: Tree | undefined;
-  hoveredId: string | null;
   selectedId: string | null;
-  onHover: (id: string | null) => void;
   onSelect: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, tree: Tree | undefined) => void;
   onMoreClick: (rect: DOMRect, tree: Tree | undefined) => void;
   menuEnabled: boolean;
-  alwaysShowMore?: boolean;
+  /** The tree's menu is open, from its ⋯ or a right click. */
+  menuOpen: boolean;
   manageMode?: boolean;
   checked?: boolean;
-  onCheck?: (e: React.MouseEvent) => void;
+  /** Shift extends the selection from the last box checked. */
+  onCheck?: (shiftKey: boolean) => void;
   isArchived?: boolean;
 }
 
 function TreeBlock({
   group,
   tree,
-  hoveredId,
   selectedId,
-  onHover,
   onSelect,
   onContextMenu,
   onMoreClick,
   menuEnabled,
-  alwaysShowMore,
+  menuOpen,
   manageMode,
   checked,
   onCheck,
@@ -390,7 +362,7 @@ function TreeBlock({
       <div style={{ display: 'flex', alignItems: 'flex-start' }}>
         {manageMode && (
           <label
-            onClick={(e) => { e.stopPropagation(); onCheck?.(e); }}
+            onClick={(e) => e.stopPropagation()}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -401,22 +373,14 @@ function TreeBlock({
               flexShrink: 0,
             }}
           >
-            <span
-              style={{
-                width: 14,
-                height: 14,
-                border: checked ? '1.5px solid var(--term-accent)' : '1.5px solid var(--term-muted)',
-                background: checked ? 'var(--term-accent)' : 'transparent',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 'var(--fs-xs)',
-                color: 'var(--on-accent)',
-                transition: 'all var(--t-quick)',
-              }}
-            >
-              {checked && '✓'}
-            </span>
+            <input
+              type="checkbox"
+              aria-label={`Select ${group.title || group.root.node.title || 'Untitled'}`}
+              checked={!!checked}
+              // A checkbox's change comes from its click, which carries Shift.
+              onChange={(e) => onCheck?.((e.nativeEvent as MouseEvent).shiftKey)}
+              style={{ width: 14, height: 14, margin: 0, accentColor: 'var(--term-accent)', cursor: 'pointer' }}
+            />
           </label>
         )}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -424,14 +388,12 @@ function TreeBlock({
             row={group.root}
             title={group.title}
             isBranch={false}
-            hovered={hoveredId === group.root.nodeId}
             selected={selectedId === group.root.nodeId}
-            onHover={onHover}
             onSelect={onSelect}
             onContextMenu={(e) => onContextMenu(e, tree)}
             onMoreClick={(r) => onMoreClick(r, tree)}
             menuEnabled={menuEnabled}
-            alwaysShowMore={alwaysShowMore}
+            menuOpen={menuOpen}
             isArchived={isArchived}
           />
         </div>
@@ -441,9 +403,7 @@ function TreeBlock({
           key={b.nodeId}
           row={b}
           isBranch
-          hovered={hoveredId === b.nodeId}
           selected={selectedId === b.nodeId}
-          onHover={onHover}
           onSelect={onSelect}
           onContextMenu={(e) => e.preventDefault()}
           onMoreClick={() => undefined}
@@ -471,15 +431,12 @@ interface ChatRowProps {
   /** The thread's name, for a root row; a branch shows its own title. */
   title?: string;
   isBranch: boolean;
-  hovered: boolean;
   selected: boolean;
-  onHover: (id: string | null) => void;
   onSelect: (id: string) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onMoreClick: (rect: DOMRect) => void;
   menuEnabled: boolean;
-  /** Show ⋯ without a hover, for screens that cannot hover. */
-  alwaysShowMore?: boolean;
+  menuOpen?: boolean;
   isArchived?: boolean;
 }
 
@@ -487,14 +444,12 @@ function ChatRow({
   row,
   title,
   isBranch,
-  hovered,
   selected,
-  onHover,
   onSelect,
   onContextMenu,
   onMoreClick,
   menuEnabled,
-  alwaysShowMore = false,
+  menuOpen = false,
   isArchived,
 }: ChatRowProps) {
   const node = row.node;
@@ -505,25 +460,14 @@ function ChatRow({
   return (
     <div
       role="listitem"
-      data-hovered={hovered}
+      className="manage-row t-reveal-host"
       data-selected={selected}
       data-pinned={isRoot && row.kind === 'root' ? row.pinned : false}
       data-context-target={menuEnabled && !isBranch ? '' : undefined}
-      onMouseEnter={() => onHover(node.nodeId)}
-      onMouseLeave={() => onHover(null)}
-      onClick={() => onSelect(node.nodeId)}
       onContextMenu={onContextMenu}
       style={{
-        position: 'relative',
         padding: '6px 10px 6px 8px',
         marginLeft: isBranch ? 18 : 0,
-        background: selected
-          ? 'color-mix(in srgb, var(--term-accent) 14%, transparent)'
-          : hovered
-            ? 'var(--term-hover-bg)'
-            : 'transparent',
-        cursor: 'pointer',
-        transition: 'background var(--t-soft)',
       }}
     >
       {selected && (
@@ -552,7 +496,10 @@ function ChatRow({
             ›
           </span>
         )}
-        <span
+        <button
+          type="button"
+          className="manage-row__open"
+          onClick={() => onSelect(node.nodeId)}
           style={{
             fontFamily: 'var(--ui-font)',
             fontSize: isBranch ? 'var(--fs-xl)' : 'var(--fs-2xl)',
@@ -560,7 +507,6 @@ function ChatRow({
             fontWeight: 500,
             color: isArchived ? 'var(--term-muted)' : 'var(--term-fg)',
             flex: 1,
-            minWidth: 0,
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
@@ -583,7 +529,7 @@ function ChatRow({
               archived
             </span>
           )}
-        </span>
+        </button>
         <span
           style={{
             fontSize: 'var(--fs-md)',
@@ -613,34 +559,26 @@ function ChatRow({
               fontFamily: 'var(--ui-font)',
             }}
           >
-            <BranchGlyph /> {branchCount}
+            <BranchIcon size="sm" /> {branchCount}
           </span>
         )}
-        {isRoot && menuEnabled && (hovered || alwaysShowMore) ? (
-          <button
-            type="button"
-            aria-label="more actions"
-            onClick={(e) => {
-              e.stopPropagation();
-              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-              onMoreClick(r);
-            }}
-            style={{
-              border: 'none',
-              background: 'transparent',
-              cursor: 'pointer',
-              color: 'var(--term-muted)',
-              fontSize: 'var(--fs-xl)',
-              lineHeight: 1,
-              padding: '2px 6px',
-              flexShrink: 0,
-              // A finger-sized target; the negative margins keep the row's height.
-              ...(alwaysShowMore ? { minWidth: 40, minHeight: 36, margin: '-9px -8px -9px 0' } : {}),
-            }}
-          >
-            ⋯
-          </button>
-        ) : null}
+        {isRoot && menuEnabled && (
+          <HoverTip label="More actions">
+            <button
+              type="button"
+              className="t-icon-btn t-reveal manage-icon-btn manage-row__above manage-row__more"
+              aria-label="More actions"
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                onMoreClick(e.currentTarget.getBoundingClientRect());
+              }}
+            >
+              <MoreIcon />
+            </button>
+          </HoverTip>
+        )}
       </div>
       {snippet && (
         <div
@@ -660,42 +598,5 @@ function ChatRow({
         </div>
       )}
     </div>
-  );
-}
-
-function StarGlyph({ filled }: { filled?: boolean }) {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 16 16"
-      fill={filled ? 'currentColor' : 'none'}
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M8 1.5l1.9 4 4.4.5-3.3 3 .9 4.3L8 11.3 4.1 13.3 5 9 1.7 6l4.4-.5L8 1.5z" />
-    </svg>
-  );
-}
-
-function BranchGlyph() {
-  return (
-    <svg
-      width="11"
-      height="11"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      aria-hidden
-    >
-      <circle cx="4" cy="3" r="1.3" />
-      <circle cx="4" cy="13" r="1.3" />
-      <circle cx="12" cy="8" r="1.3" />
-      <path d="M4 4.3v7.4M4.8 12.6c2.5-.5 6.4-1.6 6.4-4.6 0-1.4-.8-2.6-2.4-3" />
-    </svg>
   );
 }

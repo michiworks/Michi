@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProfilePage from './Profile';
 
-const store = vi.hoisted(() => ({ projects: [] as unknown[], agentStatus: null as unknown }));
+const store = vi.hoisted(() => ({ projects: [] as unknown[], agentStatus: null as unknown, agentStatusUnreachable: false }));
 const saveProviderKey = vi.hoisted(() => vi.fn());
 const clearProviderKey = vi.hoisted(() => vi.fn());
 
@@ -12,7 +12,7 @@ vi.mock('../../../services/auth', () => ({
 vi.mock('../../../services/signOut', () => ({ signOutAndReset: vi.fn() }));
 vi.mock('../../../state/chatStore', () => ({
   useChatStore: () => store,
-  useNodesSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}),
+  useStructuralSelector: (selector: (nodes: Record<string, never>) => unknown) => selector({}),
 }));
 vi.mock('../../../state/prefs', () => ({
   usePrefs: () => ({ prefs: { terminalPalette: 'bone' }, setPref: vi.fn() }),
@@ -34,6 +34,7 @@ describe('Profile API keys', () => {
 
   beforeEach(() => {
     reloads.length = 0;
+    store.agentStatusUnreachable = false;
     window.addEventListener('michi:reload-agent-status', onReload);
     saveProviderKey.mockReset().mockResolvedValue({ ok: true });
     clearProviderKey.mockReset().mockResolvedValue({ ok: true });
@@ -50,6 +51,16 @@ describe('Profile API keys', () => {
     fireEvent.change(screen.getByPlaceholderText('Cerebras API key'), { target: { value: key } });
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
   }
+
+  it('says the providers are loading, or not loaded, before the status is read', () => {
+    store.agentStatus = null;
+    const view = render(<ProfilePage />);
+    expect(screen.getByText('loading providers…')).toBeTruthy();
+    expect(screen.queryByText('no providers configured.')).toBeNull();
+    store.agentStatusUnreachable = true;
+    view.rerender(<ProfilePage />);
+    expect(screen.getByText('providers not loaded.')).toBeTruthy();
+  });
 
   it("lists the store's providers and reloads it silently after a saved key", async () => {
     render(<ProfilePage />);

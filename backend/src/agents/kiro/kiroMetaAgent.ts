@@ -5,14 +5,21 @@
  * a workspace agent. Michi selects that agent (v2 `--agent`, v3
  * `session/set_mode`), checks the tool catalog Kiro publishes before the first
  * prompt, and rejects every permission request.
+ *
+ * External tools follow backgroundToolPolicy: the config trusts those it
+ * allows the toolset and excludes the others Kiro is known or found to add.
+ * A catalog with another server's tool still fails its check; the runtime
+ * then reopens the session once with that server excluded (excludeRefusedKiroTools).
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MetaAgentToolset } from 'michi-shared';
 import type { AcpClient, AcpClientOptions, AcpToolCatalogState } from 'michi-runtime/internal/adapters/kiro/acpClient';
 import type { RuntimeToolProfile } from '../types';
-import { assertMetaAgentToolCatalog, metaAgentCatalogUnavailable, metaAgentToolsetOf } from '../metaAgentGuard';
+import { assertMetaAgentToolCatalog, isMetaAgentGuardError, metaAgentCatalogUnavailable, metaAgentToolsetOf } from '../metaAgentGuard';
+import { readBackgroundToolOverrides, readOnlyOverrideTools } from '../../services/metaAgent/backgroundToolPolicy';
 import { agentSpawnEnv } from '../agentSpawnEnv';
 import type { KiroEngine } from 'michi-runtime/internal/adapters/kiro/kiroProtocol';
 import { writeFileAtomicSync } from 'michi-runtime/internal/core/atomicFile';
@@ -30,24 +37,98 @@ const DESCRIPTIONS: Readonly<Record<MetaAgentToolset, string>> = {
 };
 
 const PROMPT = 'You are Michi. Only the michi tools exist: you cannot read or write files, run commands or reach the network.';
+const PROMPT_WITH_READS = 'You are Michi. Only the michi tools and the read-only tools you are given exist: you cannot read or write files, run commands or change anything outside Michi.';
 
 
-/** The agent config Kiro runs a Meta agent session with: Michi's tools in `toolNames` and nothing else. */
-export function kiroMetaAgentConfig(toolset: MetaAgentToolset, toolNames: readonly string[]): Record<string, unknown> {
+/** Exclusions learned from refused catalogs (excludeRefusedKiroTools), per agent directory, as Kiro tool patterns; kept until restart. */
+const learnedExclusions = new Map<string, Set<string>>();
+
+/** Kiro's server name of a backgroundToolId server, which may have lost its `-mcp`: both are tried. */
+const serverVariants = (server: string) => [server, `${server}-mcp`];
+const stripMcp = (server: string) => server.replace(/-mcp$/, '');
+
+/** The external tools the policy lets the toolset use on Kiro, in Kiro's `@server/tool` terms. */
+function externalToolPatterns(toolset: MetaAgentToolset): string[] {
+    return readOnlyOverrideTools(toolset, readBackgroundToolOverrides()).flatMap((id) => {
+        const [server, tool] = id.split('/');
+        return serverVariants(server).map((name) => `@${name}/${tool}`);
+    });
+}
+
+/** Exclude external tools discovered in refused catalogs for this toolset. */
+function excludedToolPatterns(dataDir: string, toolset: MetaAgentToolset): string[] {
+    return [...(learnedExclusions.get(kiroMetaAgentDir(dataDir, toolset)) ?? [])].sort();
+}
+
+/**
+ * Catalog entries outside the profile's tools that the toolset's check
+ * accepts, in both engines' catalog terms: external tools the policy allows it.
+ */
+export function kiroMetaAgentExtraAllowed(toolset: MetaAgentToolset): string[] {
+    const external = externalToolPatterns(toolset).flatMap((pattern) => {
+        const [server, tool] = pattern.slice(1).split('/');
+        return [`mcp:@${server}/${tool}`, `mcp:${server}:${tool}`];
+    });
+    return [...KIRO_META_AGENT_EXTRA_ALLOWED, ...external];
+}
+
+/** An external MCP entry of either engine's catalog (`mcp:@server/tool`, `mcp:@server`, `mcp:server:tool`); null for anything else. */
+function kiroExternalEntry(entry: string): { server: string; tool?: string } | null {
+    const v3 = /^mcp:@([^/\s]+)(?:\/(\S+))?$/.exec(entry);
+    if (v3) return { server: v3[1], ...(v3[2] ? { tool: v3[2] } : {}) };
+    const v2 = /^mcp:([^:@\s]+):(\S+)$/.exec(entry);
+    return v2 ? { server: v2[1], tool: v2[2] } : null;
+}
+
+/**
+ * After a refused catalog check: exclude the external MCP tools it named
+ * from the toolset's agent config. Returns whether anything new was
+ * excluded, so that one reopen may pass. A server the policy allows one tool
+ * of loses only the refused tool; any other server is excluded whole.
+ * Michi's own and Kiro's built-in tools are never excluded here: a catalog
+ * that has one stays refused.
+ */
+export function excludeRefusedKiroTools(dataDir: string, toolset: MetaAgentToolset, error: unknown): boolean {
+    if (!isMetaAgentGuardError(error)) return false;
+    const unexpected = (error as { violation?: { unexpectedTools?: unknown } }).violation?.unexpectedTools;
+    if (!Array.isArray(unexpected)) return false;
+    const allowedServers = new Set(externalToolPatterns(toolset).map((pattern) => stripMcp(pattern.slice(1, pattern.indexOf('/')))));
+    const dir = kiroMetaAgentDir(dataDir, toolset);
+    const learned = learnedExclusions.get(dir) ?? new Set<string>();
+    const before = learned.size;
+    for (const entry of unexpected) {
+        const external = typeof entry === 'string' ? kiroExternalEntry(entry) : null;
+        if (!external || external.server === 'michi') continue;
+        learned.add(external.tool && allowedServers.has(stripMcp(external.server)) ? `@${external.server}/${external.tool}` : `@${external.server}`);
+    }
+    learnedExclusions.set(dir, learned);
+    return learned.size > before;
+}
+
+/**
+ * The agent config Kiro runs a Meta agent session with: Michi's tools in
+ * `toolNames`, the `external` tools (Kiro patterns, `@server/tool`) the
+ * policy allows, and `excluded` (Kiro patterns) out.
+ */
+export function kiroMetaAgentConfig(
+    toolset: MetaAgentToolset, toolNames: readonly string[], external: readonly string[] = [], excluded: readonly string[] = [],
+): Record<string, unknown> {
     const names = [...new Set(toolNames)];
+    const trusted = [...new Set(external)];
     return {
         name: KIRO_META_AGENT_NAMES[toolset],
         description: DESCRIPTIONS[toolset],
-        prompt: PROMPT,
+        prompt: trusted.length ? PROMPT_WITH_READS : PROMPT,
         mcpServers: {},
-        tools: ['@michi'],
-        allowedTools: names.map((name) => `@michi/${name}`),
+        tools: ['@michi', ...trusted],
+        ...(excluded.length ? { excludedTools: [...excluded] } : {}),
+        allowedTools: [...names.map((name) => `@michi/${name}`), ...trusted],
         toolsSettings: {},
         resources: [],
         hooks: [],
         includeMcpJson: false,
         // No fs_read rule: one puts a builtin read tag in the v3 catalog.
-        permissions: { rules: [{ capability: 'mcp', match: names.map((name) => `michi/${name}`), effect: 'allow' }] },
+        permissions: { rules: [{ capability: 'mcp', match: [...names.map((name) => `michi/${name}`), ...trusted.map((pattern) => pattern.slice(1))], effect: 'allow' }] },
     };
 }
 
@@ -60,18 +141,23 @@ export function kiroMetaAgentDir(dataDir: string, toolset: MetaAgentToolset): st
     return dir.split(path.sep).includes('.michi') ? dir : path.join(dir, '.michi');
 }
 
-/** Write (or keep) the toolset's agent config; returns the directory to run kiro-cli in. */
-export function ensureKiroMetaAgent(dataDir: string, toolset: MetaAgentToolset, toolNames: readonly string[]): { dir: string; agentName: string } {
+/**
+ * Write (or keep) the toolset's agent config; returns the directory to run
+ * kiro-cli in and the config's revision, which tells a running worker's
+ * config from a newer one.
+ */
+export function ensureKiroMetaAgent(dataDir: string, toolset: MetaAgentToolset, toolNames: readonly string[]): { dir: string; agentName: string; revision: string } {
     const dir = kiroMetaAgentDir(dataDir, toolset);
     const agentName = KIRO_META_AGENT_NAMES[toolset];
     const agentsDir = path.join(dir, '.kiro', 'agents');
     fs.mkdirSync(agentsDir, { recursive: true, mode: 0o700 });
     const file = path.join(agentsDir, `${agentName}.json`);
-    const text = `${JSON.stringify(kiroMetaAgentConfig(toolset, toolNames), null, 2)}\n`;
+    const external = externalToolPatterns(toolset);
+    const text = `${JSON.stringify(kiroMetaAgentConfig(toolset, toolNames, external, excludedToolPatterns(dataDir, toolset)), null, 2)}\n`;
     let current: string | null = null;
     try { current = fs.readFileSync(file, 'utf8'); } catch { /* first write */ }
     if (current !== text) writeFileAtomicSync(file, text);
-    return { dir, agentName };
+    return { dir, agentName, revision: crypto.createHash('sha256').update(text).digest('hex').slice(0, 16) };
 }
 
 /** Public CLI catalog checks accept only the configured Michi tools. */
@@ -239,7 +325,7 @@ export async function verifyKiroMetaAgentCatalog(input: KiroMetaAgentCatalogChec
         }
         observed = kiroV3MetaAgentCatalog(state.tags);
     }
-    assertMetaAgentToolCatalog({ runtimeId: input.runtimeId, profile: input.profile, observed });
+    assertMetaAgentToolCatalog({ runtimeId: input.runtimeId, profile: input.profile, observed, extraAllowed: kiroMetaAgentExtraAllowed(toolset) });
     const michiTools = new Set(input.profile.allowedToolNames ?? []);
     if (!observed.some((name) => michiTools.has(name))) throw metaAgentCatalogUnavailable(input.runtimeId, toolset, 'Kiro listed none of the Michi tools');
     return observed;
@@ -256,6 +342,7 @@ export const michiKiroRestrictedAgent = {
         ownsWorkspace: isKiroMetaAgentDir,
     },
     catalog: kiroV3MetaAgentCatalog,
-
+    extraAllowed: (toolset: string) => kiroMetaAgentExtraAllowed(toolset as MetaAgentToolset),
+    exclude: (dataDir: string, toolset: string, error: unknown) => excludeRefusedKiroTools(dataDir, toolset as MetaAgentToolset, error),
     verify: verifyKiroMetaAgentCatalog,
 };

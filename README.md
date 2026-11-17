@@ -855,7 +855,10 @@ background and finish in a later turn.
 Workflow runs (Claude Code `Workflow`, Kiro CLI workflows) never enter the
 turn queue. `services/workflowRunHub.ts` folds each runtime's native workflow
 events into a `WorkflowRunDtoV1` snapshot, stores it in `workflow_runs`, and
-pushes it on `GET /api/workflow-runs/subscribe`. The renderer shows a card
+pushes it on `GET /api/workflow-runs/subscribe`: the newest runs first, a large
+finished one as its summary (its card reads it whole once on screen), then each
+change, which a subscriber that asks (`patches=1`) gets as what changed against
+the run its feed sent it (`shared/src/workflowRunPatch.ts`). The renderer shows a card
 under the launching message and a `workflow-run` pane with the step tree,
 step messages, the report and the controls the runtime accepts (Claude: stop;
 Kiro: pause, resume, stop, retry). Tool approvals a workflow asks for while

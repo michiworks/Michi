@@ -2,8 +2,8 @@ import React from 'react';
 import type { BlockProps } from '../blockTypes';
 import { list, num, objects, str } from '../michiPageModel';
 
-/** Series take the accent, then mauve, then digest. */
-const SERIES_COLORS = ['var(--term-accent)', 'var(--term-mauve)', 'var(--term-digest)'] as const;
+/** Series take the accent, then the palette's first two chart hues (tokens.ts CHART_SERIES). */
+const SERIES_COLORS = ['var(--term-accent)', 'var(--term-chart-1)', 'var(--term-chart-2)'] as const;
 const AMOUNT = new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 });
 
 interface Series { key: string; label: string; values: number[]; color: string }

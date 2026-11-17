@@ -1,5 +1,4 @@
 import React, { useCallback, useId } from 'react';
-import { Plus, Search } from 'lucide-react';
 import { useChatProjects, useStructuralSelector } from '../../../state/chatStore';
 import type { ChatNodeState } from '../../../state/chatTypes';
 import { usePrefs } from '../../../state/prefs';
@@ -9,6 +8,7 @@ import { kbd } from '../../../lib/platform';
 import { Button } from '../../ui/controls';
 import { HoverTip } from '../../ui/Popover';
 import { OPEN_SETTINGS_SECTION_EVENT } from '../scheduled/metaAgent/metaAgentNav';
+import { PlusIcon, SearchIcon } from '../icons';
 
 /** The narrow drawer's first row: New chat (opens Home, ⌘T) and Search (the
  *  ⌘K palette). A wide window keeps both in the Topbar. */
@@ -23,7 +23,7 @@ export function SidebarNewChatRow({ onNewChat, onOpenPalette, searchDisabled = f
     <div className="sidebar-new-row">
       {onNewChat && (
         <Button className="sidebar-new-row__new" onClick={onNewChat}>
-          <Plus size={15} strokeWidth={1.5} aria-hidden="true" />
+          <PlusIcon />
           <span className="sidebar-new-row__label">New chat</span>
           <kbd className="sidebar-new-row__kbd" aria-hidden="true">{kbd('mod', 'T')}</kbd>
         </Button>
@@ -31,7 +31,7 @@ export function SidebarNewChatRow({ onNewChat, onOpenPalette, searchDisabled = f
       {onOpenPalette && (
         <HoverTip label="Search" kbd={kbd('mod', 'K')} disabled={searchDisabled}>
           <Button className="sidebar-new-row__search" aria-label="Search" disabled={searchDisabled} onClick={onOpenPalette}>
-            <Search size={15} strokeWidth={1.5} aria-hidden="true" />
+            <SearchIcon />
           </Button>
         </HoverTip>
       )}

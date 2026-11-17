@@ -110,6 +110,9 @@ docs/validation/*
 !docs/features/
 docs/features/*
 !docs/features/*.md
+!docs/design/
+docs/design/*
+!docs/design/*.md
 
 # Local-only assets
 CLAUDE.md

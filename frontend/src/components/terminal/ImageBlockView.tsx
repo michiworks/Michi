@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { AssistantBlock } from '../../state/chatTypes';
 import { artifactImageUrl } from '../../services/api/artifacts';
 import { Lightbox } from './Lightbox';
+import './ImageBlockView.css';
 
 type ImageBlock = Extract<AssistantBlock, { kind: 'image' }>;
 type Zoom = { src: string; filename: string; mimeType: string; size: number; caption?: string };
@@ -27,6 +28,7 @@ export function ImageBlockView({ blocks }: { blocks: readonly AssistantBlock[] }
           <figure key={b.id} style={{ margin: 0 }}>
             <button
               type="button"
+              className="t-image-frame"
               aria-label={b.caption || 'Open image'}
               onClick={() =>
                 setZoom({
@@ -37,14 +39,12 @@ export function ImageBlockView({ blocks }: { blocks: readonly AssistantBlock[] }
                   caption: b.caption,
                 })
               }
-              style={{ border: 'none', padding: 0, background: 'none', cursor: 'zoom-in', display: 'block' }}
             >
               <img
                 src={src}
                 alt={b.caption ?? ''}
                 loading="lazy"
                 onError={() => setBroken((prev) => new Set(prev).add(src))}
-                style={{ maxWidth: '100%', borderRadius: 'var(--ui-radius)', display: 'block' }}
               />
             </button>
             {b.caption && <figcaption style={{ fontSize: 'var(--fs-md)', color: 'var(--term-muted)', marginTop: 4 }}>{b.caption}</figcaption>}

@@ -1,6 +1,7 @@
 import type { MenuItem, MenuSection } from '../components/ContextMenu';
 import { confirmDialog } from '../components/ui/ConfirmDialog';
 import type { Project } from '../state/chatTypes';
+import { kbd } from './platform';
 
 /** The ids of the menu's items, for surfaces that pick items by action (the
  *  phone page hides some for an archived workspace). */
@@ -12,6 +13,8 @@ export type WorkspaceRowActionId =
   | 'unpin'
   | 'archive'
   | 'unarchive'
+  | 'move-up'
+  | 'move-down'
   | 'delete';
 
 type WorkspaceRowMenuItem = MenuItem & { id: WorkspaceRowActionId };
@@ -31,6 +34,10 @@ export interface WorkspaceRowActions {
   /** Ask for confirmation in the caller's own UI; without it, Delete asks
    *  in the app's confirm dialog and deletes. */
   requestDelete?: (projectId: string) => void;
+  /** Move the workspace one place up or down a list a drag orders, without
+   *  dragging. Pass the ones it can take; with neither, the menu offers none. */
+  moveUp?: () => void;
+  moveDown?: () => void;
 }
 
 export interface BuildWorkspaceRowArgs {
@@ -86,6 +93,12 @@ export function buildWorkspaceRowContextMenu(
             },
       ],
     },
+    ...(actions.moveUp || actions.moveDown ? [{
+      items: [
+        { id: 'move-up' as const, label: 'Move up', keys: kbd('alt', '↑'), disabled: !actions.moveUp, run: () => actions.moveUp?.() },
+        { id: 'move-down' as const, label: 'Move down', keys: kbd('alt', '↓'), disabled: !actions.moveDown, run: () => actions.moveDown?.() },
+      ],
+    }] : []),
     {
       items: [
         {

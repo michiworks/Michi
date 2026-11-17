@@ -1,4 +1,8 @@
 import React from 'react';
+import { DEFAULT_PREFS } from '../state/prefs';
+import { WarningIcon } from './terminal/icons';
+import { Button } from './ui/controls';
+import { cssVarsFor, PALETTES } from './terminal/tokens';
 
 const MAX_AUTO_RETRIES = 2;
 const AUTO_RETRY_DELAY_MS = 150;
@@ -88,10 +92,18 @@ export default class AppErrorBoundary extends React.Component<Props, State> {
   }
 }
 
+/* The shell that crashed took its palette off <html> as it unmounted, so the
+   fallback carries the default palette itself, --focus-ring included. */
+const PALETTE_VARS = cssVarsFor(
+  DEFAULT_PREFS.terminalPalette,
+  PALETTES[DEFAULT_PREFS.terminalPalette].accent,
+) as React.CSSProperties;
+
 function CrashFallback({ error, onReload }: { error: Error; onReload: () => void }) {
   return (
     <div
       style={{
+        ...PALETTE_VARS,
         width: '100%',
         height: '100%',
         display: 'flex',
@@ -106,7 +118,7 @@ function CrashFallback({ error, onReload }: { error: Error; onReload: () => void
         textAlign: 'center',
       }}
     >
-      <div style={{ fontSize: 'var(--fs-4xl)', marginBottom: 4 }}>⚠</div>
+      <WarningIcon size={22} style={{ marginBottom: 4 }} />
       <div style={{ fontSize: 'var(--fs-xl)', fontWeight: 500 }}>
         Michi ran into a problem
       </div>
@@ -131,22 +143,9 @@ function CrashFallback({ error, onReload }: { error: Error; onReload: () => void
       >
         {error.message}
       </pre>
-      <button
-        onClick={onReload}
-        style={{
-          background: 'var(--term-fg, #333)',
-          color: 'var(--term-bg, #f5f2ee)',
-          border: 'none',
-          borderRadius: 'var(--ui-radius)',
-          padding: '6px 16px',
-          fontFamily: 'var(--ui-font, system-ui, sans-serif)',
-          fontSize: 'var(--fs-md)',
-          cursor: 'pointer',
-          marginTop: 4,
-        }}
-      >
+      <Button variant="primary" onClick={onReload} style={{ marginTop: 4 }}>
         reload
-      </button>
+      </Button>
     </div>
   );
 }

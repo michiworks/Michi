@@ -41,6 +41,14 @@ export interface AgentTurnInput {
   /** Trusted, bounded Pages context rendered for the model only. */
   pageContext?: string;
   /**
+   * The host's standing instructions for the session (Michi: a workspace's
+   * Instructions) when they changed after the first-turn prefix carried
+   * them, or the session may have lost them. Rendered for the model only,
+   * ahead of memoryContext, and never kept in history. The host words the
+   * block, including that it replaces earlier ones; adapters send it as given.
+   */
+  instructionsContext?: string;
+  /**
    * Trusted, bounded memory block the host keeps for the user (Michi
    * Memory), rendered for the model only, ahead of pageContext, and never
    * kept in history. The host decides which turns carry one (for example a
@@ -257,6 +265,8 @@ export interface RuntimeSessionBootstrapOptions {
 export interface BranchContextMessage {
   role: 'user' | 'assistant';
   content: string;
+  /** Epoch ms the host stored it; the host's renderBranchContext places its per-turn summaries by it. */
+  createdAt?: number;
 }
 
 /**

@@ -4,15 +4,17 @@ import { openThreadFromSidebar } from '../fixtures/shell';
 
 // One density scale (index.css .terminal-pane[data-density]) drives the
 // transcript, its messages and the floating composer; these are its values.
+// Settings › Density (sidebarDensity) picks the step (state/density.ts).
+const STEP = { dense: 'compact', compact: 'comfortable', comfortable: 'airy' } as const;
 const SCALE = {
   dense: { top: 8, gutter: 22, font: '11px', leading: '15.95px', label: '9px', labelGap: '2px', pad: '4px', gap: '6px', inset: 18 },
   compact: { top: 12, gutter: 24, font: '12px', leading: '19.2px', label: '10px', labelGap: '3px', pad: '5px', gap: '10px', inset: 20 },
-  comfortable: { top: 16, gutter: 32, font: '13px', leading: '22.75px', label: '10.5px', labelGap: '4px', pad: '6px', gap: '16px', inset: 26 },
+  comfortable: { top: 16, gutter: 32, font: '13px', leading: '22.75px', label: '11px', labelGap: '4px', pad: '6px', gap: '16px', inset: 26 },
 } as const;
 
 async function boot(page: Page, density: keyof typeof SCALE) {
   await installMockApi(page);
-  await page.addInitScript((density) => {
+  await page.addInitScript((sidebarDensity) => {
     localStorage.setItem('michi:migrated', '1');
     localStorage.setItem('michi:v1:state', JSON.stringify({
       version: 6, activeProjectId: 'ws',
@@ -22,10 +24,10 @@ async function boot(page: Page, density: keyof typeof SCALE) {
       ] } },
       projects: [{ id: 'ws', name: 'Scale', chatIds: ['root'], edges: [], trees: [{ id: 'tree', rootNodeId: 'root', createdAt: 1, lastActiveAt: 1 }], activeTreeId: 'tree', artifacts: [], createdAt: 1 }],
     }));
-    localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, sidebarCollapsed: true, reduceMotion: true, paneTopFadeHeight: 20, terminalDensity: density }));
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, sidebarCollapsed: true, reduceMotion: true, sidebarDensity }));
     sessionStorage.setItem('michi:panes:open', JSON.stringify({ 'ws::tree': ['root'] }));
     sessionStorage.setItem('michi:panes:focus', JSON.stringify({ 'ws::tree': null }));
-  }, density);
+  }, STEP[density]);
   await page.goto('/');
   await openThreadFromSidebar(page, 'Density check');
   await expect(page.locator('.terminal-message-assistant')).toBeVisible();
@@ -57,7 +59,7 @@ for (const density of Object.keys(SCALE) as Array<keyof typeof SCALE>) {
     });
     const scale = SCALE[density];
     expect(measured).toEqual({
-      top: 20 + scale.top, gutter: [`${scale.gutter}px`, `${scale.gutter}px`], font: scale.font, leading: scale.leading,
+      top: 30 + scale.top, gutter: [`${scale.gutter}px`, `${scale.gutter}px`], font: scale.font, leading: scale.leading,
       label: scale.label, labelGap: scale.labelGap, pad: [scale.pad, scale.pad], gap: scale.gap, inset: [scale.inset, scale.inset],
     });
   });

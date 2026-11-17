@@ -1,6 +1,7 @@
 import React from 'react';
+import { useIsPresent } from 'motion/react';
 import { HOME_SECTION_SHORT_TITLES, type PageLayoutRule } from 'michi-shared';
-import { PopoverSurface } from '../../../ui/Popover';
+import { measureSurface, PopoverSurface } from '../../../ui/Popover';
 import { useBackLayer } from '../../../../lib/backStack';
 import { Button } from '../../../ui/controls';
 import { placeBelowAnchor, useAnchoredPosition } from '../../../ui/useAnchoredPosition';
@@ -26,8 +27,9 @@ export function layoutRuleMeta(rule: PageLayoutRule, name: string, now = Date.no
 
 /**
  * The page's layout rules hung from its ⋯ button: each rule's text, what it
- * binds and a Delete. Esc or a click outside closes it; focus goes back to
- * the button on Esc.
+ * binds and a Delete. Opening it focuses the preferences document, else the
+ * first Delete; Esc or a click outside closes it and gives focus back to the
+ * button.
  */
 export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences, onDelete, onClose }: {
   anchor: HTMLElement;
@@ -46,29 +48,42 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
   const editableDocument = Boolean(preferences);
   const closeRef = React.useRef(onClose);
   closeRef.current = onClose;
-  useBackLayer(true, { back: () => closeRef.current(true) });
+  // Closed, it fades out for a moment (PopoverSurface) and takes no keys, presses or Back.
+  const present = useIsPresent();
+  const initialFocus = React.useRef<HTMLElement | null>(null);
+  // The document's field arrives with its first read: it takes focus then, unless the person has moved it meanwhile.
+  const takeInput = React.useCallback((input: HTMLTextAreaElement | null) => {
+    const active = document.activeElement;
+    if (input && (active === initialFocus.current || active === anchor || active === document.body)) input.focus({ preventScroll: true });
+  }, [anchor]);
+  useBackLayer(present, { back: () => closeRef.current(true) });
 
   // Follows its button as the page scrolls or the window or its content resizes.
   useAnchoredPosition({ anchor, surfaceRef: surface, dependencies: [rules?.length, editableDocument], measure: () => {
-    const box = surface.current?.getBoundingClientRect();
-    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: box?.width || (editableDocument ? 440 : WIDTH), height: box?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
+    // The size it settles to, not the scaled box it grows in from.
+    const size = surface.current ? measureSurface(surface.current) : null;
+    const { left, top } = placeBelowAnchor(anchor.getBoundingClientRect(), { width: size?.width || (editableDocument ? 440 : WIDTH), height: size?.height || 0 }, { align: 'end', gap: GAP, pad: PAD });
     setPosition(current => current?.left === left && current.top === top ? current : { left, top });
   } });
 
   React.useEffect(() => {
-    surface.current?.querySelector<HTMLElement>('button:not(:disabled)')?.focus({ preventScroll: true });
+    if (!present) return;
+    const root = surface.current;
+    initialFocus.current = root?.querySelector<HTMLElement>('textarea:not(:disabled)') ?? root?.querySelector<HTMLElement>('button:not(:disabled)') ?? null;
+    initialFocus.current?.focus({ preventScroll: true });
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || isImeComposing(event)) return;
       event.preventDefault();
       event.stopPropagation();
       closeRef.current(true);
     };
+    // Focus inside goes back to the ⋯ button; focus elsewhere stays where it is.
+    const dismiss = () => closeRef.current(surface.current?.contains(document.activeElement) ?? false);
     const onPointer = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (target && (surface.current?.contains(target) || anchor.contains(target))) return;
-      closeRef.current(false);
+      dismiss();
     };
-    const dismiss = () => closeRef.current(false);
     document.addEventListener('keydown', onKey, true);
     document.addEventListener('pointerdown', onPointer, true);
     if (!editableDocument) window.addEventListener('resize', dismiss);
@@ -77,7 +92,7 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
       document.removeEventListener('pointerdown', onPointer, true);
       window.removeEventListener('resize', dismiss);
     };
-  }, [anchor, editableDocument]);
+  }, [present, anchor, editableDocument]);
 
   const remove = async (rule: PageLayoutRule) => {
     if (busy) return;
@@ -96,7 +111,6 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
     <PopoverSurface
       ref={surface}
       menuKind="context"
-      animate={false}
       width={preferences ? 440 : WIDTH}
       maxHeight={`calc(100vh - ${position?.top ?? PAD}px - ${PAD}px)`}
       left={position?.left ?? 0}
@@ -109,7 +123,7 @@ export function LayoutRulesPopover({ anchor, rules, error, readOnly, preferences
     >
       <ul className="michi-menu-list">
         <li className="michi-menu-section michi-doc-menu__caption" role="presentation">{preferences ? 'Layout preferences' : 'Layout rules'}</li>
-        {preferences && <li className="layout-rules-menu__document"><LayoutPreferencesEditor {...preferences} readOnly={readOnly} /></li>}
+        {preferences && <li className="layout-rules-menu__document"><LayoutPreferencesEditor {...preferences} readOnly={readOnly} inputRef={takeInput} /></li>}
         {preferences && <li className="michi-menu-section michi-doc-menu__caption" role="presentation">Existing rules</li>}
         {rules === null && !error && <li className="layout-rules-menu__note" role="status">Loading…</li>}
         {rules === null && error && <li className="layout-rules-menu__note" role="alert">{error}</li>}

@@ -47,10 +47,10 @@
  * types to it; one at a time, each stopped after the hidden-turn timeout and
  * preempted by a composing beacon (outcome `preempted`: its material waits
  * for the next turn). There is no heartbeat, goals cadence or quiet hours
- * (unification D3, D5): only these three, by priority:
+ * (unification D3, D5): only these, by priority:
  *   worker_report  a conversation the Companion delegated ended a turn with a
- *                  reply the user has not seen (after its brief or the last
- *                  follow-up the agent sent); a report that fails twice
+ *                  reply the user has not seen (after the last follow-up the
+ *                  agent sent); a report that fails twice
  *                  becomes a deterministic "Worker finished" notice. A
  *                  delegation stays followed after its report (DESIGN-v2 §4)
  *                  and closes when the user writes in it themselves, when it
@@ -59,12 +59,7 @@
  *   wake           interrupting items, or items that need the user, appeared:
  *                  after a minute of batching and at least ten minutes after
  *                  the last wake, not in away mode. What came in while away
- *                  is left to the brief and Today's "Since you left";
- *   brief          once a day of its own (brief.days) at its time (not
- *                  before the welcome's day is over, not away: then when the
- *                  user is back; the rule is briefSchedule.ts', which
- *                  status.nextBriefAt follows too). Michi's fallback when the
- *                  turn fails or it publishes nothing.
+ *                  is left to Today;
  * Cards the user decided and the goals ride along in the next turn's
  * material; they start no turn of their own.
  * The material of every turn leaves out the items of a source the user turned
@@ -82,7 +77,6 @@ import {
   COMPANION_LIMITS,
   COMPANION_POLL_MINUTES,
   companionCheckinTurnId,
-  type CompanionCatchUpDto,
   type CompanionConfigurableSource,
   type CompanionPresenceInput,
   type CompanionRunOutcome,
@@ -93,7 +87,6 @@ import {
 } from 'michi-shared';
 import { currentAssistantNodeId } from '../../assistant/store';
 import { log } from '../logger';
-import { writeFallbackBrief } from './briefFallback';
 import { settleAbandonedStarts } from './cards';
 import { checkinEngine } from './checkinEngine';
 import { CheckinPlanState, checkinRetryMs, lookForCheckin, settleCheckin, type CheckinGates, type CheckinPlan } from './checkinPlanner';
@@ -108,7 +101,6 @@ import { fireDueReminders } from './remindersEngine';
 import {
   COMPANION_FIRST_LOOK_WINDOW_MS,
   applySourcePoll,
-  briefForDate,
   cardDto,
   clearCompanionWelcomeDone,
   countTurnsSince,
@@ -116,7 +108,6 @@ import {
   expireCards,
   failInterruptedRuns,
   finishRun,
-  getBriefCurate,
   getCompanionMetaNumber,
   getCompanionNotesState,
   getItemByKey,
@@ -125,7 +116,6 @@ import {
   isCompanionWelcomeDone,
   isSourceBaselined,
   keepLatestQuietPoll,
-  latestCatchUp,
   latestEventSeq,
   latestFinishedRun,
   latestRunWithOutcome,
@@ -143,7 +133,6 @@ import {
   recordRun,
   reminderDto,
   resolveItems,
-  setBriefCurate,
   setCompanionMetaNumber,
   setRunTurnId,
   startRun,
@@ -413,7 +402,6 @@ class Coordinator implements CompanionCoordinator {
       requestWelcome: () => this.requestWelcome(),
       isBusy: () => this.isBusy(),
       status: () => this.status(),
-      catchUp: () => this.catchUp(),
     };
     if (deps.autoTick !== false) {
       // On the scheduler's engine its tick runs this one's deterministic step (checkinLane.ts), not this timer.
@@ -544,7 +532,7 @@ class Coordinator implements CompanionCoordinator {
     if (!settings.paused && !this.stopped) this.step('welcome after the first run', () => this.maybeStartQueuedWelcome());
     if (!settings.paused && !this.stopped) this.step('welcome again', () => this.maybeRetryWelcome(this.clock.now()));
     // The shadow reads its cursors before this coordinator's turns can move them (checkinShadow.ts).
-    if (!this.stopped) this.step('shadow cursors', () => this.shadow.prime(this.clock.now()));
+    if (!this.stopped) this.step('shadow cursors', () => this.shadow.prime());
     if (!settings.paused && !this.stopped) this.step('turns', () => this.maybeStartTurn(this.clock.now()));
     this.step('status', () => this.emitStatusIfChanged());
   }
@@ -975,7 +963,7 @@ class Coordinator implements CompanionCoordinator {
   private markWelcome(now: number): void {
     markCompanionWelcomeDone(now);
     const seq = latestEventSeq();
-    for (const key of ['companion:wake_cursor', 'companion:brief_cursor'] as const) {
+    for (const key of ['companion:wake_cursor'] as const) {
       if (getCompanionMetaNumber(key) === null) setCompanionMetaNumber(key, seq);
       else this.advance(key, seq);
     }
@@ -1247,9 +1235,9 @@ class Coordinator implements CompanionCoordinator {
    * held back (an off day, quiet hours, notifications off, a cap, its pane
    * on screen) stays followed too, its reply left to Today (D18): worker
    * reports skip that reply, so nothing repeats on every tick, and the Michi
-   * source shows it as a done item in Today and the next brief (R2.7: what a
-   * notice cannot say goes to the brief), while a later reply, to a
-   * follow-up, is reported as usual. It never closes for this.
+   * source shows it as a done item in Today (R2.7: what a notice cannot say
+   * is Today's), while a later reply, to a follow-up, is reported as usual.
+   * It never closes for this.
    */
   private reportWorkersByNotice(reports: readonly CompanionWorkerReport[], now: number, why: string): void {
     let sent = 0;
@@ -1267,7 +1255,7 @@ class Coordinator implements CompanionCoordinator {
     const held = reports.length - sent;
     const parts = [
       sent > 0 ? (sent === 1 ? 'a "Worker finished" notice instead' : `${sent} "Worker finished" notices instead`) : null,
-      held > 0 ? `${held === 1 ? 'one' : held} left to Today and the brief` : null,
+      held > 0 ? `${held === 1 ? 'one' : held} left to Today` : null,
     ].filter((part): part is string => part !== null);
     recordRun({ kind: 'worker_report', trigger: 'delegation', startedAt: now, outcome: 'skipped', finishedAt: now, detail: `${why}: ${parts.join(', ')}` });
     this.emit('activity');
@@ -1298,8 +1286,6 @@ class Coordinator implements CompanionCoordinator {
       focus: this.focus(settings, now),
       cardResults: listUnreportedCards().map(cardDto),
       reports: plan.kind === 'worker_report' ? plan.reports : [],
-      catchUp: latestCatchUp(now),
-      briefCurate: plan.kind === 'brief' ? getBriefCurate() || null : null,
       ...(plan.kind === 'welcome' ? { firstLook: this.firstLooks(settings) } : {}),
       ...(plan.kind === 'heartbeat' ? { following: listOpenDelegations() } : {}),
     };
@@ -1326,7 +1312,6 @@ class Coordinator implements CompanionCoordinator {
     this.planState.retryAfter.set(plan.kind, now + RULES_RETRY_MS);
     recordRun({ kind: plan.kind, trigger, startedAt: now, outcome: 'error', finishedAt: now, detail: 'Your rules could not be read; the Companion stays quiet until they can' });
     log.warn('scheduler', 'companion rules unreadable: no model turn', { kind: plan.kind });
-    if (plan.kind === 'brief') this.fallbackBrief(now, plan.cursor);
     this.emit('activity');
   }
 
@@ -1415,8 +1400,8 @@ class Coordinator implements CompanionCoordinator {
   }
 
   /**
-   * What a finished check-in covered: cursors, delegations, the day's brief
-   * and card outcomes. One the user's message superseded ran too (the model
+   * What a finished check-in covered: cursors, delegations and card
+   * outcomes. One the user's message superseded ran too (the model
    * saw its material; the user is in the conversation now), but a worker's
    * report it did not post is still owed. Its post went to the notice gate
    * already (posts.ts).
@@ -1427,22 +1412,11 @@ class Coordinator implements CompanionCoordinator {
     if (plan.kind !== 'welcome') {
       const ran = settleCheckin({
         plan, outcome, now, state: this.planState,
-        briefPublished: (date) => briefForDate(date)?.origin === 'llm',
         effects: {
           advance: (key, cursor) => this.advance(key, cursor),
           setMeta: (key, value) => setCompanionMetaNumber(key, value),
           markReported: (nodeId, messageId) => markDelegationReported(nodeId, messageId, now),
           reportByNotice: (reports) => this.reportWorkersByNotice(reports, now, 'The report failed twice'),
-          briefSettled: (brief, published) => {
-            if (published) {
-              // The user's "Tomorrow, focus on…" was for this brief.
-              setBriefCurate('');
-              this.briefWasTheLook(brief.cursor);
-            } else {
-              this.fallbackBrief(now, brief.cursor);
-            }
-            this.emit('brief');
-          },
         },
       });
       if (ran) reported();
@@ -1460,18 +1434,6 @@ class Coordinator implements CompanionCoordinator {
       if (outcome === 'quiet') this.planState.retryAfter.set('welcome', now + ERROR_RETRY_MS);
       this.welcomeDidNotSpeak();
     }
-  }
-
-  /** Michi's own brief for today (briefFallback.ts) when the Companion's cannot be had. */
-  private fallbackBrief(now: number, cursor: number): void {
-    const brief = writeFallbackBrief(now);
-    this.briefWasTheLook(cursor);
-    if (brief) this.emit('brief');
-  }
-
-  /** Today's brief covered everything up to `cursor`: the next brief starts after it. */
-  private briefWasTheLook(cursor: number): void {
-    this.advance('companion:brief_cursor', cursor);
   }
 
   // ── The service the routes use ────────────────────────────────────────────
@@ -1505,7 +1467,7 @@ class Coordinator implements CompanionCoordinator {
         await this.preemptRunner();
       }
     }
-    // Back from away mode: a brief that waited for the user may go now.
+    // Back from away mode: a check-in that waited for the user may go now.
     if (update.returned) this.scheduleTick();
   }
 
@@ -1569,10 +1531,6 @@ class Coordinator implements CompanionCoordinator {
     }
     const status = defaultCompanionStatus({ settings, now, working: this.working(), sources, auth });
     return this.firstLook() ? { ...status, firstLook: true } : status;
-  }
-
-  catchUp(): CompanionCatchUpDto | null {
-    return latestCatchUp(this.clock.now());
   }
 
   private emitStatusIfChanged(): void {

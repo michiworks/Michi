@@ -137,7 +137,11 @@ export function completedWithAnswer(snapshot: DurableTurnSnapshot): boolean {
 
 // ── Pure Functions ─────────────────────────────────────────────────────────
 
-/** Serialize a message's role-specific metadata to JSON for storage. */
+/**
+ * Serialize a message's role-specific metadata to JSON for storage. Metadata
+ * whose keys all hold undefined is none: the db worker receives snapshots by
+ * structured clone, which keeps such keys, where a JSON copy dropped them.
+ */
 export function durableMessageMetadata(message: DurableMessage): string | null {
   if (message.role === 'assistant') {
     const metadata = {
@@ -147,11 +151,14 @@ export function durableMessageMetadata(message: DurableMessage): string | null {
       ...(Array.isArray(message.plan) ? { plan: message.plan } : {}),
       ...(message.subagents?.length ? { subagents: message.subagents } : {}),
     };
-    return Object.keys(metadata).length > 0 ? jsonOrNull(metadata) : null;
+    return metadataJson(metadata);
   }
-  return message.metadata && Object.keys(message.metadata).length > 0
-    ? jsonOrNull(message.metadata)
-    : null;
+  return message.metadata ? metadataJson(message.metadata) : null;
+}
+
+function metadataJson(metadata: object): string | null {
+  const json = JSON.stringify(metadata);
+  return json === '{}' ? null : json;
 }
 
 /**
@@ -200,11 +207,4 @@ export function assertTurnIdentity(
  */
 export function terminalNodeStatus(snapshot: DurableTurnSnapshot): string {
   return snapshot.status === 'error' ? 'error' : 'idle';
-}
-
-// ── Internal helpers ───────────────────────────────────────────────────────
-
-function jsonOrNull(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  return JSON.stringify(value);
 }

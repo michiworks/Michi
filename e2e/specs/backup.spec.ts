@@ -36,6 +36,8 @@ test('exports a backup and restores only after preview confirmation', async ({ p
   await expect(settings.getByRole('button', { name: 'Reload Michi' })).toBeVisible();
   expect(imports).toBe(1);
   await page.setViewportSize({ width: 390, height: 844 });
+  // The window gives way to the phone's drawer once the page handles the resize.
+  await expect(settings).toHaveAttribute('data-stacked', '');
   const content = settings.locator('.terminal-settings-content');
   expect(await content.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
 });

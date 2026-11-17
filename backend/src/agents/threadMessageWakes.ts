@@ -58,6 +58,7 @@ import {
   sanitizeThreadTitle,
   type DurableMessageMetadata,
   type ThreadReplyOutcome,
+  type WorkspaceStructureChangedEvent,
 } from "michi-shared";
 import { chatTargetUnavailable, type ChatTargetUnavailable } from "../services/chatTarget";
 import { getNode } from "../services/dbRepository";
@@ -73,6 +74,7 @@ import {
   releaseThreadWake,
   settleStoppedTurnWakes,
   settleThreadWake,
+  settleUnbegunThreadWake,
   threadTurnReceipt,
   type NewThreadWake,
   type ThreadTurnReceipt,
@@ -155,6 +157,36 @@ export function settleStoppedThreadWakes(turnId: string): void {
     if (settled.callerCancelled || settled.targetCancelled) log.info("chat", "thread reply wakes cancelled by stop", { turnId, ...settled });
   } catch (error) {
     log.warn("chat", "thread reply wakes not cancelled on stop", { turnId, error: errorMessage(error) });
+  }
+}
+
+/**
+ * A structure frame archived or deleted chats, threads or workspaces
+ * (server.ts): every open wake whose sender is now archived, in the Trash or
+ * gone settles undeliverable with its delivery's detail. Putting the sender
+ * away ends its wait for the reply, so a sender restored before the reply
+ * comes is not woken by it. A wake whose reply turn already began is left
+ * to its delivery. Never throws.
+ */
+export function settleRetiredSenderWakes(frame: WorkspaceStructureChangedEvent): void {
+  const retiring = frame.resync === true
+    || frame.changes.some((change) => change.op === "archived" || change.op === "deleted" || change.op === "purged");
+  if (!retiring) return;
+  try {
+    let settled = 0;
+    for (let after: string | null = null; ;) {
+      const records = listOpenThreadWakes(after, 100);
+      for (const record of records) {
+        const unavailable = chatTargetUnavailable(getNode(record.callerNodeId));
+        if (!unavailable || unavailable === "not_chat" || unavailable === "moved") continue;
+        if (settleUnbegunThreadWake(record.targetTurnId, SENDER_UNAVAILABLE[unavailable])) settled += 1;
+      }
+      if (records.length < 100) break;
+      after = records[records.length - 1].targetTurnId;
+    }
+    if (settled > 0) log.info("chat", "thread reply wakes of retired senders settled", { count: settled });
+  } catch (error) {
+    log.warn("chat", "thread reply wakes of retired senders not settled", { error: errorMessage(error) });
   }
 }
 

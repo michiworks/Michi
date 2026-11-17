@@ -16,8 +16,8 @@ function Contents({ settleOnCommit = false }: { settleOnCommit?: boolean }) {
   React.useLayoutEffect(() => {
     if (settleOnCommit) return afterPaneMotion(null, visual.settleFocus);
   });
-  const a = usePaneShellStyle('a');
-  const b = usePaneShellStyle('b');
+  const a = usePaneShellStyle('a').style;
+  const b = usePaneShellStyle('b').style;
   return <><output data-testid="focus">{visual.focusedPane ?? 'none'}</output>
     <div data-testid="a" style={a} /><div data-testid="b" style={b} /></>;
 }

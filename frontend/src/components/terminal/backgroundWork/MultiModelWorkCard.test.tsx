@@ -366,11 +366,11 @@ describe('MultiModelWorkCard', () => {
     const synthesis = screen.getByTestId('multi-model-synthesis');
     expect(synthesis.textContent).toContain('Synthesis · Opus 5.5');
     expect(synthesis.textContent).toContain('Queue after every turn, run in idle batches.');
-    expect(screen.getAllByTestId('multi-model-step')[2].textContent).toContain('✓ Written to the chat');
+    expect(screen.getAllByTestId('multi-model-step')[2].textContent).toContain(' Written to the chat');
     expect(screen.queryByRole('button', { name: 'Stop all' })).toBeNull();
     expect(screen.getByTestId('background-workflow-row').textContent).toContain('186k tokens');
 
-    fireEvent.click(within(synthesis).getByRole('button', { name: 'View in chat ↗' }));
+    fireEvent.click(within(synthesis).getByRole('button', { name: 'View in chat' }));
     expect(chat.actions!.revealNode).toHaveBeenLastCalledWith('caller', { messageId: 'self-caller-mm-syn' });
     expect(onClose).toHaveBeenCalledTimes(1);
 
@@ -471,7 +471,7 @@ describe('MultiModelWorkCard', () => {
     const button = rowButton('t3', 0);
     const notice = within(button).getByTestId('multi-model-notice');
     expect(notice.textContent).toBe('The approval waited 5 minutes, so Codex denied it.');
-    expect(notice.style.color).toBe('var(--term-select)');
+    expect(notice.style.color).toBe('var(--term-waiting-text)');
     expect(row('t3', 0).dataset.status).toBe('completed');
     expect(button.textContent).toContain('Answered');
     expect(button.getAttribute('aria-label')).toBe('Pi · Gemini 4 Argon, Answered: The command was denied. The approval waited 5 minutes, so Codex denied it.');
@@ -511,7 +511,7 @@ describe('MultiModelWorkCard', () => {
     expect(screen.queryByTestId('multi-model-synthesis')).toBeNull();
     const steps = screen.getAllByTestId('multi-model-step');
     expect(steps[2].dataset.stepState).toBe('stopped');
-    expect(steps[2].textContent).toBe('■SynthesisStopped while writing the synthesis');
+    expect(steps[2].textContent).toBe('SynthesisStopped while writing the synthesis');
     await act(async () => { fireEvent.click(within(screen.getByTestId('multi-model-status')).getByRole('button', { name: 'Retry' })); });
     expect(apiCalls.retryMultiModelRun).toHaveBeenCalledWith('local', 'wfr_1');
   });
@@ -539,15 +539,15 @@ describe('MultiModelWorkCard', () => {
     const { push, onClose } = setup(run(lateWork));
     expect(screen.getByTestId('background-workflow-status').textContent).toMatch(/^Adding 1 late answer/);
     expect(screen.getByTestId('multi-model-synthesis').textContent).toContain('Queue after every turn, run in idle batches.');
-    expect(within(screen.getByTestId('multi-model-synthesis')).getByRole('button', { name: 'View in chat ↗' })).toBeTruthy();
+    expect(within(screen.getByTestId('multi-model-synthesis')).getByRole('button', { name: 'View in chat' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Stop all' })).toBeTruthy();
 
     const added = { ...done(), lastMessageId: 'self-caller-mm-add', synthesis: { ...done().synthesis, addenda: 1, lastAddendumStatus: 'completed' as const } };
     added.threads = added.threads.map((entry) => (entry.key === 't2' ? lateRow('completed') : entry));
     push(run(added, { revision: 4, endedAt: 600_000 }));
     const addendum = screen.getByTestId('multi-model-addendum');
-    expect(addendum.textContent).toBe('✓ Added 1 late answer to the synthesisView ↗');
-    fireEvent.click(within(addendum).getByRole('button', { name: 'View ↗' }));
+    expect(addendum.textContent).toBe(' Added 1 late answer to the synthesisView');
+    fireEvent.click(within(addendum).getByRole('button', { name: 'View' }));
     expect(chat.actions!.revealNode).toHaveBeenLastCalledWith('caller', { messageId: 'self-caller-mm-add' });
     expect(onClose).toHaveBeenCalledTimes(1);
 
@@ -581,6 +581,6 @@ describe('MultiModelWorkCard', () => {
     fireEvent.click(rowButton('t1', 0));
     expect(screen.queryByRole('button', { name: 'Open branch →' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Side by side' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'View in chat ↗' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'View in chat' })).toBeNull();
   });
 });

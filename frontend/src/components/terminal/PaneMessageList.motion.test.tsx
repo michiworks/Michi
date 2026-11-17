@@ -92,6 +92,8 @@ describe('PaneMessageList message motion', () => {
     const { container, rerender } = render(list(hydrated, { editingMessageId: 'u-old' }));
     const answer = frame(container, 'a-old');
     expect(answer.style.opacity).toBe('0.38');
+    // Opacity only: the dimmed messages keep their colours (MO-16).
+    expect(answer.style.filter).toBe('');
     expect(answer.style.transition).toContain('opacity');
 
     rerender(list(hydrated, { editingMessageId: null }));
@@ -204,18 +206,18 @@ describe('PaneMessageList message motion', () => {
     const prefs = { ...DEFAULT_PREFS, enableFollowUps: true };
     const before: ChatNodeState = { ...hydrated, followUps: ['Dig into the cache'] };
     const { rerender } = render(list(before, { prefs }));
-    fireEvent.click(screen.getByRole('button', { name: 'Collapse follow-ups' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Explore further' }));
     const sent = reduce(before, { type: 'user-send', nodeId: 'n1', assistantId: 'a-local', userText: 'next' });
     rerender(list(sent, { prefs }));
     rerender(list({ ...sent, status: 'idle', followUps: ['And then?'] }, { prefs }));
-    expect(screen.getByRole('button', { name: 'Expand follow-ups' }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Explore further' }).getAttribute('aria-expanded')).toBe('false');
   });
 
   it('spins the follow-ups loader (motion-safe only)', () => {
     render(list({ ...hydrated, status: 'streaming', followUpsGenerating: true }, {
       prefs: { ...DEFAULT_PREFS, enableFollowUps: true },
     }));
-    expect(screen.getByText('Preparing next steps...')).not.toBeNull();
+    expect(screen.getByText('Preparing next steps…')).not.toBeNull();
     const loader = document.querySelector('.t-followups-loading svg');
     expect(loader?.getAttribute('class')).toContain('motion-safe:animate-spin');
   });

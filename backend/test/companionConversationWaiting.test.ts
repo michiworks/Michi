@@ -20,7 +20,7 @@ test('V\'s requests, their answers and the end of a turn that waited reach the t
   const bus = new CompanionEventBus({ current: () => revision, bump: () => ++revision });
   const reasons: string[] = [];
   bus.subscribe({ changed: (event) => reasons.push(event.reason) });
-  const stop = watchConversationWaiting({ hub, bus, conversationNodeId: () => 'n-v' });
+  const stop = watchConversationWaiting({ hub, bus, conversationNodeId: () => 'n-v', resolveWaitingItem: () => false });
   send!('n-v', ev('permission_request', { nodeId: 'n-v', turnId: 't1', requestId: 1 }));
   send!('n-v', ev('permission_resolved', { nodeId: 'n-v', turnId: 't1', requestId: 1 }));
   send!('n-v', ev('user_input_request', { nodeId: 'n-v', turnId: 't1', requestId: 2 }));

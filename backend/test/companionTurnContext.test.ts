@@ -6,7 +6,7 @@ import { enableSyntheticCompanionSources } from './helpers/companionSources';
  * services/companion/turnContext.ts:
  * - [COMPANION CONTEXT] quotes only the user's own words and Michi's facts:
  *   nothing a check-in wrote reaches it (its notes, the goals it worded, goal
- *   readings, the brief, card summaries and reasons, posts' text and
+ *   readings, card summaries and reasons, posts' text and
  *   reasons, item titles from the sources), while the user's rules, goals and
  *   notes do;
  * - the standing blocks (rules, goals, notes, sources off) go on a live
@@ -37,7 +37,6 @@ import {
   addGoal,
   decideCard,
   editGoal,
-  insertBrief,
   listUnreportedCards,
   listUntoldPosts,
   recordGoalProgress,
@@ -165,8 +164,6 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message (§3.5)', () => {
       const checkinGoal = editGoal({ action: 'add', text: `${S} goal: close the launch review`, origin: 'checkin' }, T0);
       recordGoalProgress(userGoal.id, `${S} reading: two of five merged`, T0);
       setNotesByCompanion(`${S} notes: watch CR-1`, 0, 'checkin');
-      insertBrief({ date: localDateKey(T0), headline: `${S} headline`, cards: [{ title: `${S} card title`, body: `${S} card body`, itemIds: [], action: null }],
-        closing: `${S} closing`, origin: 'llm', now: T0 - HOUR });
       const waiting = proposeCompanionCard({ kind: 'rules.update', payload: { rules: `${S} rule` }, reason: `${S} card reason` }, T0 - HOUR);
       const decided = proposeCompanionCard({ kind: 'goal.add', payload: { text: `${S} proposed goal` }, reason: `${S} decided reason` }, T0 - 2 * HOUR);
       decideCard(decided.id, 'applied', T0 - 30 * 60_000);
@@ -188,7 +185,7 @@ describe('[COMPANION CONTEXT] ahead of the user\'s own message (§3.5)', () => {
       // Michi's facts and the user's own words are there.
       assert.match(prefix, /Your name is Michi\./);
       assert.match(prefix, /\[CURRENT RUN TIME\][^\n]*2026-11-05T09:12[+-]\d\d:\d\d/);
-      assert.match(prefix, /Michi's feed: 1 item waiting on the user, 1 new since they last looked; 1 card of yours waiting for their answer; today's brief: published at 08:12 \(read it with companion_read\)\./);
+      assert.match(prefix, /Michi's feed: 1 item waiting on the user, 1 new since they last looked; 1 card of yours waiting for their answer\./);
       assert.match(prefix, new RegExp(`\\[CARD RESULTS[^\\n]*\\]\\n- goal\\.add card ${decided.id}: applied by the user`));
       assert.match(prefix, new RegExp(`\\[YOUR CARDS STILL WAITING FOR THE USER[^\\n]*\\]\\n- ${waiting.id}: rules\\.update, proposed `));
       assert.match(prefix, new RegExp(`\\[CHECK-INS SINCE THE USER'S LAST MESSAGE[^\\n]*\\]\\n- 08:12 heartbeat: snoozed item cmi-1; added goal ${checkinGoal.id}; changed page pg-1 "Tasks" \\(2 applied, 1 proposed\\)`));

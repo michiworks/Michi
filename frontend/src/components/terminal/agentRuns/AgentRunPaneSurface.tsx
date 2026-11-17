@@ -4,14 +4,12 @@ import { agentResourceKey } from '../../../state/agentIdentity';
 import { useChatActions } from '../../../state/chatStore';
 import { useAgentDomain } from '../../../state/agentDomain';
 import { getAgentRunDetail, respondAgentRunInteraction } from '../../../services/api';
+import { Button } from '../../ui/controls';
 import { AgentRunPane } from './AgentRunPane';
 
 type Detail = Awaited<ReturnType<typeof getAgentRunDetail>>;
 type LoadState = { identity: object; status: 'loading' | 'error' | 'ready'; error: string | null; attempts: Detail['value']['attempts'] };
-const statusButtonStyle: React.CSSProperties = {
-  marginTop: 10, marginRight: 8, padding: '4px 8px', border: '1px solid var(--term-line)',
-  background: 'var(--term-surface)', color: 'var(--term-fg)', font: 'inherit', cursor: 'pointer',
-};
+const STATUS_BUTTON: React.CSSProperties = { marginTop: 10, marginRight: 8 };
 
 export default function AgentRunPaneSurface({ item }: { item: AgentRunPaneItem }) {
   const { closePane } = useChatActions();
@@ -80,8 +78,8 @@ export default function AgentRunPaneSurface({ item }: { item: AgentRunPaneItem }
       {(error || !resource) && (
         <div style={{ padding: 16, color: 'var(--term-muted)', fontSize: 'var(--fs-sm)' }}>
           {error ? <div role="alert">{currentLoad?.error && !currentAction?.error ? `Could not load Agent Run details: ${error}` : error}</div> : <div role="status">Loading Agent Run…</div>}
-          {error && <button type="button" style={statusButtonStyle} disabled={loading || currentAction?.status === 'pending'} onClick={() => { void refresh(); }}>Check current status</button>}
-          {!resource && <button type="button" style={statusButtonStyle} aria-label="Close Run Pane" onClick={() => closePane(item.id)}>Close</button>}
+          {error && <Button size="sm" style={STATUS_BUTTON} disabled={loading || currentAction?.status === 'pending'} onClick={() => { void refresh(); }}>Check current status</Button>}
+          {!resource && <Button size="sm" style={STATUS_BUTTON} aria-label="Close Run Pane" onClick={() => closePane(item.id)}>Close</Button>}
         </div>
       )}
       {resource && target && <div style={{ flex: 1, minHeight: 0 }}><AgentRunPane
@@ -90,9 +88,11 @@ export default function AgentRunPaneSurface({ item }: { item: AgentRunPaneItem }
         events={state.eventsByRun[agentResourceKey(identity)] ?? []}
         interactions={state.interactionsByRun[agentResourceKey(identity)] ?? []}
         onClose={() => closePane(item.id)}
-        onCancel={currentAction ? undefined : () => { void performAction(() => cancel(target, { version: 1, expectedAttemptId: resource.value.activeAttemptId, reason: null }), 'Cancellation'); }}
-        onSendInput={currentAction ? undefined : (_, request) => { void performAction(() => sendInput(target, request), 'Input'); }}
-        onRespondInteraction={currentAction ? undefined : (_, interaction, response) => { void performAction(() => respondAgentRunInteraction(target, interaction.id, { version: 1, response }), 'Interaction response'); }}
+        // While an action is in flight or its outcome is unconfirmed, the controls stay, aria-disabled.
+        busy={!!currentAction}
+        onCancel={() => { void performAction(() => cancel(target, { version: 1, expectedAttemptId: resource.value.activeAttemptId, reason: null }), 'Cancellation'); }}
+        onSendInput={(_, request) => { void performAction(() => sendInput(target, request), 'Input'); }}
+        onRespondInteraction={(_, interaction, response) => { void performAction(() => respondAgentRunInteraction(target, interaction.id, { version: 1, response }), 'Interaction response'); }}
       /></div>}
     </div>
   );

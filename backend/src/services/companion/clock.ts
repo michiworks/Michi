@@ -1,5 +1,5 @@
 /**
- * Local wall-clock arithmetic for the Companion: the brief's
+ * Local wall-clock arithmetic for the Companion: a check-in's
  * time and date, "today" for the turn budget, and the times its tools take
  * and its notes give (DESIGN-v2 §3.9 conv-2: a local `YYYY-MM-DD HH:MM` or
  * `+90m`, converted here; the run time as ISO 8601 with the offset).

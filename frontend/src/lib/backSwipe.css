@@ -9,7 +9,7 @@
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   border: 1px solid var(--term-line);
   background: var(--term-surface);
   color: var(--term-muted);

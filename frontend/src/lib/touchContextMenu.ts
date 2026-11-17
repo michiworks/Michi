@@ -16,6 +16,11 @@
  * The click that ends a long press belongs to the same pointer sequence and is
  * dropped wherever it lands: on the row (which would open it), on the menu's
  * scrim, or on a menu item that appeared under the finger.
+ *
+ * A control inside a target that takes its own press (`[data-own-press]`, a
+ * card row's caret column) keeps it: a finger there presses the control at
+ * once instead (`data-press` on it, until the finger lifts or drifts), and
+ * neither the timer nor the browser opens the target's menu.
  */
 
 import { prefersReducedMotion } from '../hooks/useReducedMotion';
@@ -36,6 +41,9 @@ const ANCHOR_RECENT_MS = 1500;
 const TARGET = '[data-context-target]';
 /** Fields keep their own long press (selecting text, the edit callout). */
 const OWN_LONG_PRESS = 'input, textarea, select, [contenteditable=""], [contenteditable="true"]';
+/** A control inside a target that takes its own press (a card row's caret
+ *  column): a press there neither presses nor long-presses the target. */
+const OWN_PRESS = '[data-own-press]';
 
 type HoldPoint = { clientX: number; clientY: number };
 type HoldListener = (point: HoldPoint, phase: 'move' | 'up') => void;
@@ -56,6 +64,8 @@ interface Press {
 
 let installs = 0;
 let press: Press | null = null;
+/** A finger down on an OWN_PRESS control: the control shows the press, and the browser's long press there opens nothing. */
+let ownPress: { pointerId: number; el: Element; x: number; y: number } | null = null;
 let pointerSeq = 0;
 let firedSeq = -1;
 let releasedAt = 0;
@@ -170,6 +180,11 @@ function cancelPress(): void {
   press = null;
 }
 
+function releaseOwnPress(): void {
+  ownPress?.el.removeAttribute('data-press');
+  ownPress = null;
+}
+
 function fire(p: Press): void {
   if (press !== p) return;
   p.fired = true;
@@ -202,6 +217,7 @@ function fire(p: Press): void {
 function onPointerDown(event: PointerEvent): void {
   if (!event.isPrimary) return;
   pointerSeq += 1;
+  releaseOwnPress();
   const target = event.target instanceof Element ? event.target : null;
   const anchor = target?.closest<HTMLElement>(TARGET) ?? null;
   if (anchor) lastAnchor = { el: anchor, at: performance.now() };
@@ -209,6 +225,12 @@ function onPointerDown(event: PointerEvent): void {
   if (!target || !anchor || event.pointerType === 'mouse' || event.button !== 0) return;
   if (target.closest(OWN_LONG_PRESS)) return;
   cancelPress();
+  const own = target.closest(OWN_PRESS);
+  if (own) {
+    own.setAttribute('data-press', '');
+    ownPress = { pointerId: event.pointerId, el: own, x: event.clientX, y: event.clientY };
+    return;
+  }
   const p: Press = {
     pointerId: event.pointerId,
     pointerType: event.pointerType,
@@ -241,10 +263,15 @@ function onPointerMove(event: PointerEvent): void {
     && Math.hypot(event.clientX - p.x, event.clientY - p.y) > LONG_PRESS_SLOP) {
     cancelPress();
   }
+  if (ownPress && event.pointerId === ownPress.pointerId
+    && Math.hypot(event.clientX - ownPress.x, event.clientY - ownPress.y) > LONG_PRESS_SLOP) {
+    releaseOwnPress();
+  }
   if (holding === event.pointerId && holdBy === 'pointer') notifyHold(event, 'move');
 }
 
 function onPointerEnd(event: PointerEvent): void {
+  if (event.pointerId === ownPress?.pointerId) releaseOwnPress();
   const p = press;
   if (p && event.pointerId === p.pointerId) {
     if (p.fired) {
@@ -261,6 +288,11 @@ function onPointerEnd(event: PointerEvent): void {
 function onContextMenu(event: MouseEvent): void {
   // Our own dispatch, or a right-click (no touch press): nothing to fold together.
   if (dispatched.has(event)) return;
+  if (ownPress) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const p = press;
   if (!p) return;
   if (p.fired) {
@@ -307,6 +339,7 @@ export function installTouchContextMenu(): () => void {
     cancelPress();
     endHold();
     firedSeq = -1;
+    releaseOwnPress();
     lastAnchor = null;
     window.removeEventListener('pointerdown', onPointerDown, true);
     window.removeEventListener('pointermove', onPointerMove, true);

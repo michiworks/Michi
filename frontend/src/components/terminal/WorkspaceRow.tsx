@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Ellipsis } from 'lucide-react';
+import { flushSync } from 'react-dom';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
 import { Row } from './primitives';
 import { usePrefs } from '../../state/prefs';
@@ -7,10 +7,11 @@ import WorkspaceIcon, { modeForPalette } from './WorkspaceIcon';
 import { workspaceAccent } from './workspaceAccent';
 import ThreadRow, { CARD_FILL, PinMark } from './ThreadRow';
 import { rowGeom, spinePadding, branchBlockGap, WORKSPACE_ICON_GAP, WORKSPACE_ICON_SIZE, type RowGeom } from './sidebarRowStyle';
-import { FolderIcon, FolderOpenIcon } from './icons';
+import { ChevronRightIcon, FolderIcon, FolderOpenIcon, MoreIcon, PlusIcon } from './icons';
 import BranchRow from './BranchRow';
-import { UnreadDot, UNREAD_DOT_LEAD } from './UnreadDot';
+import { UnreadDot } from './UnreadDot';
 import { SidebarOpenRail } from './RailAfterglow';
+import { RowAttentionChip, attentionLabel } from './RowAttentionChip';
 import ContextMenu, { MenuPresence, menuOpenKey } from '../ContextMenu';
 import { HoverTip } from '../ui/Popover';
 import { InlineRenameInput } from '../ui/InlineRenameInput';
@@ -22,11 +23,14 @@ import {
   nodeOpenState,
   selectProjectNodeStatuses,
   subtreeOpenState,
+  workspaceAttention,
   workspaceHasUnread,
   treeHasUnread,
   orderPinnedFirst,
+  flattenBranches,
   type NodePinnedAt,
   type OpenState,
+  type RowAttention,
 } from '../../state/sidebarSelectors';
 import { useRunningWorkNodeIds } from '../../state/runningWork';
 import { getKnownBackendConnections } from '../../config/backendConnections';
@@ -82,6 +86,12 @@ export interface WorkspaceRowDndProps {
   onDragEnd: (e: React.DragEvent) => void;
 }
 
+/** What a drag does without dragging: one place up or down the row's list, where it can go. */
+export interface WorkspaceRowMove {
+  up?: () => void;
+  down?: () => void;
+}
+
 interface Props {
   project: Project;
   workspaceExpanded: boolean;
@@ -106,6 +116,8 @@ interface Props {
   edges: readonly ProjectEdge[];
   actions: Actions;
   dnd?: WorkspaceRowDndProps;
+  /** Move up / Move down in the menu and ⌥↑ / ⌥↓ on the row (WCAG 2.5.7). */
+  move?: WorkspaceRowMove;
   /** When true (filter mode), force-expand the workspace and show only unread threads. */
   forceExpand?: boolean;
   /** The nodeId currently in inline-rename mode (or null). */
@@ -114,7 +126,8 @@ interface Props {
   onRenameNode?: (nodeId: string, title: string) => void;
   /** Clear the renaming state. */
   onRenameEnd?: () => void;
-
+  /** The row is in the phone drawer: a thread's branches are drawn at one level (ST-36). */
+  phoneDrawer?: boolean;
 }
 
 export default function WorkspaceRow({
@@ -134,14 +147,16 @@ export default function WorkspaceRow({
   edges,
   actions,
   dnd,
+  move,
   forceExpand = false,
   renamingNodeId,
   onRenameNode,
   onRenameEnd,
+  phoneDrawer = false,
 }: Props) {
   const { prefs } = usePrefs();
   const prefetchIntent = useTreePrefetchIntent(project.trees.find((tree) => tree.id === project.activeTreeId)?.rootNodeId ?? null);
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const accent = workspaceAccent(project.id);
   // When chat view is hidden (Map/Digest/etc.), surface a subtle marker on the
   // active workspace row so the user knows which workspace context they're in.
@@ -186,6 +201,8 @@ export default function WorkspaceRow({
               new CustomEvent('michi:open-workspace-manage', { detail: { projectId } }),
             );
           },
+          moveUp: move?.up,
+          moveDown: move?.down,
         },
       })
     : [];
@@ -217,8 +234,9 @@ export default function WorkspaceRow({
   const wsUnread = useStructuralSelector(
     (nodes) => workspaceHasUnread(project, nodes, focusedNodeId, branchChildrenOf),
   );
-  // A workspace is never unread itself: it carries a ring while collapsed over
-  // an unread thread, and nothing once open (its rows show their own dots).
+  // A workspace is never unread itself: while collapsed over an unread thread
+  // it marks it (card modes: a green rail, like its threads; Classic: a ring
+  // after the name), and nothing once open (its rows show their own).
   const wsUnreadMark = wsUnread && !(workspaceExpanded || forceExpand) ? 'within' : 'none';
   // When filter mode is on, compute which trees have unread so we can show only those.
   const unreadTreeIds = useStructuralSelector(
@@ -290,6 +308,16 @@ export default function WorkspaceRow({
       }, 'none')
     : 'none';
 
+  // Folded, the workspace says the strongest thing inside it needs (R2): a
+  // thread waiting on you, else one whose last turn failed. Open, its rows say
+  // it themselves.
+  const wsAttentionSelector = useCallback(
+    (nodes: Record<string, ChatNodeState>): RowAttention =>
+      workspaceExpanded || forceExpand ? 'none' : workspaceAttention(project, nodes, focusedNodeId, Date.now(), branchChildrenOf),
+    [workspaceExpanded, forceExpand, project, focusedNodeId, branchChildrenOf],
+  );
+  const wsAttention = useStructuralSelector(wsAttentionSelector);
+
   return (
     <div
       data-testid={`workspace-row-${project.id}`}
@@ -303,7 +331,7 @@ export default function WorkspaceRow({
       onDragEnd={dnd?.onDragEnd}
       style={{
         position: 'relative',
-        opacity: dnd?.isDragSource ? 0.5 : 1,
+        opacity: dnd?.isDragSource ? 0.45 : 1,
         marginTop: 'var(--sb-ws-gap, 6px)',
       }}
     >
@@ -333,7 +361,7 @@ export default function WorkspaceRow({
         className={geom.workspaceAsHeader ? 't-row-focus ws-head' : 't-row-focus'}
         data-menu-open={menu ? '' : undefined}
         // Its name, not the ⋯ and + buttons inside it.
-        aria-label={project.name}
+        aria-label={attentionLabel([project.name], wsAttention)}
         aria-expanded={workspaceExpanded || forceExpand}
         active={false}
         onClick={() => {
@@ -347,6 +375,14 @@ export default function WorkspaceRow({
             expanded: forceExpand ? undefined : workspaceExpanded,
             toggle: () => actions.toggleWorkspace(project.id),
             openMenu: (anchor) => setMenu(anchor),
+            move: (direction) => {
+              const run = direction < 0 ? move?.up : move?.down;
+              if (!run) return;
+              const row = e.currentTarget;
+              // A row moved down is taken out and put back, which drops its focus.
+              flushSync(run);
+              if (document.activeElement !== row) row.focus();
+            },
           });
         }}
         onContextMenu={(e) => {
@@ -411,12 +447,6 @@ export default function WorkspaceRow({
             workspace is collapsed, open when its threads are showing. Neutral
             ink rather than a per-workspace hue; the active workspace's glyph is
             the darker one. */}
-        {/* Card modes: in the gutter left of the folder glyph, on the same
-            column as the thread dots. Classic has no gutter here (the folder
-            glyph starts 4px in), so it shows the ring after the name instead. */}
-        {geom.workspaceAsHeader && (
-          <UnreadDot mark={wsUnreadMark} left={geom.titleX - geom.inset - UNREAD_DOT_LEAD} />
-        )}
         {geom.workspaceAsHeader && (
           <span
             aria-hidden
@@ -445,6 +475,7 @@ export default function WorkspaceRow({
         {renaming ? (
           <InlineRenameInput
             ref={renameRef}
+            aria-label="Workspace name"
             value={project.name}
             onCommit={(name) => actions.renameProject(project.id, name)}
             onEnd={() => setRenaming(false)}
@@ -457,7 +488,8 @@ export default function WorkspaceRow({
               color: 'var(--term-fg)',
               fontFamily: 'var(--ui-font)',
               background: 'var(--term-alt)',
-              border: '1px solid var(--term-line)',
+              // Mounted only while it holds focus: the accent border is its focus cue.
+              border: '1px solid var(--term-accent)',
               outline: 'none',
               padding: '1px 4px',
             }}
@@ -490,15 +522,13 @@ export default function WorkspaceRow({
               >
                 {project.name}
               </span>
-              {!geom.workspaceAsHeader && wsUnreadMark !== 'none' && (
-                <UnreadDot mark={wsUnreadMark} inline />
-              )}
+              {!geom.workspaceAsHeader && <UnreadDot mark={wsUnreadMark} inline />}
               {project.backendConnectionId && (
                 <span
                   title={`Remote backend: ${getKnownBackendConnections().find((connection) => connection.id === project.backendConnectionId)?.name ?? project.backendConnectionId}`}
                   style={{
                     fontSize: 'var(--fs-2xs)',
-                    color: 'var(--term-accent)',
+                    color: 'var(--term-accent-text)',
                     fontFamily: 'var(--ui-font)',
                     flexShrink: 0,
                     padding: '0 4px',
@@ -527,6 +557,7 @@ export default function WorkspaceRow({
                 </span>
               )}
               {project.pinnedAt && <PinMark />}
+              <RowAttentionChip attention={wsAttention} />
               <span
                 className="ws-hover-chevron"
                 aria-hidden
@@ -541,9 +572,7 @@ export default function WorkspaceRow({
                   ...(menu ? { opacity: 1, pointerEvents: 'auto' as const } : {}),
                 }}
               >
-                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M6 3l5 5-5 5" />
-                </svg>
+                <ChevronRightIcon size="sm" />
               </span>
             </span>
             <span className="ws-hover-actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0, ...(menu ? { opacity: 1, pointerEvents: 'auto' as const } : {}) }}>
@@ -561,7 +590,7 @@ export default function WorkspaceRow({
                   setMenu((open) => (open?.trigger === trigger ? null : { x: rect.left, y: rect.bottom + 4, trigger }));
                 }}
               >
-                <Ellipsis size={16} aria-hidden="true" />
+                <MoreIcon size="lg" />
               </button>
               </HoverTip>
               <HoverTip label="New chat in this workspace">
@@ -575,13 +604,13 @@ export default function WorkspaceRow({
                   window.dispatchEvent(new CustomEvent('michi:goto-home'));
                 }}
               >
-                +
+                <PlusIcon />
               </button>
               </HoverTip>
             </span>
           </>
         )}
-        <SidebarOpenRail state={workspaceOpenState} isCard={geom.isCard} />
+        <SidebarOpenRail state={workspaceOpenState} isCard={geom.isCard} unread={geom.isCard ? wsUnreadMark : 'none'} waiting={wsAttention === 'waiting'} />
       </Row>
       <MenuPresence>
         {menu && (
@@ -635,6 +664,7 @@ export default function WorkspaceRow({
               onRenameEnd,
               geom,
               shownTreeIds,
+              phoneDrawer,
             }),
           )}
           {!forceExpand && unpinnedTrees.length > threadVisibleLimit && (
@@ -685,10 +715,12 @@ function renderThread(args: {
   onRenameEnd?: () => void;
   geom: RowGeom;
   shownTreeIds: readonly string[];
+  phoneDrawer: boolean;
 }) {
   const {
     geom,
     shownTreeIds,
+    phoneDrawer,
     tree,
     project,
     activeProjectId,
@@ -711,15 +743,19 @@ function renderThread(args: {
   } = args;
   const isActive = tree.id === activeTreeId && project.id === activeProjectId;
   const rawRoot = buildTree(tree.rootNodeId, edges, isNodeAlive);
-  const root = nodePinnedAt ? orderPinnedFirst(rawRoot, nodePinnedAt) : rawRoot;
+  const root = phoneDrawer
+    ? flattenBranches(rawRoot, edges, nodePinnedAt)
+    : nodePinnedAt ? orderPinnedFirst(rawRoot, nodePinnedAt) : rawRoot;
   const hasBranches = root.children.length > 0;
+  // The phone drawer marks one row: the current branch while it shows, else its thread (ST-36).
+  const marked = isActive && !(phoneDrawer && threadOpen && root.children.some((child) => child.nodeId === focusedNodeId));
   const threadOpenStateValue = getSubtreeOpenState(tree.rootNodeId);
   return (
     <React.Fragment key={tree.id}>
       <ThreadRow
         tree={tree}
         projectId={project.id}
-        isActive={isActive}
+        isActive={marked}
         hasBranches={hasBranches}
         expanded={threadOpen}
         openState={threadOpenStateValue}

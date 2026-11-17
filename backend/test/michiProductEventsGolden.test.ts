@@ -1,6 +1,6 @@
 import './helpers/claudeSdkFixture';
 /**
- * Golden snapshot of Michi's product events (branches, artifacts, images,
+ * Golden snapshot of Michi's product events (branches, artifacts, images, blocks,
  * branch overview and follow-ups), from the adapter that produces them to
  * the bytes a client reads and the payloads an Agent Run persists.
  *
@@ -63,8 +63,16 @@ const actual: Record<string, unknown> = {};
 
 /** The wire names of Michi's product events. */
 const PRODUCT_EVENTS = new Set([
-  'spawn_branches', 'branch_overview', 'follow_ups', 'follow_ups_status', 'artifact_saved', 'artifact_updated', 'image',
+  'spawn_branches', 'branch_overview', 'follow_ups', 'follow_ups_status', 'artifact_saved', 'artifact_updated', 'image', 'blocks',
 ]);
+/** One show_blocks call: a poll to answer and a figure, under a title. */
+const SHOWN_BLOCKS = {
+  title: 'Pick a date',
+  blocks: [
+    { type: 'poll', question: 'Which day?', options: ['Monday', 'Tuesday'] },
+    { type: 'stat', label: 'Open tasks', value: '12', delta: '+3' },
+  ],
+};
 /** Events the wire mapping does not translate (chatHub handles them itself). */
 const UNMAPPED_KINDS = new Set(['runtime_error', 'turn_end']);
 
@@ -104,7 +112,8 @@ after(() => {
 // ---- Recording -----------------------------------------------------------------
 
 function normalize(text: string): string {
-  return text.split(cwd).join('<cwd>');
+  // show_blocks gives each block a fresh id.
+  return text.split(cwd).join('<cwd>').replace(/cb-[0-9a-f-]{36}/g, 'cb-<id>');
 }
 
 /** The SSE frames of the product events, in the order the adapter emitted them. */
@@ -273,6 +282,7 @@ async function callMichiTools(callTool: CallTool): Promise<void> {
   await callTool('update_artifact', { name: 'notes', body: 'updated body' });
   await callTool('show_image', { path: 'chart.png', caption: 'Quarterly chart' });
   await callTool('show_image', { path: 'chart.png' });
+  await callTool('show_blocks', SHOWN_BLOCKS);
 }
 
 /**
@@ -498,5 +508,8 @@ test('Pi: tool results and show_image report the same events', async (t) => {
   assert.ok(showImage, 'show_image is registered');
   await showImage.execute('show-1', { path: 'chart.png', caption: 'Quarterly chart' });
   await showImage.execute('show-2', { path: 'chart.png' });
+  const showBlocks = tools.find((tool: any) => tool.name === 'show_blocks');
+  assert.ok(showBlocks, 'show_blocks is registered');
+  await showBlocks.execute('blocks-1', SHOWN_BLOCKS);
   await record('pi', events);
 });

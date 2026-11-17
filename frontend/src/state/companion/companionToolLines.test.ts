@@ -55,7 +55,8 @@ describe('the Companion’s tool calls in plain words', () => {
       [tool('@michi/companion_goal_progress', { goalId: 'cmg-1', progress: 'Half way' }), 'Noted progress on “Ship the launch”'],
       [tool('@michi/companion_propose', { kind: 'reminder.add', payload: {} }), 'Suggested a reminder'],
       [tool('@michi/companion_propose', { kind: 'something.new', payload: {} }), 'Suggested a change'],
-      [tool('@michi/companion_publish_brief', { headline: 'x', cards: [], closing: 'y' }), 'Wrote today’s brief'],
+      [tool('@michi/companion_update_item', { itemId: 'cmi-1', action: 'raise', reason: 'The deadline is today' }), 'Raised “CR-123456 needs attention”'],
+      [tool('@michi/companion_update_item', { itemId: 'cmi-1', action: 'lower', reason: 'Answered' }), 'Stopped raising “CR-123456 needs attention”'],
       [tool('@michi/companion_set_name', { name: 'Sidekick' }), 'Changed its name to “Sidekick”'],
       [tool('@michi/companion_set_notifications', { level: 'off' }), 'Turned off notifications'],
       [tool('@michi/companion_set_notifications', { level: 'approval-only' }), 'Set notifications to only what needs you'],
@@ -107,7 +108,7 @@ describe('what a finished activity block of the Companion did', () => {
   });
 
   it('keeps at most four kinds of work, and counts calls it cannot word', () => {
-    const many = ['companion_items', 'companion_check_now', 'companion_cr_detail', 'companion_email_search', 'companion_publish_brief']
+    const many = ['companion_items', 'companion_check_now', 'companion_cr_detail', 'companion_email_search', 'companion_save_notes']
       .map((name) => tool(`@michi/${name}`, name === 'companion_cr_detail' ? { cr: 'CR-1' } : {}));
     expect(companionWorkLine(many, names)).toBe('Looked at Today’s items, checked sources, read CR-1 and more');
     expect(companionWorkLine([tool('@michi/companion_items'), tool('Bash')], names)).toBe('Looked at Today’s items and used 1 more tool');

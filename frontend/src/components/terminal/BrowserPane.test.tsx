@@ -47,17 +47,18 @@ vi.mock('../../state/chatStore', () => ({
   }),
 }));
 
-// Report the unfocused dim so tests can verify the browser chrome opts out.
+// Report the shell options so tests can verify the browser chrome opts out of the dim.
 const paneShellOptions = vi.hoisted(() => [] as Array<{ dim?: boolean } | undefined>);
 vi.mock('../../hooks/usePaneShellStyle', () => ({
   usePaneShellStyle: (_id: string, options?: { dim?: boolean }) => {
     paneShellOptions.push(options);
-    return { '--pane-dim': options?.dim === false ? 0 : 0.24 };
+    return { style: {}, veil: null };
   },
 }));
 
+let electron: typeof electronBridge | null = electronBridge;
 vi.mock('../../lib/electronBridge', () => ({
-  getElectron: () => electronBridge,
+  getElectron: () => electron,
 }));
 
 const item = {
@@ -81,6 +82,7 @@ describe('BrowserPane native bridge', () => {
     }));
     closeRequest = undefined;
     resolveBrowserCreate = undefined;
+    electron = electronBridge;
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -94,10 +96,15 @@ describe('BrowserPane native bridge', () => {
 
   it('never takes the unfocused dim: the native page cannot share it', () => {
     paneShellOptions.length = 0;
-    const { container } = render(<BrowserPane item={item} />);
+    render(<BrowserPane item={item} />);
+    expect(paneShellOptions.length).toBeGreaterThan(0);
     expect(paneShellOptions.every((options) => options?.dim === false)).toBe(true);
-    const root = container.querySelector('[data-pane-kind="browser"]') as HTMLElement;
-    expect(root.style.getPropertyValue('--pane-dim')).toBe('0');
+  });
+
+  it('closes a pane restored outside the desktop app, which has no surface to show', () => {
+    electron = null;
+    render(<BrowserPane item={item} />);
+    expect(closePane).toHaveBeenCalledWith('pane-browser-1');
   });
 
   it('closes only the pane that owns the requested native surface', () => {

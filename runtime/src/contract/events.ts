@@ -2,7 +2,7 @@ import type { UsageCharge, RuntimeWarning, AgentSessionState } from 'michi-share
 import type { AgentCommand, PermissionOption, PlanEntry, SubagentActivityPayload, SubagentPatch, UserInputAnswer, UserInputQuestion } from "michi-shared";
 import type { SteeringReport } from 'michi-shared';
 
-export type { AgentCommand, PermissionOption, PlanEntry, SubagentActivityPayload, SubagentInfo, SubagentPatch, UserInputAnswer, UserInputQuestion } from "michi-shared";
+export type { AgentCommand, FormField, FormFieldType, FormFieldValue, PermissionOption, PlanEntry, SubagentActivityPayload, SubagentInfo, SubagentPatch, UserInputAnswer, UserInputQuestion } from "michi-shared";
 // The types the events' payloads name.
 export type {
     UsageCharge, RuntimeWarning, SteeringReport, UserInputOption, SubagentActivity, SubagentActivityKind, SubagentOutcome,

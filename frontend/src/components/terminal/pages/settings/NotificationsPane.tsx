@@ -112,18 +112,18 @@ function WindowsClosedSection({ name }: { name: string }) {
             tip={residency.tray.supported ? `Closing the last window keeps Michi running there, with ${name}’s status and what needs you.` : undefined}
             description={!residency.tray.supported && (residency.reason ?? 'Not available on this install.')}
             control={residency.tray.supported && (
-              <Switch on={residency.tray.enabled} disabled={control.busy} aria-label={TRAY_LABEL}
+              <Switch on={residency.tray.enabled} busy={control.busy} aria-label={TRAY_LABEL}
                 onChange={(on) => { void control.set({ tray: on }); }} />
             )} />
           {residency.hideDock.supported && (
             <SettingsRow label={HIDE_DOCK_LABEL}
               description={!residency.tray.enabled && `Needs “${TRAY_LABEL}”.`}
-              control={<Switch on={residency.hideDock.enabled} disabled={control.busy || !residency.tray.enabled} aria-label={HIDE_DOCK_LABEL}
+              control={<Switch on={residency.hideDock.enabled} disabled={!residency.tray.enabled} busy={control.busy} aria-label={HIDE_DOCK_LABEL}
                 onChange={(on) => { void control.set({ hideDock: on }); }} />} />
           )}
           {residency.openAtLogin.supported && (
             <SettingsRow label={OPEN_AT_LOGIN_LABEL}
-              control={<Switch on={residency.openAtLogin.enabled} disabled={control.busy} aria-label={OPEN_AT_LOGIN_LABEL}
+              control={<Switch on={residency.openAtLogin.enabled} busy={control.busy} aria-label={OPEN_AT_LOGIN_LABEL}
                 onChange={(on) => { void control.set({ openAtLogin: on }); }} />} />
           )}
         </>
@@ -138,7 +138,7 @@ function WindowsClosedSection({ name }: { name: string }) {
               : enabled && !status.running && !service.busy ? <span role="status">Not running right now</span> : undefined}
           control={status?.supported && <>
             {service.busy && <span className="settings-row__state" role="status">{enabled ? 'Stopping…' : 'Starting…'}</span>}
-            <Switch on={enabled} disabled={service.busy} aria-label={KEEP_RUNNING_LABEL}
+            <Switch on={enabled} busy={service.busy} aria-label={KEEP_RUNNING_LABEL}
               onChange={(next) => { if (!service.busy) void toggleService(next); }} />
           </>}>
           {service.error && <p role="alert" className="settings-row__note">{service.error}</p>}

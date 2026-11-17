@@ -1,4 +1,4 @@
-import type { SaveClaudeForkAnchorInput } from 'michi-runtime';
+import type { ClaudeForkBoundary, SaveClaudeForkAnchorInput } from 'michi-runtime';
 import { getDb } from './db';
 import { LOCAL_AGENT_OWNER_ID, workspaceOwnerMatches } from './agentOwner';
 
@@ -42,4 +42,18 @@ export function readClaudeForkAnchor(input: {
   if (!row || (input.workspaceId != null && row.workspace_id !== input.workspaceId)
     || !workspaceOwnerMatches(row.owner_user_id, input.ownerUserId ?? LOCAL_AGENT_OWNER_ID)) return null;
   return row.native_message_id;
+}
+
+export function saveClaudeForkBoundary(input: ClaudeForkBoundary): void {
+  getDb().prepare(`INSERT OR REPLACE INTO claude_fork_boundaries (node_id, native_session_id, boundary_at)
+    SELECT n.id, ?, ? FROM nodes n
+    WHERE n.id = ? AND n.kind = 'chat' AND n.runtime_id = 'claude' AND n.deleted_at IS NULL AND n.purged_at IS NULL`)
+    .run(input.nativeSessionId, input.boundaryAt, input.nodeId);
+}
+
+export function readClaudeForkBoundary(nodeId: string, nativeSessionId: string): string | null {
+  const row = getDb().prepare(`SELECT b.boundary_at FROM claude_fork_boundaries b JOIN nodes n ON n.id = b.node_id
+    WHERE b.node_id = ? AND b.native_session_id = ?
+      AND n.kind = 'chat' AND n.runtime_id = 'claude' AND n.deleted_at IS NULL AND n.purged_at IS NULL`).get(nodeId, nativeSessionId) as { boundary_at: string } | undefined;
+  return row?.boundary_at ?? null;
 }

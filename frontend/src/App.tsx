@@ -22,7 +22,7 @@ import {
   saveMarkdown,
   defaultExportFilename,
 } from './lib/exportWorkspace';
-import { exportPanelEvent, type ExportPanelRequest } from './state/appEvents';
+import { exportPanelEvent, leaveOverlaysEvent, type ExportPanelRequest } from './state/appEvents';
 import { visibleDigestMarkdown } from './state/digest';
 import { startupMarkOnce } from './services/startupTrace';
 import AppErrorBoundary from './components/AppErrorBoundary';
@@ -87,6 +87,8 @@ function ExportPanelManager() {
   selectionRef.current = selection;
 
   const close = React.useCallback(() => { exportRequestRef.current += 1; setOpen(false); }, []);
+  // A notification's click opens its target, which the panel would cover.
+  useEffect(() => leaveOverlaysEvent.subscribe(close), [close]);
 
   const save = React.useCallback(() => {
     if (exportState.kind !== 'done') return;

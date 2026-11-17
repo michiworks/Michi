@@ -33,14 +33,17 @@ export interface MetaChatDecorations {
    * assistant's links. Undefined keeps the surrounding renderer.
    */
   linkRendererFor?: (message: ChatMessage) => MessageLinkPolicy | undefined;
-  /** A one-line label per tool call; tool groups then list every call as one row. */
+  /**
+   * A one-line label per tool call, in the window's words. It only names the
+   * call: every agent block style draws the row as in any pane, with the line
+   * where a call's own purpose goes. null keeps the generic name.
+   */
   toolLine?: (tool: ToolCallState) => string | null;
   /**
    * What a finished activity block did, in the window's words; the block's
-   * header then shows it in place of the generic summary (raw tool names)
-   * and leaves out the block's duration, which spans the reasoning around
-   * the calls, not the calls. null keeps the generic header. The Companion
-   * only.
+   * header then shows it in place of the generic summary (raw tool names),
+   * with the duration as in any pane. null keeps the generic header. The
+   * Companion only.
    */
   workLine?: (tools: readonly ToolCallState[]) => string | null;
   /** Replaces a reply's page-write receipts with the window's cards (page changes, started conversations). */

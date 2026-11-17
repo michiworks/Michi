@@ -33,6 +33,12 @@ describe('focusIsTaken', () => {
     expect(focusIsTaken(null, document.body)).toBe(false);
   });
 
+  it('holds on a tab the keyboard is on, whose arrows select the pane a composer is in', () => {
+    const tab = add('<div role="tablist"><div role="tab" tabindex="0">Pane</div></div>').querySelector<HTMLElement>('[role="tab"]')!;
+    tab.focus();
+    expect(focusIsTaken(null, tab)).toBe(true);
+  });
+
   it('holds inside an open dialog or menu, unless the composer sits in it too', () => {
     const host = add('<div role="dialog"><button id="a">Switch</button><div id="home"></div></div><div role="menu"><button id="b">Item</button></div><div role="dialog" inert><button id="c">Gone</button></div>');
     const home = host.querySelector('#home');

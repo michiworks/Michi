@@ -50,6 +50,7 @@ import {
   readMemoryMode,
   readMemoryNotice,
   readScopeVersion,
+  setTopicIfUnset,
   spelledTopic,
   splitTerms,
   updateMemoryRow,
@@ -420,6 +421,8 @@ export interface CreateMemoryInput {
   eventAt?: number | null;
   /** When the user said it (ms epoch), for example the user message's time. Default: now. */
   observedAt?: number | null;
+  /** When it stops being true (ms epoch; validity.ts). Default null: no end. */
+  validUntil?: number | null;
 }
 
 function requireMemory(ownerUserId: string, id: unknown): MemoryRecord {
@@ -456,6 +459,7 @@ export function createMemory(caller: MemoryCaller, input: CreateMemoryInput): Me
   const topic = normalizeTopic(input.topic);
   const eventAt = normalizeTime(input.eventAt, 'eventAt');
   const observedAt = normalizeTime(input.observedAt, 'observedAt');
+  const validUntil = normalizeTime(input.validUntil, 'validUntil');
   assertEnabled(ownerUserId);
   const { created, superseded } = memoryTransaction(() => {
     const workspaceId = resolveScope(ownerUserId, input.scope);
@@ -470,7 +474,7 @@ export function createMemory(caller: MemoryCaller, input: CreateMemoryInput): Me
     const record = insertMemoryRow({
       id: `mem-${randomUUID()}`, ownerUserId, workspaceId, kind, body, status, origin, source, sourceRisk,
       supersedesId: old?.id ?? null, keywords, topic: topic === null ? null : spelledTopic(ownerUserId, topic), eventAt,
-      observedAt: observedAt ?? now, now,
+      observedAt: observedAt ?? now, validUntil, now,
     });
     bumpScopeVersion(ownerUserId, workspaceId, now);
     indexMemory(record);
@@ -496,6 +500,7 @@ export interface SupersedeMemoryInput {
   topic?: string | null;
   eventAt?: number | null;
   observedAt?: number | null;
+  validUntil?: number | null;
 }
 
 /** Correct a memory: a new record in the old one's scope, linked by supersedesId. */
@@ -514,6 +519,7 @@ export function supersedeMemory(caller: MemoryCaller, oldId: string, input: Supe
     topic: input?.topic !== undefined ? input.topic : old.topic ?? null,
     eventAt: input?.eventAt,
     observedAt: input?.observedAt,
+    validUntil: input?.validUntil,
     supersedesId: old.id,
   });
 }
@@ -528,14 +534,17 @@ export interface MemoryPatch {
   topic?: string | null;
   /** null clears the event time. */
   eventAt?: number | null;
+  /** When it stops being true (validity.ts); null clears it. */
+  validUntil?: number | null;
 }
 
 /**
- * Edit body, scope, kind, keywords, topic or event time. With expectedVersion the
- * edit applies only to that version (version_conflict otherwise). Superseded
- * records are history and cannot be edited. `byUser`: the user edited it
- * (Settings › Memory): consolidation never changes such a memory
- * (user_edited_at); its origin stays as it was. What consolidation merged
+ * Edit body, scope, kind, keywords, topic, event time or end (validUntil).
+ * With expectedVersion the edit applies only to that version
+ * (version_conflict otherwise). Superseded records are history and cannot be
+ * edited. `byUser`: the user edited it (Settings › Memory): consolidation
+ * never changes such a memory (user_edited_at), and the edit confirms it
+ * (last_confirmed_at); its origin stays as it was. What consolidation merged
  * into it comes back when what it says changed (releaseMergedOnChange).
  */
 export function updateMemory(caller: MemoryCaller, id: string, patch: MemoryPatch, expectedVersion?: number, options: { byUser?: boolean } = {}): MemoryRecord {
@@ -550,6 +559,7 @@ export function updateMemory(caller: MemoryCaller, id: string, patch: MemoryPatc
   if (patch.keywords !== undefined) changes.keywords = normalizeKeywords(patch.keywords);
   if (patch.topic !== undefined) changes.topic = normalizeTopic(patch.topic);
   if (patch.eventAt !== undefined) changes.eventAt = normalizeTime(patch.eventAt, 'eventAt');
+  if (patch.validUntil !== undefined) changes.validUntil = normalizeTime(patch.validUntil, 'validUntil');
   const updated = memoryTransaction(() => {
     const current = requireMemory(ownerUserId, id);
     if (expectedVersion !== undefined && current.version !== expectedVersion) {
@@ -567,9 +577,11 @@ export function updateMemory(caller: MemoryCaller, id: string, patch: MemoryPatc
     if (changes.eventAt !== undefined && changes.eventAt === (current.eventAt ?? null)) delete changes.eventAt;
     if (changes.topic) changes.topic = spelledTopic(ownerUserId, changes.topic);
     if (changes.topic !== undefined && changes.topic === (current.topic ?? null)) delete changes.topic;
+    if (changes.validUntil !== undefined && changes.validUntil === (current.validUntil ?? null)) delete changes.validUntil;
     if (Object.keys(changes).length === 0) return null;
     const now = Date.now();
-    const record = updateMemoryRow(ownerUserId, current.id, current.version, { ...changes, ...(options.byUser ? { userEditedAt: now } : {}) }, now);
+    const record = updateMemoryRow(ownerUserId, current.id, current.version,
+      { ...changes, ...(options.byUser ? { userEditedAt: now, lastConfirmedAt: now } : {}) }, now);
     if (!record) throw new MemoryError('version_conflict', 'The memory changed since it was read');
     bumpScopeVersion(ownerUserId, fromWorkspaceId, now);
     if (changes.workspaceId !== undefined) bumpScopeVersion(ownerUserId, changes.workspaceId, now);
@@ -580,6 +592,27 @@ export function updateMemory(caller: MemoryCaller, id: string, patch: MemoryPatc
   emitChanged(updated.record, 'updated');
   for (const record of updated.restored) emitChanged(record, 'updated');
   return updated.record;
+}
+
+/**
+ * The topic pass (memoryTopics.ts) files a memory under a topic: set when it
+ * still has none, spelled as the owner's memories already spell it, and
+ * searchable by it. Only the topic changes (no new version), whoever saved it.
+ * Null when nothing was set (it has a topic now, or is gone or superseded).
+ */
+export function labelMemoryTopic(caller: MemoryCaller, id: string, topic: string): MemoryRecord | null {
+  const ownerUserId = owner(caller);
+  const label = normalizeTopic(topic);
+  if (!label) return null;
+  const record = memoryTransaction(() => {
+    const memory = memoryId(id);
+    if (!setTopicIfUnset(ownerUserId, memory, spelledTopic(ownerUserId, label))) return null;
+    const stored = findMemory(ownerUserId, memory);
+    if (stored) indexMemory(stored);
+    return stored;
+  });
+  if (record) emitChanged(record, 'updated');
+  return record;
 }
 
 /** Whether two versions of a memory say the same, as consolidation compared them: scope, kind, text, keywords, event time. */

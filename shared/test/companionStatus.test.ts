@@ -27,7 +27,7 @@ const HOUR = 60 * MINUTE;
 
 const STATUS: CompanionStatusDto = {
   state: 'ok', auth: { valid: true, expiresAt: null, checkedAt: null }, sources: [], lastCheckAt: null, nextCheckAt: null,
-  nextHeartbeatAt: null, nextBriefAt: null, turnsToday: 0, working: false,
+  nextHeartbeatAt: null, turnsToday: 0, working: false,
 };
 
 function line(status: Partial<CompanionStatusDto> = {}, settings: Partial<CompanionSettings> = {}) {

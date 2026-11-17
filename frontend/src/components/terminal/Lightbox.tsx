@@ -1,12 +1,13 @@
 import React, { useEffect, useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { animate, motion, MotionGlobalConfig, type Transition } from 'motion/react';
+import { animate, motion, MotionGlobalConfig } from 'motion/react';
 import { DUR, TRANSITION } from '../../motion/tokens';
 import { useOverlayFocus } from '../ui/useOverlayFocus';
 import { useBackLayer } from '../../lib/backStack';
+import { leaveOverlaysEvent } from '../../state/appEvents';
 import { formatBytes } from '../../lib/formatBytes';
-
-const FADE_IN: Transition = { duration: DUR.soft, ease: 'easeOut' };
+import { CloseIcon } from './icons';
+import './Lightbox.css';
 
 /**
  * Callers unmount the viewer from `onClose`, so it fades out as a copy: a
@@ -52,6 +53,8 @@ export function Lightbox({ src, alt, filename, mimeType, size, caption, onClose 
   const panelRef = React.useRef<HTMLDivElement>(null);
   useOverlayFocus({ open: true, panelRef, restore: 'always' });
   useBackLayer(true, { back: onClose });
+  // A notification's click opens its target over the pane this sits on.
+  useEffect(() => leaveOverlaysEvent.subscribe(() => onClose()), [onClose]);
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
@@ -97,7 +100,7 @@ export function Lightbox({ src, alt, filename, mimeType, size, caption, onClose 
       aria-label={filename || 'Image viewer'}
       onClick={onClose}
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: FADE_IN }}
+      animate={{ opacity: 1, transition: TRANSITION.enter }}
       style={{
         position: 'fixed',
         inset: 0,
@@ -117,9 +120,9 @@ export function Lightbox({ src, alt, filename, mimeType, size, caption, onClose 
         type="button"
         aria-label="Close image viewer"
         onClick={(event) => { event.stopPropagation(); onClose(); }}
-        className="ui-overlay-close"
-        style={{ position: 'absolute', top: 16, right: 16, color: 'rgba(255,255,255,0.92)' }}
-      >×</button>
+        className="ui-overlay-close lightbox-close"
+        style={{ position: 'absolute', top: 16, right: 16 }}
+      ><CloseIcon /></button>
       <img
         src={src}
         alt={alt ?? ''}

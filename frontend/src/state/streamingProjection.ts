@@ -10,7 +10,7 @@ export type Segment =
   | { kind: 'tool-group'; tools: ToolCallState[] }
   | { kind: 'user-input'; requestId: number; interaction?: Extract<AssistantBlock, { kind: 'user-input' }>['interaction'] };
 
-export type AssistantRunKind = 'answer' | 'thinking' | 'image';
+export type AssistantRunKind = 'answer' | 'thinking' | 'image' | 'blocks';
 
 export interface SentinelCarry {
   pendingRawTail?: string;
@@ -66,6 +66,7 @@ function toolSection(block: AssistantBlock): AssistantRunKind | null {
 
 function runKindForBlock(block: AssistantBlock): AssistantRunKind {
   if (block.kind === 'image') return 'image';
+  if (block.kind === 'blocks') return 'blocks';
   return textBlockKind(block) ?? toolSection(block) ?? 'answer';
 }
 
@@ -123,10 +124,6 @@ export function tailRunsFormAgentCluster(runs: readonly AssistantRun[]): boolean
 
 export function answerRunRawText(blocks: readonly AssistantBlock[]): string {
   return blocks.map((b) => (b.kind === 'answer' ? b.rawText : '')).join('');
-}
-
-export function thinkingRunRawText(blocks: readonly AssistantBlock[]): string {
-  return blocks.map((b) => (b.kind === 'thinking' ? b.rawText : '')).join('');
 }
 
 export function projectAnswerRun(

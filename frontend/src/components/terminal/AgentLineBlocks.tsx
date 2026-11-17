@@ -1,6 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { motion, useReducedMotionConfig } from 'motion/react';
+import { motion } from 'motion/react';
 import type { SubagentInfo, ToolCallState } from '../../state/chatTypes';
+import { useDeferredToolBodies, type DeferredToolCallsStatus } from '../../state/deferredToolCalls';
+import { deferredOutputNote } from './deferredOutputNote';
 import { backendNow } from '../../services/backendClock';
 import {
   delegationToolInfo,
@@ -43,6 +45,21 @@ import { delegationName, delegationStatus, ownGroupTools, subagentDisplayName, s
 import { DUR } from '../../motion/tokens';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
 import { useCopyFeedback } from '../../hooks/useCopyFeedback';
+import {
+  AgentIcon,
+  CheckIcon,
+  CloseIcon,
+  CopyIcon,
+  EditIcon,
+  FileIcon,
+  ListIcon,
+  MergeIcon,
+  SearchIcon,
+  SubagentIcon,
+  iconPx,
+  strokeFor,
+  type IconComponent,
+} from './icons';
 import './AgentLineBlocks.css';
 
 /**
@@ -54,8 +71,8 @@ import './AgentLineBlocks.css';
  * phrase helpers). Opening it shows step rows (each a button that opens its
  * payload well) with the thought prose between them.
  *
- * ToolCallGroup and TermThoughtBlock dispatch here for agentBlockStyle 'line';
- * grouping and clustering are theirs and unchanged.
+ * ToolCallGroup and TermThoughtBlock render through here; grouping and
+ * clustering are theirs.
  */
 
 /** A spinner appears only once a run has lasted this long, then spins until the run ends. */
@@ -144,27 +161,39 @@ function useDwell<T>(value: T, key: string, ms: number, enabled: boolean): T {
   return shown.key === key || switchNow ? value : shown.value;
 }
 
-/* ── Glyphs (16px, 1.5 stroke; decorative) ── */
+/* ── Glyphs (lg; decorative) ── */
 
 export type LineGlyph = OutcomeIcon | 'spin' | 'steps';
 
-const PATHS: Record<Exclude<LineGlyph, 'spin'>, React.ReactNode> = {
+type OwnGlyph = 'terminal' | 'push' | 'commit';
+
+/** The line's own drawings: shapes icons.tsx has none for. */
+const OWN_PATHS: Record<OwnGlyph, React.ReactNode> = {
   terminal: <><path d="M3.5 4.75 6.25 7.5 3.5 10.25" /><path d="M8 11h4.5" /></>,
-  file: <><path d="M4 2.25h5l3 3v8.5H4z" /><path d="M8.75 2.25v3.25H12" /></>,
-  search: <><circle cx="7" cy="7" r="3.75" /><path d="m9.75 9.75 3 3" /></>,
-  edit: <path d="M10.5 2.75l2.75 2.75-7.5 7.5-3.25.75.75-3.25z" />,
-  sparkle: <path d="M8 2.25 9.3 6.7 13.75 8 9.3 9.3 8 13.75 6.7 9.3 2.25 8 6.7 6.7z" />,
-  agent: <path d="M8 2.25 9.3 6.7 13.75 8 9.3 9.3 8 13.75 6.7 9.3 2.25 8 6.7 6.7z" />,
-  steps: <><path d="M6.75 4.5h6M6.75 8h6M6.75 11.5h6" /><path d="M3.5 4.5h.25M3.5 8h.25M3.5 11.5h.25" /></>,
-  fail: <path d="m4.75 4.75 6.5 6.5M11.25 4.75l-6.5 6.5" />,
-  merge: <><circle cx="4.75" cy="4" r="1.75" /><circle cx="11.25" cy="11.25" r="1.75" /><path d="M4.75 14V5.75" /><path d="M4.75 6.25a5 5 0 0 0 4.75 5" /></>,
   push: <><path d="M4.75 5.75 8 2.5l3.25 3.25" /><path d="M8 2.75v7.75" /><path d="M3.75 13.25h8.5" /></>,
   commit: <><circle cx="8" cy="8" r="2.5" /><path d="M1.75 8h3.75M10.5 8h3.75" /></>,
 };
 
-function Svg({ size = 16, className, children }: { size?: number; className?: string; children: React.ReactNode }) {
+/** Thinking is the agent's own work; a delegation is a subagent's. */
+const ICONS: Record<Exclude<LineGlyph, 'spin' | OwnGlyph>, IconComponent> = {
+  file: FileIcon,
+  search: SearchIcon,
+  edit: EditIcon,
+  sparkle: AgentIcon,
+  agent: SubagentIcon,
+  steps: ListIcon,
+  fail: CloseIcon,
+  merge: MergeIcon,
+};
+
+const isOwnGlyph = (name: LineGlyph): name is OwnGlyph => name in OWN_PATHS;
+
+const GLYPH_PX = iconPx('lg');
+const GLYPH_STROKE = strokeFor(GLYPH_PX);
+
+function Svg({ className, children }: { className?: string; children: React.ReactNode }) {
   return (
-    <svg className={className} width={size} height={size} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
+    <svg className={className} width={GLYPH_PX} height={GLYPH_PX} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={GLYPH_STROKE} strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
       {children}
     </svg>
   );
@@ -172,10 +201,10 @@ function Svg({ size = 16, className, children }: { size?: number; className?: st
 
 function Spinner() {
   return (
-    <svg className="agent-line-spin" width={16} height={16} viewBox="0 0 16 16" aria-hidden focusable="false" data-spinner="spinning">
+    <svg className="agent-line-spin" width={GLYPH_PX} height={GLYPH_PX} viewBox="0 0 16 16" aria-hidden focusable="false" data-spinner="spinning">
       <g className="agent-line-spin__g">
-        <circle cx="8" cy="8" r="5.25" fill="none" stroke="var(--term-line-s)" strokeWidth={1.5} opacity={0.6} />
-        <path d="M8 2.75a5.25 5.25 0 0 1 5.25 5.25" fill="none" stroke="var(--term-run)" strokeWidth={1.5} strokeLinecap="round" />
+        <circle cx="8" cy="8" r="5.25" fill="none" stroke="var(--term-line-s)" strokeWidth={GLYPH_STROKE} opacity={0.6} />
+        <path d="M8 2.75a5.25 5.25 0 0 1 5.25 5.25" fill="none" stroke="var(--term-run)" strokeWidth={GLYPH_STROKE} strokeLinecap="round" />
       </g>
     </svg>
   );
@@ -184,7 +213,9 @@ function Spinner() {
 function Glyph({ name }: { name: LineGlyph }) {
   if (name === 'spin') return <Spinner />;
   const tone = name === 'fail' ? ' is-fail' : '';
-  return <Svg className={`agent-line__svg${tone}`}>{PATHS[name]}</Svg>;
+  if (isOwnGlyph(name)) return <Svg className={`agent-line__svg${tone}`}>{OWN_PATHS[name]}</Svg>;
+  const Icon = ICONS[name];
+  return <Icon size="lg" className={`agent-line__svg${tone}`} />;
 }
 
 /** The hanging icon slot: kinds scale in and out. */
@@ -196,10 +227,13 @@ function LineIcon({ name }: { name: LineGlyph }) {
   );
 }
 
+const CHEVRON_PX = iconPx('sm');
+
+/** ChevronRightIcon's shape, drawn here because its group turns as the line opens (.agent-line__chev-g). */
 function Chevron() {
   return (
-    <svg className="agent-line__chev" width={12} height={12} viewBox="0 0 12 12" aria-hidden focusable="false">
-      <g className="agent-line__chev-g"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" /></g>
+    <svg className="agent-line__chev" width={CHEVRON_PX} height={CHEVRON_PX} viewBox="0 0 12 12" aria-hidden focusable="false">
+      <g className="agent-line__chev-g"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth={strokeFor(CHEVRON_PX, 12)} strokeLinecap="round" strokeLinejoin="round" /></g>
     </svg>
   );
 }
@@ -330,7 +364,7 @@ function LineRow({ view, live, step, expanded, controls, onToggle, groupHeader }
         <span className="agent-line__frag"><span className="sr-only">{view.frag.text}</span></span>
       ) : view.frag ? (
         <LineSwap k={`${view.frag.tone}|${view.frag.text}`} className={`agent-line__frag is-${view.frag.tone}`} layerClassName="agent-line__frag-i">
-          <Svg size={12} className="agent-line__x">{PATHS.fail}</Svg>
+          <CloseIcon className="agent-line__x" />
           <span>{view.frag.text}{view.frag.more && <span className="agent-line__more">{view.frag.more}</span>}</span>
         </LineSwap>
       ) : <span className="agent-line__frag" />}
@@ -366,9 +400,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   return (
     <>
       <button type="button" className="agent-line-icon-btn" aria-label={label} onClick={() => { void copy(text); }}>
-        {result === 'copied'
-          ? <Svg size={14}><path d="m3.5 8.25 3 3 6-6.75" /></Svg>
-          : <Svg size={14}><rect x="5.5" y="5.5" width="7.25" height="7.25" rx="1.25" /><path d="M3.25 10.5V3.25h7.25" /></Svg>}
+        {result === 'copied' ? <CheckIcon /> : <CopyIcon />}
       </button>
       {/* An honest result, said once. */}
       <span className="sr-only" role="status">{status}</span>
@@ -396,6 +428,20 @@ const COPY_LABEL: Record<PayloadSubject['kind'], string> = {
   command: 'Copy command', pattern: 'Copy pattern', path: 'Copy path', detail: 'Copy',
 };
 
+/** Where a deferred call's output is while it is read (useDeferredToolBodies). */
+function DeferredOutputNote({ status, hasOutput, onRetry }: {
+  status: DeferredToolCallsStatus | undefined; hasOutput: boolean; onRetry?: () => void;
+}) {
+  const note = deferredOutputNote(status, hasOutput);
+  if (!note) return null;
+  return (
+    <div className="agent-line-payload__wait" role="status">
+      {note}
+      {status === 'failed' && onRetry && <>{' '}<button type="button" className="agent-line-link" onClick={onRetry}>Retry</button></>}
+    </div>
+  );
+}
+
 /**
  * `$ command` with a copy button, the output in mid on the deep well (a region
  * when it scrolls), and a footer: "× exit 1 · 1m 12s · rerun passed". No caps
@@ -405,6 +451,11 @@ const COPY_LABEL: Record<PayloadSubject['kind'], string> = {
 function LinePayload({ tool, recovered }: { tool: ToolCallState; recovered: boolean }) {
   const running = isRunningStatus(tool.status);
   const failed = isFailedStatus(tool.status);
+  // A display page left this call's body on the server: opening it reads it.
+  const bodies = useDeferredToolBodies();
+  const deferred = !!tool.deferred;
+  const loadBodies = bodies?.load;
+  useEffect(() => { if (deferred) loadBodies?.(); }, [deferred, loadBodies]);
   const kind = toolKind(tool);
   const subject = payloadSubject(tool);
   const outRef = useRef<HTMLPreElement>(null);
@@ -436,6 +487,8 @@ function LinePayload({ tool, recovered }: { tool: ToolCallState; recovered: bool
       </div>
       {running ? (
         <div className="agent-line-payload__wait">Output appears when the call finishes…</div>
+      ) : deferred ? (
+        <DeferredOutputNote status={bodies?.status} hasOutput={!!tool.hasOutput} onRetry={bodies?.load} />
       ) : tool.output ? (
         <pre
           ref={outRef}
@@ -455,7 +508,7 @@ function LinePayload({ tool, recovered }: { tool: ToolCallState; recovered: bool
       )}
       <div className="agent-line-payload__foot">
         {status && (failed && !denied
-          ? <span className="agent-line-payload__bad"><Svg size={12}>{PATHS.fail}</Svg>{status}</span>
+          ? <span className="agent-line-payload__bad"><CloseIcon />{status}</span>
           : <span>{status}</span>)}
         {durMs != null && <><span aria-hidden>·</span><span><Duration {...settledDuration(durMs)} /></span></>}
         {failed && recovered && <><span aria-hidden>·</span><span>rerun passed</span></>}
@@ -480,43 +533,19 @@ function stepIcon(tool: ToolCallState, age: number, loud: boolean): LineGlyph {
  * A call inside an opened run: its name (the agent's words, else Michi's in the
  * base form), what it touched in mono (or the error that replaced it), how it
  * ended ("exit 1", "denied"), its time. A button that opens its payload.
- * Memoised: a streaming update re-renders one row.
+ * Memoised: a streaming update re-renders one row. The step list keeps its
+ * height when a payload opens: the drawer scrolls it until the payload shows.
  */
-/**
- * The step list keeps its height when a payload opens, so a step opened near
- * its bottom edge scrolls the list until the payload shows, never past the
- * step's own row.
- */
-function useRevealOpenedStep(open: boolean, bodyRef: React.RefObject<HTMLDivElement | null>) {
-  const reduce = !!useReducedMotionConfig();
-  const wasOpenRef = useRef(open);
-  useLayoutEffect(() => {
-    const opened = open && !wasOpenRef.current;
-    wasOpenRef.current = open;
-    const body = bodyRef.current;
-    const list = body?.closest<HTMLElement>('.agent-line-steps-scroll');
-    const row = body?.parentElement;
-    if (!opened || !body || !list || !row) return;
-    const view = list.getBoundingClientRect();
-    const below = body.getBoundingClientRect().bottom - view.bottom;
-    const rowAbove = row.getBoundingClientRect().top - view.top;
-    const by = Math.min(below, rowAbove);
-    if (by <= 0) return;
-    list.scrollBy({ top: by, behavior: reduce ? 'auto' : 'smooth' });
-  }, [open, bodyRef, reduce]);
-}
-
 const LineStep = React.memo(function LineStep({ tool, recovered, clockKey }: { tool: ToolCallState; recovered: boolean; clockKey?: string }) {
   const running = isRunningStatus(tool.status);
   const step = stepView(tool, recovered);
-  const hasPayload = !!(tool.inputJson || tool.output);
+  const hasPayload = !!(tool.inputJson || tool.output || tool.hasOutput);
   const drawer = useLineDrawer();
   const bodyId = useId();
   const { age } = useRunClock(running, tool.startedAt, clockKey);
   const durMs = toolDurationMs(tool);
   // A window that words its own tools (the Companion's toolLine) names the step; its line replaces the generic detail.
   const label = useMetaChatDecorations()?.toolLine?.(tool) ?? null;
-  useRevealOpenedStep(drawer.open, drawer.bodyRef);
   const view: LineView = {
     icon: stepIcon(tool, age, step.loud),
     lead: label ?? step.lead,
@@ -568,7 +597,6 @@ function LineSubagent({ tool, info, linked }: { tool: ToolCallState; info: Subag
           name={subagentDisplayName(entry)}
           status={subagentToolStatus(entry)}
           glyph={glyph}
-          scale="line"
           className="agent-line agent-line--sub"
           style={SUB_LINE_STYLE}
         />
@@ -579,7 +607,6 @@ function LineSubagent({ tool, info, linked }: { tool: ToolCallState; info: Subag
           status={delegationStatus(tool, linked)}
           fallback={info.description ?? info.prompt}
           glyph={glyph}
-          scale="line"
           className="agent-line agent-line--sub"
           style={SUB_LINE_STYLE}
         />
@@ -607,9 +634,6 @@ interface LineRunProps {
   subagents?: readonly SubagentInfo[];
   /** Renders a thought chunk (Markdown / Codex steps), from TermThoughtBlock. */
   renderProse?: (text: string, streaming: boolean, key: string) => React.ReactNode;
-  /** Extra body content (a plain-style caller's own tool groups). */
-  extraBody?: React.ReactNode;
-  initialOpen?: boolean;
   /** A thought block that started streaming on screen fades in. */
   enter?: boolean;
   kind: 'group' | 'thought';
@@ -623,7 +647,7 @@ interface LineRunProps {
  * with the thought's conclusion. One call opens its payload directly.
  */
 export function LineRun({
-  items, live, phase, startedAt, durationMs, subagents, renderProse, extraBody, initialOpen = false, enter = false, kind,
+  items, live, phase, startedAt, durationMs, subagents, renderProse, enter = false, kind,
 }: LineRunProps) {
   const turn = useContext(AgentTurnContext);
   const clockKey = turn?.clockKey;
@@ -634,8 +658,13 @@ export function LineRun({
   const thoughtText = textItems.map((i) => i.text).join('\n\n');
   const thoughtOnly = tools.length === 0;
   const single = tools.length === 1 && textItems.length === 0 && !delegationToolInfo(tools[0], subagents);
-  const drawer = useLineDrawer(initialOpen);
+  const drawer = useLineDrawer();
   const bodyId = useId();
+  // Opened, its steps' bodies come before a step is opened.
+  const bodies = useDeferredToolBodies();
+  const anyDeferred = tools.some((t) => t.deferred);
+  const loadBodies = bodies?.load;
+  useEffect(() => { if (drawer.open && anyDeferred) loadBodies?.(); }, [drawer.open, anyDeferred, loadBodies]);
 
   const running = tools.filter((t) => isRunningStatus(t.status));
   const current = running[running.length - 1];
@@ -697,7 +726,7 @@ export function LineRun({
     };
   } else {
     const outcome = summarizeOutcome(tools, recovered);
-    // The window's own line, without the span: it covers the reasoning around the calls (MetaChatDecorations.workLine).
+    // The window's own line (MetaChatDecorations.workLine) in place of the generic lead.
     const own = workLine?.(tools) ?? null;
     const spanMs = durationMs ?? (single ? toolDurationMs(tools[0]) : toolSpanMs(tools));
     view = {
@@ -707,7 +736,7 @@ export function LineRun({
       restKind: outcome.restKind,
       sentence: own ? undefined : outcome.sentence,
       frag: runFrag(outcome, single),
-      meta: !own && spanMs != null ? settledDuration(spanMs) : null,
+      meta: spanMs != null ? settledDuration(spanMs) : null,
     };
   }
   const { meta, ...words } = view;
@@ -719,21 +748,11 @@ export function LineRun({
 
   let body: React.ReactNode;
   if (thoughtOnly) {
-    body = (
-      <>
-        {thoughtText && <ThoughtBody text={thoughtText} streaming={live && phase === 'thinking'} renderProse={renderProse} />}
-        {extraBody}
-      </>
-    );
+    body = thoughtText && <ThoughtBody text={thoughtText} streaming={live && phase === 'thinking'} renderProse={renderProse} />;
   } else if (single) {
     body = <LinePayload tool={tools[0]} recovered={recovered.has(tools[0].id)} />;
   } else {
-    body = (
-      <>
-        <StepList items={items} live={live} recovered={recovered} subagents={subagents} clockKey={clockKey} renderProse={renderProse} streamingText={streamingText} />
-        {extraBody}
-      </>
-    );
+    body = <StepList items={items} live={live} recovered={recovered} subagents={subagents} clockKey={clockKey} renderProse={renderProse} streamingText={streamingText} />;
   }
 
   const row = (
@@ -799,6 +818,9 @@ function ThoughtBody({ text, streaming, renderProse }: {
  * The edges of a capped step list that hide more ("up", "down", "up down",
  * or "" when it all shows), re-read on scroll, resize and new items. A live
  * run follows its newest step until the reader scrolls away from the end.
+ * The bottom edge is read from the list itself: a closed payload slides out
+ * as an absolute ghost that still adds to scrollHeight, and no resize
+ * follows when it leaves.
  */
 function useStepScroll(ref: React.RefObject<HTMLDivElement | null>, live: boolean, count: number) {
   const [more, setMore] = useState('');
@@ -806,8 +828,10 @@ function useStepScroll(ref: React.RefObject<HTMLDivElement | null>, live: boolea
   const measure = useCallback(() => {
     const el = ref.current;
     if (!el) return;
+    const list = el.firstElementChild;
+    const end = list instanceof HTMLElement ? list.offsetHeight : el.scrollHeight;
     const up = el.scrollTop > 1;
-    const down = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+    const down = el.scrollTop + el.clientHeight < end - 1;
     const next = up && down ? 'up down' : up ? 'up' : down ? 'down' : '';
     setMore((prev) => (prev === next ? prev : next));
   }, [ref]);
@@ -888,7 +912,7 @@ function StepList({ items, live, recovered, subagents, clockKey, renderProse, st
 }
 
 /**
- * ToolCallGroup in the line chrome. A group of only delegations shows their
+ * ToolCallGroup's rendering. A group of only delegations shows their
  * lines; anything else is one run line (one call opens its payload directly).
  * `live`: the group is the newest content of a streaming turn, so a gap
  * between its calls stays live ("Working…") instead of settling.
@@ -954,19 +978,22 @@ export function LineWorkFold({ tools, notes, durationMs, subagents, children }: 
   const workLine = useMetaChatDecorations()?.workLine;
   const drawer = useLineDrawer();
   const bodyId = useId();
+  const bodies = useDeferredToolBodies();
+  const anyDeferred = tools.some((t) => t.deferred);
+  const loadBodies = bodies?.load;
+  useEffect(() => { if (drawer.open && anyDeferred) loadBodies?.(); }, [drawer.open, anyDeferred, loadBodies]);
   const view = useMemo<LineView>(() => {
     const recovered = turn?.recovered ?? findRecoveries(tools);
     // Counted by each call's own status: a delegation counts as its launch chip ended.
     const shown = ownGroupTools(tools, subagents);
     const outcome = summarizeOutcome(shown, recovered);
-    // A window that words its own tools (the Companion's workLine) says what the turn did, without the duration.
-    const own = workLine?.(shown) ?? null;
-    const work = own ?? summarizeWork(shown).text;
+    // A window that words its own tools (the Companion's workLine) says what the turn did.
+    const work = workLine?.(shown) ?? summarizeWork(shown).text;
     const rest = [
       work && work.charAt(0).toLowerCase() + work.slice(1),
       notes > 0 ? `${notes}\u00A0${notes === 1 ? 'note' : 'notes'}` : '',
     ].filter(Boolean).join(' · ');
-    const dur = !own && durationMs != null ? settledDuration(durationMs) : null;
+    const dur = durationMs != null ? settledDuration(durationMs) : null;
     return {
       icon: 'steps',
       lead: dur ? `Worked for ${dur.text}` : 'Worked',

@@ -40,7 +40,7 @@ afterEach(async () => {
 
 test('prefs HTTP keeps the Settings prefs a new browser starts from and drops this browser\'s own', async () => {
   // Trash retention decides what the trash sweep deletes for good.
-  const settings = { trashTTLDays: 0, homeRecommendations: false, paneWidthMode: 'fixed', paneSpawnAnimation: 'phosphor', cornerRadius: 8, sidebarRowStyle: 'classic', showSidebarTimestamps: true };
+  const settings = { trashTTLDays: 0, homeRecommendations: false, paneWidthMode: 'fixed', cornerRadius: 8, sidebarRowStyle: 'classic', showSidebarTimestamps: true };
   const local = { sidebarExpanded: { workspaces: { a: true } }, workspaceOrder: ['ws-1'], terminalSidebarWidth: 300, globalPermissions: true, reduceMotion: true, singlePageMode: true };
   const put = await fetch(`${base}/prefs`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...settings, ...local }) });
   assert.equal(put.status, 200);

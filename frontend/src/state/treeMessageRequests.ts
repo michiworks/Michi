@@ -2,23 +2,58 @@ import { fetchTreeMessageSnapshot, fetchTreeMessagePage, type TreeMessagePage } 
 import type { ChatNodeState, Project } from './chatTypes';
 import { findTreeIdForNode } from './tree';
 import { noteMessageRequest } from './messageLoadDiagnostics';
+import { nodeMessageCount } from './nodeMessageCount';
 import { isLocalConnectionId, LOCAL_BACKEND_CONNECTION_ID, projectConnectionId } from '../config/backendConnections';
+import { isPhoneLayout } from '../hooks/usePhoneLayout';
 
 export const TREE_PREFETCH_LIMIT = 4;
 export const TREE_PREFETCH_CONCURRENCY = 2;
 export const TREE_PREFETCH_TTL_MS = 15_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 /**
- * Messages per node on a remote tree's first page. Over a tunnel the bytes are
- * the wait (tool calls dominate them), and a pane shows the last screenful
- * first; older history pages in on scroll (historyBefore) or when a send needs
- * all of it (ensureCompleteHistory).
+ * Messages per node on a tree's first page. Over a tunnel the bytes are the
+ * wait (tool calls dominate them); on a phone it is mounting them. A pane
+ * shows the last screenful first; older history pages in on scroll
+ * (historyBefore) or when a send needs all of it (ensureCompleteHistory).
  */
-export const REMOTE_FIRST_PAGE_LIMIT = 15;
+export const TREE_FIRST_PAGE_LIMIT = 15;
 
-/** A remote tree's first page, with the per-node limit above. */
-export function fetchRemoteTreeFirstPage(workspaceId: string, treeId: string, connectionId: string, signal?: AbortSignal) {
-  return fetchTreeMessagePage(workspaceId, treeId, connectionId, signal, { limit: REMOTE_FIRST_PAGE_LIMIT });
+/**
+ * A tree's first page: per node, whole turns up to the limit above or this
+ * many bytes, whichever comes first; the newest turn comes whole. Finished
+ * calls come without their bodies (DeferredToolCalls loads them).
+ */
+export const TREE_FIRST_PAGE = { limit: TREE_FIRST_PAGE_LIMIT, maxBytes: 128 * 1024, leanToolCalls: true } as const;
+
+/**
+ * A local tree holding more messages than this (its nodes' counts summed)
+ * opens on its first page in a desktop window too. A smaller one is read
+ * whole: one fast local read, and find, sends and export have its history
+ * without reading again.
+ */
+export const LOCAL_FIRST_PAGE_MIN_MESSAGES = 300;
+
+/**
+ * Whether opening `treeId` reads its first page (TREE_FIRST_PAGE) rather than
+ * every message: a remote tree always; a local one in the phone layout
+ * (`phone`: a phone through the mobile gateway counts as local), or when it
+ * is long. Counts come from boot metadata for nodes not read yet.
+ */
+export function opensOnFirstPage(project: Project, treeId: string, nodes: Record<string, ChatNodeState>, phone: boolean): boolean {
+  if (phone || !isLocalConnectionId(projectConnectionId(project))) return true;
+  let total = 0;
+  for (const id of project.chatIds) {
+    const node = nodes[id];
+    if (!node || node.deletedAt || findTreeIdForNode(id, project) !== treeId) continue;
+    total += nodeMessageCount(node);
+    if (total > LOCAL_FIRST_PAGE_MIN_MESSAGES) return true;
+  }
+  return false;
+}
+
+/** A tree's first page (TREE_FIRST_PAGE); a local tree's `connectionId` is its workspace's (undefined). */
+export function fetchTreeFirstPage(workspaceId: string, treeId: string, connectionId: string | undefined, signal?: AbortSignal) {
+  return fetchTreeMessagePage(workspaceId, treeId, connectionId, signal, { ...TREE_FIRST_PAGE });
 }
 
 interface TreeRequest {
@@ -36,13 +71,14 @@ interface TreeRequest {
   timeout?: ReturnType<typeof setTimeout>;
 }
 
-// Activating a tree stamps viewedAt (and the seen completion count) before its
-// pending read resolves. That presentation-only change must not invalidate an
-// otherwise identical snapshot.
+// Activating a tree stamps viewedAt (and the seen completion count, with what
+// a pane has yet to show of it) before its pending read resolves. That
+// presentation-only change must not invalidate an otherwise identical snapshot.
+const VIEW_MARK_FIELDS: ReadonlySet<keyof ChatNodeState> = new Set(['viewedAt', 'seenCompletionSeq', 'unreadOnOpen']);
 export function sameTreeMessageNode(before: ChatNodeState | undefined, after: ChatNodeState | undefined): boolean {
   if (!before || !after) return false;
   return (Object.keys({ ...before, ...after }) as Array<keyof ChatNodeState>)
-    .every((key) => key === 'viewedAt' || key === 'seenCompletionSeq' || before[key] === after[key]);
+    .every((key) => VIEW_MARK_FIELDS.has(key) || before[key] === after[key]);
 }
 
 /** What a tree read answers for: the node's messages, where it is, and its replay cursors. */
@@ -80,6 +116,8 @@ function requestKey(connectionId: string | undefined, projectId: string, treeId:
 export interface TreeMessageRequestsOptions {
   /** Every remote tree page this pool reads, as received (the remote snapshot cache keeps the recent ones). */
   onRemotePage?: (project: Project, treeId: string, page: TreeMessagePage) => void;
+  /** Whether the window has the phone layout as a read starts (opensOnFirstPage); isPhoneLayout by default. */
+  phoneLayout?: () => boolean;
 }
 
 /** Short-lived speculative reads, scoped to one ChatProvider/user, never UI state. */
@@ -142,12 +180,13 @@ export class TreeMessageRequests {
     if (!foreground) entry.timeout = setTimeout(() => this.drop(key, entry), REQUEST_TIMEOUT_MS);
     this.entries.set(key, entry);
     entry.settle = noteMessageRequest(snapshot.keys(), foreground ? 'tree' : 'prefetch');
+    const connectionId = projectConnectionId(project);
+    const remote = !isLocalConnectionId(connectionId);
+    const firstPage = opensOnFirstPage(project, treeId, nodes, (this.options.phoneLayout ?? isPhoneLayout)());
     entry.promise = (async () => {
       try {
-        const connectionId = projectConnectionId(project);
-        const remote = !isLocalConnectionId(connectionId);
-        const rows = remote
-          ? await fetchRemoteTreeFirstPage(project.id, treeId, connectionId, controller.signal)
+        const rows = firstPage
+          ? await fetchTreeFirstPage(project.id, treeId, remote ? connectionId : project.backendConnectionId, controller.signal)
           : await fetchTreeMessageSnapshot(project.id, treeId, project.backendConnectionId, controller.signal);
         if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
         entry.settle?.(undefined, !entry.foreground);

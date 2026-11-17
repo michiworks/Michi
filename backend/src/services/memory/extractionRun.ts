@@ -34,6 +34,7 @@ import {
 import { buildExtractionPrompt, commitExtractionPayload, type ExtractionPayload, type ExtractionTurnInput } from './extractionV2';
 import { profileMemoryCount, userScopeChangesSince } from './memoryRepository';
 import { getMemorySettings, memoryVersion } from './memoryService';
+import { advanceTopicPass, buildTopicPassPrompt, commitTopicsPayload, topicPassPending, TOPICS_RUN_ID_PREFIX, type TopicsPayload } from './memoryTopics';
 import { lastTypedConversation, lastTypedInto, storedTypedText } from './typedText';
 import {
   buildProfilePrompt, commitProfilePayload, listedProfileSources, memoryProfileBootstrapInstructions, profileLanguage, profileRebuildState,
@@ -345,7 +346,7 @@ export function memoryExtractionHasWork(input: { jobId: string; workspaceId: str
   }
   if (!servesProfile(hold)) return false;
   if (consolidationDueOn(cursor.ownerUserId, input.jobId, now)) return true;
-  return profileRebuildDue(cursor.ownerUserId, now);
+  return topicPassIsWork(cursor.ownerUserId, now) || profileRebuildDue(cursor.ownerUserId, now);
 }
 
 // ── consolidation (consolidation.ts) ────────────────────────────────────────
@@ -593,6 +594,95 @@ function planProfileRun(cursor: ExtractionCursor, input: PlanInput, position: nu
     sources: [], related: prompt.sources.map((source) => ({ ref: source.ref, memoryId: source.memoryId })),
   });
   return { kind: 'run', id, system, prompt: prompt.prompt, configRevision: cursor.revision, sources: 0, nodeId: null };
+}
+
+// ── topics (memoryTopics.ts) ────────────────────────────────────────────────
+
+/**
+ * Whether the topic pass should run now: as for a profile rebuild, memory is
+ * on, automatic memory may run and the store is idle; and a memory past the
+ * pass's cursor has no topic. The pass has no session tool: only an
+ * execution answered directly runs it (planTopicsRun). Database reads only.
+ */
+export function topicPassDue(ownerUserId: string, now: number): boolean {
+  if (!extractionLocalOnly() || getMemorySettings(ownerUserId).mode !== 'auto') return false;
+  if (getExtractionState(ownerUserId).paused) return false;
+  if (extractionBudgetLeft(ownerUserId, now) < MEMORY_EXTRACTION_LIMITS.minExecutionBudget) return false;
+  return topicPassPending(ownerUserId) && extractionIdle(ownerUserId, now);
+}
+
+/** The topic pass is work only for an owner whose background runtime answers directly; else no execution would run it. */
+function topicPassIsWork(ownerUserId: string, now: number): boolean {
+  return answersMemoryDirectly(getRuntime(resolveBackgroundRuntime(ownerUserId).runtimeId)) && topicPassDue(ownerUserId, now);
+}
+
+/**
+ * A topic run for this consumer's execution: the next batch of memories
+ * without a topic, answered by one direct call (a runtime without them does
+ * not run it). The cursor moves past the batch now, so a failed run never
+ * lists the same notes again.
+ */
+function planTopicsRun(cursor: ExtractionCursor, input: PlanInput, position: number): ExtractionPlan | null {
+  const ownerUserId = cursor.ownerUserId;
+  if (input.direct !== true || !topicPassDue(ownerUserId, input.now)) return null;
+  const prompt = buildTopicPassPrompt({ ownerUserId, now: input.now, liveWorkspace: consolidationLiveWorkspace(ownerUserId) });
+  if (!prompt) return null;
+  advanceTopicPass(ownerUserId, prompt.through);
+  if (prompt.listed.length === 0) return null;
+  const budget = Math.min(MEMORY_EXTRACTION_LIMITS.executionTokenBudget, extractionBudgetLeft(ownerUserId, input.now));
+  const id = `${TOPICS_RUN_ID_PREFIX}${randomUUID()}`;
+  insertExtractionRun({
+    id, kind: 'topics', ownerUserId, workspaceId: cursor.workspaceId, jobId: input.jobId, runId: input.runId,
+    configRevision: cursor.revision, after: position, through: position, memoryVersion: 0,
+    tombstoneMark: latestTombstoneSeq(ownerUserId), tokenBudget: budget,
+    estimatedTokens: executionBaseTokens(prompt.system, true) + estimateTokens(prompt.prompt), now: input.now,
+    sources: [], related: prompt.listed,
+  });
+  return { kind: 'run', id, system: prompt.system, prompt: prompt.prompt, configRevision: cursor.revision, sources: 0, nodeId: null };
+}
+
+function settleTopicsRun(run: ExtractionRunRecord, current: ExtractionRunRecord, input: SettleExtractionInput, reportedTokens: number): {
+  status: SettleStatus; summary: string | null; error: string | null;
+} {
+  const ownerUserId = run.ownerUserId;
+  const end = (state: 'succeeded' | 'failed' | 'cancelled', summary: string | null, error: string | null, labeled = 0) => {
+    finishExtractionRun({ id: run.id, state, summary, error, reportedTokens, counts: { proposed: labeled, dropped: 0, noChange: 0 }, now: input.now });
+    pruneExtractionRuns(run.workspaceId, ownerUserId, MEMORY_EXTRACTION_LIMITS.runsKept);
+  };
+  const notFiled = (error: string) => {
+    end('failed', null, error);
+    return { status: 'succeeded' as const, summary: `Automatic memory: no topics were set (${error})`, error: null };
+  };
+  if (input.status === 'cancelled' || input.status === 'interrupted') {
+    const error = input.status === 'cancelled' ? 'Cancelled' : input.error ?? 'Automatic memory stopped before finishing';
+    end(input.status === 'cancelled' ? 'cancelled' : 'failed', null, error);
+    return { status: input.status, summary: null, error };
+  }
+  if (getMemorySettings(ownerUserId).mode !== 'auto') {
+    const error = 'Automatic memory was turned off during this run; nothing was saved';
+    end('cancelled', null, error);
+    return { status: 'cancelled', summary: null, error };
+  }
+  if (input.status !== 'succeeded') return notFiled(input.error ?? 'Automatic memory stopped before finishing');
+  if (current.payload === null) return notFiled('The model gave no valid answer');
+  let payload: TopicsPayload;
+  try {
+    payload = JSON.parse(current.payload) as TopicsPayload;
+    if (!Array.isArray(payload?.topics)) throw new Error('not a payload');
+  } catch {
+    return notFiled('The staged answer could not be read');
+  }
+  const outcome: { summary: string } | { error: string } = runInTransaction((): { summary: string } | { error: string } => {
+    if (!ownsUnattendedRun(run.runId, input.claimedBy, input.now)) return { error: 'The scheduler no longer owns this run; nothing was saved' };
+    const fresh = getExtractionRun(run.id, ownerUserId);
+    if (!fresh || fresh.state !== 'active') return { error: 'Automatic memory run already settled' };
+    const labeled = commitTopicsPayload(payload, { ownerUserId, listed: fresh.related.map(({ ref, memoryId }) => ({ ref, memoryId })) });
+    const summary = `Automatic memory: filed ${labeled} memor${labeled === 1 ? 'y' : 'ies'} under topics`;
+    end('succeeded', summary, null, labeled);
+    return { summary };
+  });
+  if ('error' in outcome) return notFiled(outcome.error);
+  return { status: 'succeeded', summary: outcome.summary, error: null };
 }
 
 // ── source turns ─────────────────────────────────────────────────────────────
@@ -867,6 +957,7 @@ export function planMemoryExtractionRun(input: PlanInput): ExtractionPlan {
     if (input.exclude) return { kind: 'skip', summary };
     const current = getExtractionCursor(cursor.workspaceId, cursor.ownerUserId) ?? cursor;
     return planConsolidationRun(current, input, current.completionCursor)
+      ?? planTopicsRun(current, input, current.completionCursor)
       ?? planProfileRun(current, input, current.completionCursor) ?? { kind: 'skip', summary };
   };
   if (hold === 'navigation_off') return profile(holdSummary(hold));
@@ -1076,6 +1167,7 @@ export function settleMemoryExtractionRun(input: SettleExtractionInput): { statu
   const current = getExtractionRun(run.id, run.ownerUserId)!;
   if (run.kind === 'profile') return settleProfileRun(run, current, input, reported ?? tokens);
   if (run.kind === 'consolidate') return settleConsolidationRun(run, current, input, reported ?? tokens);
+  if (run.kind === 'topics') return settleTopicsRun(run, current, input, reported ?? tokens);
   const sources = listExtractionSources(run.id);
   const fail = (status: SettleStatus, error: string) => {
     finishExtractionRun({ id: run.id, state: status === 'cancelled' ? 'cancelled' : 'failed', summary: null, error, reportedTokens: reported ?? tokens, now: input.now });

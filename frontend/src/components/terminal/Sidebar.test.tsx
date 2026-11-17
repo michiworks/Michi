@@ -214,7 +214,7 @@ describe('TerminalSidebar BottomNav', () => {
     await waitFor(() => expect(container.querySelector('aside')).toBeNull());
   });
 
-  it('quiets sidebar scrollbars until the pointer enters, then lingers for 2s', () => {
+  it('quiets sidebar scrollbars until the pointer enters, then lingers for 700ms', () => {
     vi.useFakeTimers();
     try {
       const { container } = render(
@@ -236,7 +236,7 @@ describe('TerminalSidebar BottomNav', () => {
 
       fireEvent.pointerLeave(aside!);
       expect(aside!.dataset.scrollbars).toBe('visible');
-      act(() => { vi.advanceTimersByTime(1999); });
+      act(() => { vi.advanceTimersByTime(699); });
       expect(aside!.dataset.scrollbars).toBe('visible');
       act(() => { vi.advanceTimersByTime(1); });
       expect(aside!.dataset.scrollbars).toBe('quiet');

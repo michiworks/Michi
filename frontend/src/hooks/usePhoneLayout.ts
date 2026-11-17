@@ -9,8 +9,10 @@ const PHONE_LANDSCAPE_MAX_HEIGHT = 500;
  * Whether the window gets the phone layout: up to PHONE_MAX_WIDTH wide, or
  * a phone turned sideways (a coarse pointer, at most 500px tall). The CSS
  * says the same with `(max-width: 700px), (pointer: coarse) and (max-height: 500px)`.
+ * Without a window (Node tests) there is no phone.
  */
-function isPhoneLayout(): boolean {
+export function isPhoneLayout(): boolean {
+  if (typeof window === 'undefined') return false;
   if (window.innerWidth <= PHONE_MAX_WIDTH) return true;
   return window.innerHeight <= PHONE_LANDSCAPE_MAX_HEIGHT && (window.matchMedia?.('(pointer: coarse)')?.matches ?? false);
 }

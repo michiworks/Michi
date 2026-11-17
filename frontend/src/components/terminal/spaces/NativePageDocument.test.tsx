@@ -1,7 +1,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { PAGE_BLOCK_CATALOG, type PageDto, type PageEditOp } from 'michi-shared';
+import { PAGE_BLOCK_CATALOG, blockSubmissionSignature, type PageDto, type PageEditOp } from 'michi-shared';
 import NativePageDocument from './NativePageDocument';
 import { getCompanionPanelState, resetCompanionPanelForTests, takeCompanionRequests } from '../../../state/companion/companionPanel';
 import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
@@ -36,7 +36,7 @@ describe('NativePageDocument', () => {
     fireEvent.click(within(screen.getByRole('navigation', { name: 'Contents' })).getByRole('button', { name: 'Destination' }));
     await waitFor(() => expect(screen.getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true'));
     await waitFor(() => expect(container.querySelector('details')?.open).toBe(true));
-    expect([...container.querySelectorAll('[data-flash]')].some(el => el.getAttribute('data-block-id') === 'group:one/α.1.0')).toBe(true);
+    expect([...container.querySelectorAll('[data-reveal-flash]')].some(el => el.getAttribute('data-block-id') === 'group:one/α.1.0')).toBe(true);
   });
 
   it('offers the requested block menu and selects, asks, opens exact sources and copies text', async () => {
@@ -104,6 +104,13 @@ describe('NativePageDocument', () => {
     expect(onEdit).toHaveBeenLastCalledWith([{ op: 'delete', id: 'b1', expectRev: 1 }], 2);
   });
 
+  it('moves focus to the next block before Archive takes one off the page', async () => {
+    const { container } = render(<NativePageDocument page={makePage(2, [{ id: 'b1', rev: 1, type: 'markdown', text: 'One' }, { id: 'b2', rev: 1, type: 'markdown', text: 'Two' }])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Block menu' })[0]!);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Archive' }));
+    expect(document.activeElement).toBe(container.querySelector('[data-block-id="b2"]'));
+  });
+
   it('keeps content and reports a refused archive instead of pretending it succeeded', async () => {
     const onEdit = vi.fn().mockResolvedValue('stale');
     render(<NativePageDocument page={makePage()} onEdit={onEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
@@ -133,6 +140,15 @@ describe('NativePageDocument', () => {
     fireEvent.click(screen.getByText('Add', { selector: 'button' }), { detail: 1 });
     expect((await screen.findByRole('alert')).textContent).toBe('Could not save this change. Try again.');
     expect(onEdit).toHaveBeenCalledTimes(1);
+  });
+
+  it('says plain information on the block it is about, muted, not as an alert', () => {
+    const { container } = render(<NativePageDocument page={makePage(2, [{ id: 'c1', rev: 1, type: 'checklist', items: [{ text: 'Review', done: false }] }])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Item 1' }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(within(container.querySelector<HTMLElement>('[data-block-id="c1"]')!).getByRole('status').textContent).toBe('A checklist needs at least one item');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('uses the shared editor and submits a strict update with the opened page revision', async () => {
@@ -466,14 +482,40 @@ describe('NativePageDocument', () => {
       expect(takeCompanionRequests()).toEqual([{ draft: 'Draft the release reply' }]);
     });
 
-    it('send a visible choice right away through the panel', () => {
+    it('send a visible choice right away through the panel, once the page has stored it', async () => {
       resetCompanionPanelForTests();
+      const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === 'POST'
+        ? json(201, { submission: { ...JSON.parse(init.body as string), submittedAt: Date.now() } })
+        : json(200, { submissions: [] }));
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        const poll = { id: 'p', rev: 1, ...PAGE_BLOCK_CATALOG.poll.example! } as unknown as PageDto['blocks'][number];
+        render(<NativePageDocument page={makePage(2, [poll])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+        expect(String(fetchMock.mock.calls[0][0])).toContain('/workspaces/ws-1/block-submissions?host=page%3Apg-1');
+        fireEvent.click(screen.getByRole('radio', { name: 'Sushi' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Vote' }));
+        await screen.findByText(/Submitted ·/);
+        expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string)).toMatchObject({ host: { kind: 'page', pageId: 'pg-1' }, blockId: 'p', value: [1], text: 'For “Lunch?” I pick: Sushi' });
+        expect(getCompanionPanelState().target).toMatchObject({ pageId: 'pg-1', blockId: 'p' });
+        expect(takeCompanionRequests()).toEqual([{ send: 'For “Lunch?” I pick: Sushi' }]);
+        expect(screen.queryByRole('button', { name: 'Vote' })).toBeNull();
+      } finally { vi.unstubAllGlobals(); }
+    });
+
+    it('show a stored submission on a read-only page and store nothing there', async () => {
       const poll = { id: 'p', rev: 1, ...PAGE_BLOCK_CATALOG.poll.example! } as unknown as PageDto['blocks'][number];
-      render(<NativePageDocument page={makePage(2, [poll])} onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
-      fireEvent.click(screen.getByRole('radio', { name: 'Sushi' }));
-      fireEvent.click(screen.getByRole('button', { name: 'Vote' }));
-      expect(getCompanionPanelState().target).toMatchObject({ pageId: 'pg-1', blockId: 'p' });
-      expect(takeCompanionRequests()).toEqual([{ send: 'For “Lunch?” I pick: Sushi' }]);
+      const stored = { blockId: 'p', signature: blockSubmissionSignature(PAGE_BLOCK_CATALOG.poll.example!), value: [0], text: 'For “Lunch?” I pick: Ramen', submittedAt: Date.now() };
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({ submissions: [stored] }), { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        render(<NativePageDocument page={makePage(2, [poll])} readOnly onEdit={noopEdit} onOpenPage={vi.fn()} renderDatabaseRef={() => null} />);
+        await screen.findByText(/Submitted ·/);
+        expect((screen.getByRole('radio', { name: 'Ramen' }) as HTMLInputElement).checked).toBe(true);
+        expect(screen.getByRole('radio', { name: 'Sushi' }).matches(':disabled')).toBe(true);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally { vi.unstubAllGlobals(); }
     });
 
     it('are not offered on a read-only page or where there is no assistant', () => {

@@ -4,12 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SettingsToc } from './SettingsToc';
 
 // jsdom lays nothing out: each test says how tall the page is and where its groups sit.
-const layout = vi.hoisted(() => ({ windowWidth: 1080, scrollHeight: 3800, clientHeight: 700, tops: {} as Record<string, number> }));
+const layout = vi.hoisted(() => ({ scrollHeight: 3800, clientHeight: 700, tops: {} as Record<string, number> }));
 
 function Page({ titles }: { titles: string[] }) {
   const ref = useRef<HTMLElement>(null);
   return (
-    <div data-testid="window">
+    <div>
       <section ref={ref} data-testid="page">
         {titles.map((title) => (
           <section key={title} data-title={title}><h2 className="settings-section__title">{title}</h2></section>
@@ -21,13 +21,11 @@ function Page({ titles }: { titles: string[] }) {
 }
 
 function stubLayout() {
-  const sizes = (el: Element, key: 'clientWidth' | 'scrollHeight' | 'clientHeight') => {
-    const id = (el as HTMLElement).dataset?.testid;
-    if (key === 'clientWidth') return id === 'window' ? layout.windowWidth : 0;
-    if (id !== 'page') return 0;
+  const sizes = (el: Element, key: 'scrollHeight' | 'clientHeight') => {
+    if ((el as HTMLElement).dataset?.testid !== 'page') return 0;
     return key === 'scrollHeight' ? layout.scrollHeight : layout.clientHeight;
   };
-  for (const key of ['clientWidth', 'scrollHeight', 'clientHeight'] as const) {
+  for (const key of ['scrollHeight', 'clientHeight'] as const) {
     vi.spyOn(HTMLElement.prototype, key, 'get').mockImplementation(function (this: HTMLElement) { return sizes(this, key); });
   }
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
@@ -40,7 +38,6 @@ function stubLayout() {
 async function frame() { await act(async () => { await new Promise((resolve) => requestAnimationFrame(() => resolve(null))); }); }
 
 beforeEach(() => {
-  layout.windowWidth = 1080;
   layout.scrollHeight = 3800;
   layout.clientHeight = 700;
   layout.tops = { Name: 0, Model: 900, Watching: 2000, Writing: 3300 };
@@ -68,14 +65,8 @@ describe('SettingsToc', () => {
     expect(screen.getByRole('button', { name: 'Name' }).hasAttribute('aria-current')).toBe(false);
   });
 
-  it('stays out of a page that two screens hold, and of a narrow window', async () => {
+  it('stays out of a page that two screens hold', async () => {
     layout.scrollHeight = 1300;
-    const view = render(<Page titles={['Name', 'Model', 'Watching', 'Writing']} />);
-    await frame();
-    expect(screen.queryByRole('navigation', { name: 'On this page' })).toBeNull();
-    view.unmount();
-    layout.scrollHeight = 3800;
-    layout.windowWidth = 900;
     render(<Page titles={['Name', 'Model', 'Watching', 'Writing']} />);
     await frame();
     expect(screen.queryByRole('navigation', { name: 'On this page' })).toBeNull();

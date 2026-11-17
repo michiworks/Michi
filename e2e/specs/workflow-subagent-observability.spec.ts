@@ -126,7 +126,7 @@ test('subagent and workflow cards open the Background work drawer; the pane badg
 
   // The pane title says background work runs: the workflow (the subagent finished).
   const badge = page.getByTestId('pane-background-work-badge');
-  await expect(badge).toHaveText('◆1');
+  await expect(badge).toHaveText('1');
   await expect(badge).toHaveAttribute('aria-label', '1 workflow running. Show background work');
 
   // The subagent card is one line: name, the result's first line, status.

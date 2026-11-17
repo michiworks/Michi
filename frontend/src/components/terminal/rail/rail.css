@@ -22,7 +22,7 @@
   place-items: center;
   padding: 0;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--ui-radius);
   background: transparent;
   color: var(--term-mid);
   cursor: pointer;
@@ -44,7 +44,7 @@
   top: 8px;
   bottom: 8px;
   width: 2px;
-  border-radius: 0 2px 2px 0;
+  border-radius: 0 var(--ui-radius-sm) var(--ui-radius-sm) 0;
   background: var(--term-accent);
 }
 .area-rail__count {
@@ -55,7 +55,7 @@
   height: 14px;
   padding: 0 3px;
   box-sizing: border-box;
-  border-radius: 7px;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-accent);
   color: var(--term-surface);
   font: 600 9px/14px var(--font-mono);
@@ -70,7 +70,7 @@
   top: 4px;
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-select);
   box-shadow: 0 0 0 2px var(--term-sidebar-bg, var(--term-surface));
   pointer-events: none;
@@ -104,10 +104,11 @@
   font-size: var(--pt-tab, var(--fs-2xs));
   cursor: pointer;
 }
+/* The open area: the --term-alt pill of a selected tab (ST-18). */
 .area-tabs__btn[aria-current='page'],
 .area-tabs__btn[aria-expanded='true'] {
-  background: var(--term-accent-f);
-  color: var(--term-accent);
+  background: var(--term-alt);
+  color: var(--term-fg);
 }
 .area-tabs__btn:focus-visible {
   outline: var(--focus-ring);
@@ -137,7 +138,7 @@
   color: var(--term-mid); font-family: var(--ui-font); font-size: var(--sb-fs, var(--fs-xl));
   font-weight: 450; white-space: nowrap; cursor: pointer;
 }
-.area-side__row[aria-disabled='true'] { cursor: default; }
+.area-side__row[aria-disabled='true'] { cursor: not-allowed; }
 .area-side__row.is-strong { color: var(--term-fg); }
 .area-side__row.is-flat { gap: 0; }
 .area-side__row.is-nav {
@@ -149,13 +150,15 @@
 .area-side__row[aria-current] { background: var(--term-alt); color: var(--term-fg); }
 .area-side__row[aria-current]::before {
   content: ''; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px;
-  background: var(--term-accent); border-radius: 0 2px 2px 0;
+  background: var(--term-accent); border-radius: 0 var(--ui-radius-sm) var(--ui-radius-sm) 0;
 }
 .area-side__row:focus-visible, .area-side__main:focus-visible, .area-side__twist:focus-visible {
   outline: var(--focus-ring); outline-offset: -2px;
 }
 .area-side__row > svg { flex: none; color: var(--term-mid); }
 .area-side__row > svg, .area-side__main > svg { width: var(--sb-icon-size, 15px); height: var(--sb-icon-size, 15px); }
+/* That slot resizes the icon in CSS; keep its stroke at icons.tsx's STROKE_PX anyway. */
+:is(.area-side__row, .area-side__main) > svg :is(path, line, rect, circle, ellipse, polyline, polygon) { vector-effect: non-scaling-stroke; stroke-width: var(--icon-stroke); }
 .area-side__row[aria-current] > svg { color: var(--term-accent); }
 .area-side__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .area-side__count { font: 400 var(--sb-ts-fs, var(--fs-sm))/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--term-muted); }
@@ -163,13 +166,17 @@
 .area-side__tag {
   flex: none;
   font-size: var(--fs-xs); color: var(--term-mid); border: 1px solid var(--term-line);
-  border-radius: 3px; padding: 1px 5px; background: var(--term-surface);
+  border-radius: var(--ui-radius-sm); padding: 1px 5px; background: var(--term-surface);
 }
 .area-side__sub {
   flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font: 400 var(--sb-ts-fs, var(--fs-sm))/1.5 var(--ui-font); color: var(--term-muted);
 }
 .area-side__note { padding: var(--sb-row-py, 4px) var(--sb-area-right, 16px) var(--sb-row-py, 4px) var(--sb-area-left, 20px); font-size: var(--sb-ts-fs, var(--fs-sm)); color: var(--term-faint); }
+/* An empty or failed list: one sentence and the one action beside it. */
+.area-side__note[data-state] { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
+.area-side__note[data-state='empty'] { color: var(--term-muted); }
+.area-side__note[data-state='failed'] { color: var(--term-danger-text); }
 .area-side__spin { animation: tspin var(--t-loop-fast) linear infinite; }
 @media (prefers-reduced-motion: reduce) { .area-side__spin { animation: none; } }
 /* A row holding two controls: the expand chevron and the row's own link. */
@@ -179,7 +186,9 @@
   position: absolute; left: max(0px, calc(var(--sb-area-left, 20px) - 16px)); width: 14px; height: 100%; flex: none; padding: 0; box-sizing: border-box;
   display: grid; place-items: center; border: 0; background: none; color: var(--term-faint); cursor: pointer;
 }
-.area-side__twist svg { transition: transform var(--t-quick) var(--t-ease); }
+/* 24px wide to a mouse; the aria-hidden placeholder that shares the class takes nothing. */
+button.area-side__twist::after { content: ''; position: absolute; inset: 0 -5px; }
+.area-side__twist svg { transition: transform var(--t-soft) var(--t-ease); }
 .area-side__twist[aria-expanded='true'] svg { transform: rotate(90deg); }
 /* Classic's icon gutter is too narrow for a second control. Keep the expand
    button beside the menu there, with its own space clear of the label. */
@@ -191,7 +200,7 @@
   border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .area-side__main > svg { flex: none; color: var(--term-mid); }
-.area-side__dot { width: 7px; height: 7px; margin-inline: calc((var(--sb-icon-size, 15px) - 7px) / 2); flex: none; border-radius: 50%; background: var(--term-line-s); }
+.area-side__dot { width: 7px; height: 7px; margin-inline: calc((var(--sb-icon-size, 15px) - 7px) / 2); flex: none; border-radius: var(--ui-radius-pill); background: var(--term-line-s); }
 .area-side__dot[data-tone='waiting'] { background: var(--term-waiting); }
 .area-side__dot[data-tone='stalled'] {
   background: linear-gradient(90deg, var(--term-mauve) 50%, var(--term-mauve-f) 50%);
@@ -202,7 +211,7 @@
   padding: var(--sb-nav-py, 6px) calc(var(--sb-area-right, 16px) + var(--sb-inset, 0px)) var(--sb-nav-py, 6px) calc(var(--sb-area-left, 20px) + var(--sb-inset, 0px));
   font: 400 var(--sb-ts-fs, var(--fs-sm))/1.5 var(--ui-font); color: var(--term-muted);
 }
-.area-side__foot-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--term-line-s); }
+.area-side__foot-dot { width: 6px; height: 6px; flex: none; border-radius: var(--ui-radius-pill); background: var(--term-line-s); }
 
 /* Nested pages follow Chat's branch step, and keep its title size at every depth. */
 .area-side__row.is-page { padding-left: calc(var(--sb-area-left, 20px) + var(--sb-icon-size, 15px) + var(--sb-icon-gap, 6px) + var(--page-depth, 0) * var(--sb-indent-step, 16px)); }
@@ -217,8 +226,8 @@
 
 .area-settings { flex: 1; min-height: 0; overflow: auto; }
 .area-settings .area-settings__doc { max-width: 880px; margin: 0 auto; padding: 44px 56px 120px; box-sizing: border-box; overflow: visible; }
-.area-settings__kicker { margin: 0 0 8px; font: 500 10.5px/1 var(--ui-font); letter-spacing: .14em; text-transform: uppercase; color: var(--term-muted); }
-.area-settings__title { margin: 0 0 22px; font-size: 32px; line-height: 1.15; font-weight: 600; letter-spacing: -.01em; color: var(--term-fg); }
+.area-settings__kicker { margin: 0 0 8px; font: 500 var(--fs-xs)/1 var(--ui-font); letter-spacing: var(--ls-caps-wide); text-transform: uppercase; color: var(--term-muted); }
+.area-settings__title { margin: 0 0 22px; font-size: var(--fs-5xl); line-height: 1.15; font-weight: 600; letter-spacing: -.01em; color: var(--term-fg); }
 .area-settings__note { color: var(--term-muted); font-size: var(--fs-md); }
 .area-settings__links { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 /* A full-width row: the count follows its label rather than the far edge. */
@@ -236,7 +245,7 @@
   padding: 0 8px;
   border: 0;
   background: transparent;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   font-size: var(--fs-2xl);
   cursor: pointer;

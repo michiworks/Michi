@@ -1,6 +1,6 @@
-import React, { useEffect, useId, useRef, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
-import { BookOpen, Code, Copy, Eye, Pencil, Trash2, X } from 'lucide-react';
+import { CloseIcon, CodeIcon, CopyIcon, EditIcon, EyeIcon, SkillIcon, TrashIcon } from '../../icons';
 import { toast } from 'sonner';
 import { parseSkillFile, withSkillFileName, type SkillDetail, type SkillSummary } from 'michi-shared';
 import MarkdownContent from '../../../MarkdownContent';
@@ -62,7 +62,8 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
   const [source, setSource] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
-  const busy = useRef(false);
+  // The write in flight, shown on the control it came from.
+  const [busy, setBusy] = useState<'enabled' | 'delete' | null>(null);
   const instructionsId = useId();
   const { workspaceId, backendConnectionId, machine, root } = place;
 
@@ -79,9 +80,9 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
   const backend = { backendConnectionId };
 
   /** One write at a time; the controls stay where they are, so focus does too. */
-  const write = async <T,>(what: string, action: () => Promise<T>, done: (value: T) => void) => {
-    if (busy.current) return;
-    busy.current = true;
+  const write = async <T,>(control: 'enabled' | 'delete', what: string, action: () => Promise<T>, done: (value: T) => void) => {
+    if (busy) return;
+    setBusy(control);
     setError(null);
     try {
       done(await action());
@@ -89,12 +90,12 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
     } catch (reason) {
       setError(`Couldn’t ${what}: ${errorText(reason)}.`);
     } finally {
-      busy.current = false;
+      setBusy(null);
     }
   };
 
   const remove = async () => {
-    if (busy.current) return;
+    if (busy) return;
     const where = root ? ` from ${root}${machine ? ` on ${machine}` : ''}` : '';
     const confirmed = await confirmDialog({
       title: 'Delete skill?',
@@ -104,7 +105,7 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
       confirmLabel: 'Delete skill',
       danger: true,
     });
-    if (confirmed) void write('delete the skill', () => deleteLibrarySkill(skill.name, backend), () => onDeleted(skill));
+    if (confirmed) void write('delete', 'delete the skill', () => deleteLibrarySkill(skill.name, backend), () => onDeleted(skill));
   };
 
   const copyPath = (path: string) => {
@@ -124,7 +125,7 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
       label: 'Location',
       value: skill.path ? <>
         <span className="skills-location"><code>{skill.path}</code>
-          <TrashIconButton icon={Copy} tooltip="Copy path" aria-label="Copy path" onClick={() => copyPath(skill.path!)} /></span>
+          <TrashIconButton icon={CopyIcon} tooltip="Copy path" aria-label="Copy path" onClick={() => copyPath(skill.path!)} /></span>
         {machine && <span className="skills-sub">on {machine}</span>}
         {skill.linkTarget && <span className="skills-sub">Links to {skill.linkTarget}</span>}
       </> : builtin ? 'Ships with Michi' : 'Not reported',
@@ -151,16 +152,16 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
   }
 
   return <>
-    <HistoryDetail backLabel="Skills" onBack={onBack} icon={BookOpen} title={skill.name} details={details} pageTitle
+    <HistoryDetail backLabel="Skills" onBack={onBack} icon={SkillIcon} title={skill.name} details={details} pageTitle
       kind={switchable ? `${library ? 'Library' : 'Built-in'} skill${skill.enabled ? '' : ' · Off'}` : [runtimeLabel, scopeLabel(skill)].filter(Boolean).join(' · ')}
       readOnly={!library}
       lead={<>
         {error && <div className="settings-history__error" role="alert"><span>{error}</span>
-          <TrashIconButton icon={X} tooltip="Dismiss error" aria-label="Dismiss error" onClick={() => setError(null)} /></div>}
+          <TrashIconButton icon={CloseIcon} tooltip="Dismiss error" aria-label="Dismiss error" onClick={() => setError(null)} /></div>}
         {switchable && <div className="settings-section skills-enabled"><div className="settings-section__body">
           <SettingsRow label="Enabled" description={enabledText(skill)}
-            control={<Switch on={skill.enabled} aria-label="Enabled"
-              onChange={(enabled) => void write(enabled ? 'turn it on' : 'turn it off', () => builtin
+            control={<Switch on={skill.enabled} busy={busy === 'enabled'} aria-label="Enabled"
+              onChange={(enabled) => void write('enabled', enabled ? 'turn it on' : 'turn it off', () => builtin
                 ? setBuiltinSkillEnabled(skill.name, enabled, backend)
                 : updateLibrarySkill(skill.name, { enabled }, backend), (saved) => {
                 onChanged(saved);
@@ -169,15 +170,16 @@ export function SkillDetailLevel({ skill, place, runtimeLabel, revision, taken, 
         </div></div>}
       </>}
       actions={library ? <>
-        <Button variant="primary" disabled={content === undefined} onClick={() => { if (content !== undefined) onEdit(content); }}><Pencil size={14} aria-hidden="true" />Edit</Button>
+        <Button variant="primary" disabled={content === undefined} onClick={() => { if (content !== undefined) onEdit(content); }}><EditIcon aria-hidden="true" />Edit</Button>
         <Button disabled={content === undefined} onClick={() => setRenaming(true)}>Rename…</Button>
-        <Button danger onClick={() => { void remove(); }}><Trash2 size={14} aria-hidden="true" />Delete…</Button>
+        <Button danger busy={busy === 'delete'} busyLabel={<><TrashIcon aria-hidden="true" />Deleting…</>} onClick={() => { void remove(); }}>
+          <TrashIcon aria-hidden="true" />Delete…</Button>
       </> : undefined}>
       <section className="settings-section skills-instructions" aria-labelledby={instructionsId}>
         <div className="settings-section__head">
           <h3 id={instructionsId} className="settings-section__title">Instructions</h3>
           {content !== undefined && <Button size="sm" variant="ghost" onClick={() => setSource((value) => !value)}>
-            {source ? <Eye size={13} aria-hidden="true" /> : <Code size={13} aria-hidden="true" />}{source ? 'Rendered' : 'View source'}
+            {source ? <EyeIcon aria-hidden="true" /> : <CodeIcon aria-hidden="true" />}{source ? 'Rendered' : 'View source'}
           </Button>}
         </div>
         <div className="settings-section__body">{instructions}</div>
@@ -231,7 +233,7 @@ function RenameDialog({ skill, content, taken, place, onClose, onRenamed }: {
       {problem && <p className="skills-field__error" role="alert">{problem}</p>}
       <footer>
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        <Button type="submit" variant="primary">{busy ? 'Renaming…' : 'Rename'}</Button>
+        <Button type="submit" variant="primary" busy={busy} busyLabel="Renaming…">Rename</Button>
       </footer>
     </form>
   </ModalShell>;

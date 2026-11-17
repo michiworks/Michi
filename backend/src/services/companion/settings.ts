@@ -84,7 +84,7 @@ export function parseCompanionBaselineValue(value: string): CompanionBaselineRec
   return { at: Number.isFinite(at) ? at : 0, open };
 }
 
-/** A change to some settings: nested objects merge, `sources.pipeline.watch`, `brief.days` and `workdays` replace the list. */
+/** A change to some settings: nested objects merge, `sources.pipeline.watch` and `workdays` replace the list. */
 export interface CompanionSettingsPatch {
   /** Pause Michi: true until resumed, false resumes. */
   paused?: boolean;
@@ -96,11 +96,11 @@ export interface CompanionSettingsPatch {
   sources?: { [K in CompanionConfigurableSource]?: Partial<CompanionSettings['sources'][K]> };
   pollMinutes?: number;
   heartbeat?: Partial<CompanionSettings['heartbeat']>;
-  brief?: Partial<CompanionSettings['brief']>;
   quietHours?: Partial<CompanionSettings['quietHours']>;
   workdays?: number[];
   /** DESIGN-v2 §6: the reasoning check-ins and new conversations use; null: the default (the lower of the global one and high). */
   reasoning?: RuntimeReasoning | null;
+  autoContinueChats?: boolean;
 }
 
 export const COMPANION_NAME_MAX_CHARS = 40;
@@ -205,7 +205,7 @@ export function parsePipelineNames(value: unknown, path = 'sources.pipeline.watc
 
 /**
  * Local weekdays (0 = Sunday … 6 = Saturday), de-duplicated and in week
- * order; at least one (the brief's days: off is brief.enabled).
+ * order; at least one.
  */
 export function parseCompanionWorkdays(value: unknown, path = 'workdays'): number[] {
   if (!Array.isArray(value)) throw invalid(`${path} must be a list of weekdays (0 = Sunday … 6 = Saturday)`);
@@ -231,10 +231,10 @@ const SETTINGS = group({
   }),
   pollMinutes: wholeNumber(COMPANION_LIMITS.minPollMinutes, COMPANION_LIMITS.maxPollMinutes),
   heartbeat: group({ enabled: bool, intervalMinutes: oneOf<CompanionHeartbeatMinutes>(COMPANION_HEARTBEAT_MINUTES) }),
-  brief: group({ enabled: bool, time: clock, days: (value, path) => parseCompanionWorkdays(value, path) }),
   quietHours: group({ enabled: bool, start: clock, end: clock }),
   workdays: (value, path) => parseCompanionWorkdays(value, path),
   reasoning,
+  autoContinueChats: bool,
 });
 
 /**
@@ -358,27 +358,11 @@ export function companionSourcesOff(settings: Pick<CompanionSettings, 'sources'>
   return COMPANION_CONFIGURABLE_SOURCES.filter((kind) => !settings.sources[kind].enabled);
 }
 
-/**
- * The brief's days as stored, or null when there are none to read (P3:
- * settings from before them read the old workdays as the brief's days).
- */
-function storedBriefDays(raw: unknown): number[] | null {
-  const brief = raw && typeof raw === 'object' ? (raw as { brief?: unknown }).brief : undefined;
-  const days = brief && typeof brief === 'object' ? (brief as { days?: unknown }).days : undefined;
-  if (days === undefined) return null;
-  try {
-    return parseCompanionWorkdays(days);
-  } catch {
-    return null;
-  }
-}
-
 /** The current settings: the defaults with every valid stored field applied, and Pause Michi at `now`. A fresh copy each call. */
 export function getCompanionSettings(now: number = Date.now()): CompanionSettings {
   const settings = structuredClone(DEFAULT_COMPANION_SETTINGS);
   const raw = stored();
   apply(settings as unknown as Record<string, unknown>, raw, SETTINGS, '', false);
-  if (storedBriefDays(raw) === null) settings.brief.days = [...settings.workdays];
   const pause = michiPause(LOCAL_AGENT_OWNER_ID, now);
   return { ...settings, enabled: true, paused: pause.paused, pausedUntil: pause.until };
 }

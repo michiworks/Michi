@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { AnimatePresence } from 'motion/react';
 import type { MichiDatabase, MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
+import { CloseIcon } from '../../icons';
 import { DbPopover } from './DbPopover';
 import { cellEditable, isThreadsDb, parseNumberText, writableOptions, type CellValue } from './dbModel';
 import { columnName, optionName } from './dbLabels';
@@ -80,9 +82,9 @@ export function RowsBatchBar({
         </button>
       )}
       {after?.map((a) => <BatchButton key={a.label} action={a} />)}
-      <button type="button" className="michi-batch__btn michi-batch__close" aria-label="Clear selection" onClick={onClear}>×</button>
-      {setting && setColumn && (
-        <DbPopover anchor={setting} label={`Set a value on ${label}`} width={280} onClose={() => setSetting(null)}>
+      <button type="button" className="michi-batch__btn michi-batch__close" aria-label="Clear selection" onClick={onClear}><CloseIcon /></button>
+      <AnimatePresence>{setting && setColumn && (
+        <DbPopover key="set-value" anchor={setting} label={`Set a value on ${label}`} width={280} onClose={() => setSetting(null)}>
           <SetValueForm
             db={db}
             rows={rows}
@@ -95,7 +97,7 @@ export function RowsBatchBar({
             onRefused={notice}
           />
         </DbPopover>
-      )}
+      )}</AnimatePresence>
     </div>
   );
 }

@@ -8,6 +8,9 @@ import { RuntimeModelCatalog } from '../../core/modelCatalog';
 import { PendingSessionAcquisitions, assertSessionReusable, sessionIdentity } from '../../core/sessionAcquisition';
 import { isCrewMemoryMode, type AgentCommand } from 'michi-shared';
 import { AcpClient } from "./acpClient";
+import { askUserAnswers } from "../../mcp-host/askUser";
+import type { AskUserAnswers } from "../../mcp-host/types";
+import type { UserInputAnswer, UserInputQuestion } from "../../contract/events";
 import type { McpSlotProvider, McpSlotCallbacks, McpSlotEventSink } from "../../contract/mcp";
 import type {
     AgentCapabilities,
@@ -182,12 +185,20 @@ export class KiroProcessCapError extends Error {
 export interface KiroAdapterOptions extends AcpProcessOptions {
     /** Host-owned restricted agent config and tool catalog policy. Absent: restricted sessions are refused. */
     restrictedAgent?: {
-        ensure(dataDir: string, toolset: string, names: readonly string[]): { dir: string; agentName: string };
+        /** `revision`: identifies the written config; a different one starts a new worker. */
+        ensure(dataDir: string, toolset: string, names: readonly string[]): { dir: string; agentName: string; revision?: string };
         /** `kiroHome`: the worker of ephemeral sessions runs with this KIRO_HOME (ephemeral below). */
         clientOptions(engine: KiroEngine, agentName: string, opts?: { kiroHome?: string }): AcpClientOptions;
         catalog(tags: readonly unknown[]): string[];
-        /** Catalog entries outside the profile's tools that the host still accepts, in `catalog` terms. */
-        extraAllowed?: readonly string[];
+        /** Catalog entries outside the profile's tools that the host still accepts for the toolset, in `catalog` terms. */
+        extraAllowed?(toolset: string): readonly string[];
+        /**
+         * After a session of the toolset failed to open: whether the host
+         * changed the agent config to exclude what the error names (tools of
+         * another MCP server in a refused catalog). True: the session is
+         * opened once more, on a new worker with that config.
+         */
+        exclude?(dataDir: string, toolset: string, error: unknown): boolean;
         isRestrictedMode?(modeId: string): boolean;
         verify(input: { client: AcpClient; sessionId: string; engine: KiroEngine; runtimeId: string; profile: RuntimeToolProfile; sinceSeq?: number }): Promise<string[]>;
         /**
@@ -545,7 +556,7 @@ export class AcpAgentRuntime implements AgentRuntime {
     /** Pending user-input promises, keyed by requestId. */
     private readonly pendingUserInputs = new Map<
         number,
-        { resolve: (answers: Array<{ question: string; answer: string }> | null) => void; timer: NodeJS.Timeout }
+        { resolve: (answers: UserInputAnswer[] | null) => void; timer: NodeJS.Timeout }
     >();
 
     private readonly defaultCwd: string;
@@ -1265,15 +1276,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         });
     }
 
-    private async handleAskUser(
-        slotId: string,
-        questions: Array<{
-            question: string;
-            header?: string;
-            options: Array<{ label: string; description?: string }>;
-            multiSelect: boolean;
-        }>,
-    ): Promise<Record<string, string> | null> {
+    private async handleAskUser(slotId: string, questions: UserInputQuestion[]): Promise<AskUserAnswers | null> {
         const slot = this.mcpRegistry?.get(slotId);
         if (!slot) return null;
         const parentChatId = slot.parentChatId;
@@ -1293,7 +1296,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         if (!shown) return null;
 
         const TIMEOUT_MS = this.runtimeOptions.approveTimeoutMs?.() ?? DEFAULT_APPROVE_TIMEOUT_MS;
-        const answers = await new Promise<Array<{ question: string; answer: string }> | null>((resolve) => {
+        const answers = await new Promise<UserInputAnswer[] | null>((resolve) => {
             const timer = setTimeout(() => {
                 this.pendingUserInputs.delete(requestId);
                 resolve(null);
@@ -1308,12 +1311,7 @@ export class AcpAgentRuntime implements AgentRuntime {
             answers: answers ?? [],
         });
 
-        if (answers) {
-            const result: Record<string, string> = {};
-            for (const a of answers) result[a.question] = a.answer;
-            return result;
-        }
-        return null;
+        return answers && askUserAnswers(questions, answers);
     }
 
     /**
@@ -1321,7 +1319,7 @@ export class AcpAgentRuntime implements AgentRuntime {
      * its ACP client (a standard ACP elicitation), whose ids never collide
      * with ask_user's.
      */
-    respondToUserInput(requestId: number, answers: Array<{ question: string; answer: string }>): void {
+    respondToUserInput(requestId: number, answers: UserInputAnswer[]): void {
         const entry = this.pendingUserInputs.get(requestId);
         if (!entry) {
             for (const client of this.pool.values()) if (client.respondToUserInput?.(requestId, answers)) return;
@@ -2611,15 +2609,27 @@ export class AcpAgentRuntime implements AgentRuntime {
             throw new Error(`${this.label} keeps no ephemeral sessions here (kiro-cli on v3 with the host's ephemeral support only)`);
         }
         const names = opts.toolProfile?.allowedToolNames ?? [];
-        const { dir, agentName } = this.runtimeOptions.restrictedAgent!.ensure(this.host.config.dataDir(), toolset, names);
-        const kiroHome = ephemeral ? this.runtimeOptions.restrictedAgent!.ephemeral!.prepareHome(this.host.config.dataDir()) : undefined;
-        // Ephemeral sessions get workers of their own (another KIRO_HOME): a
-        // family apart, so neither kind retires the other's worker.
-        const family = [toolset, this.host.principal.enforceUserOwnership() ? opts.ownerUserId ?? '' : '', ...(kiroHome ? ['ephemeral'] : [])].join('\u0000');
-        const key = [family, agentName, dir, kiroHome ?? '', ...[...new Set(names)].sort()].join('\u0000');
-        return this.openSharedMetaAgentSession(id, family, key, dir, { toolset, agentName, ...(kiroHome ? { kiroHome } : {}) }, (worker) => mode === 'new'
-            ? worker.newSession({ ...opts, cwd: dir } as NewAgentSessionOptions)
-            : worker.loadSession({ ...opts, cwd: dir } as LoadAgentSessionOptions));
+        const agent = this.runtimeOptions.restrictedAgent!;
+        for (let attempt = 1; ; attempt += 1) {
+            const { dir, agentName, revision } = agent.ensure(this.host.config.dataDir(), toolset, names);
+            const kiroHome = ephemeral ? agent.ephemeral!.prepareHome(this.host.config.dataDir()) : undefined;
+            // Ephemeral sessions get workers of their own (another KIRO_HOME): a
+            // family apart, so neither kind retires the other's worker.
+            const family = [toolset, this.host.principal.enforceUserOwnership() ? opts.ownerUserId ?? '' : '', ...(kiroHome ? ['ephemeral'] : [])].join('\u0000');
+            const key = [family, agentName, dir, kiroHome ?? '', revision ?? '', ...[...new Set(names)].sort()].join('\u0000');
+            try {
+                return await this.openSharedMetaAgentSession(id, family, key, dir, { toolset, agentName, ...(kiroHome ? { kiroHome } : {}) }, (worker) => mode === 'new'
+                    ? worker.newSession({ ...opts, cwd: dir } as NewAgentSessionOptions)
+                    : worker.loadSession({ ...opts, cwd: dir } as LoadAgentSessionOptions));
+            } catch (error) {
+                // A tool Kiro added from another server: excluded, the session opens once more on a
+                // new worker. An ephemeral session is not reopened: its failed native session stays for the caller to remove.
+                if (attempt >= 2 || ephemeral || this.closing || !agent.exclude?.(this.host.config.dataDir(), toolset, error)) throw error;
+                this.host.observability.log('warn', 'acp', 'Kiro added tools outside the restricted toolset; reopening with them excluded', {
+                    toolset, error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
     }
 
     private metaAgentSlot(
@@ -2715,7 +2725,7 @@ export class AcpAgentRuntime implements AgentRuntime {
         if (!tags) return catalogUnavailable(this.host, this.id, toolset, 'Kiro has no tool catalog for this session');
         try {
             const agent = this.runtimeOptions.restrictedAgent!;
-            assertToolCatalog(this.host, { runtimeId: this.id, profile, observed: agent.catalog(tags), extraAllowed: agent.extraAllowed });
+            assertToolCatalog(this.host, { runtimeId: this.id, profile, observed: agent.catalog(tags), extraAllowed: agent.extraAllowed?.(toolset) });
             return null;
         } catch (error) {
             return error as Error;

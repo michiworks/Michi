@@ -1,4 +1,5 @@
 import { act, render } from '@testing-library/react';
+import { MotionConfig } from 'motion/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ITerminalOptions } from '@xterm/xterm';
 import type { TerminalPalette } from '../../state/prefs';
@@ -66,5 +67,20 @@ describe('TerminalPane theme updates', () => {
     expect(terminal.dispose).not.toHaveBeenCalled();
     view.unmount();
     expect(terminal.dispose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('TerminalPane reduced motion', () => {
+  it('turns xterm\'s scroll glide off under Reduce motion, in a terminal already open', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    const pane = (reduce: boolean) => <MotionConfig reducedMotion={reduce ? 'always' : 'never'}><TerminalPane item={item} /></MotionConfig>;
+    const view = render(pane(false));
+    await act(async () => {});
+    const terminal = state.instances[0];
+    expect(terminal.options.smoothScrollDuration).toBeGreaterThan(0);
+    view.rerender(pane(true));
+    expect(terminal.options.smoothScrollDuration).toBe(0);
+    expect(state.instances).toHaveLength(1);
   });
 });

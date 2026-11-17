@@ -23,14 +23,45 @@ export const TOOL_PAYLOAD_MAX = 16 * 1024;
  * Undefined when there is nothing to show.
  */
 export function truncateToolPayload(value: unknown): string | undefined {
-  if (value == null) return undefined;
-  let text: string | undefined;
-  if (typeof value === 'string') text = value;
-  else {
-    try { text = JSON.stringify(value); } catch { text = String(value); }
-  }
+  const text = payloadText(value);
   if (!text) return undefined;
   return text.length > TOOL_PAYLOAD_MAX ? text.slice(0, TOOL_PAYLOAD_MAX) : text;
+}
+
+/** Of a long output's TOOL_PAYLOAD_MAX, its start keeps this much; its end, the rest but the marker's room. */
+const OUTPUT_HEAD_CHARS = 6 * 1024;
+const OUTPUT_MARKER_ROOM = 64;
+/** A newline this close to a cut moves the cut there. */
+const OUTPUT_NEWLINE_SLACK = 256;
+
+/**
+ * A tool's output as chip text, as {@link truncateToolPayload} makes it, but
+ * a long output keeps its start and its end around `… [N chars omitted] …`
+ * (the marker its wire copy uses, backend toolOutputTransport): the error at
+ * the end of a long build or test log stays.
+ */
+export function truncateToolOutput(value: unknown): string | undefined {
+  const text = payloadText(value);
+  if (!text || text.length <= TOOL_PAYLOAD_MAX) return text || undefined;
+  let headEnd = OUTPUT_HEAD_CHARS;
+  const headBreak = text.lastIndexOf('\n', headEnd);
+  // The marker line starts and ends with a newline, which stands in for the one at each cut.
+  if (headBreak >= headEnd - OUTPUT_NEWLINE_SLACK) headEnd = headBreak;
+  let tailStart = text.length - (TOOL_PAYLOAD_MAX - OUTPUT_HEAD_CHARS - OUTPUT_MARKER_ROOM);
+  const tailBreak = text.indexOf('\n', tailStart);
+  if (tailBreak !== -1 && tailBreak < tailStart + OUTPUT_NEWLINE_SLACK) tailStart = tailBreak + 1;
+  if (isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd--;
+  if (isLowSurrogate(text.charCodeAt(tailStart))) tailStart++;
+  return `${text.slice(0, headEnd)}\n… [${tailStart - headEnd} chars omitted] …\n${text.slice(tailStart)}`;
+}
+
+const isHighSurrogate = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowSurrogate = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
+function payloadText(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
 }
 
 /** Every placeholder {@link imagePlaceholder} writes. */

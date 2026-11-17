@@ -85,6 +85,13 @@ describe('Layout rules in the ⋯ menu', () => {
     for (const button of within(list).getAllByRole('button', { name: /Delete rule/ })) expect((button as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('gives the preferences document focus once it loads', async () => {
+    render(<LayoutRulesMenuButton pageId="pg-home" backendConnectionId="local" />);
+    const list = openList();
+    const input = await within(list).findByRole('textbox', { name: 'Layout preferences' });
+    expect(document.activeElement).toBe(input);
+  });
+
   it('shows how to add one when the page has none', async () => {
     mocks.fetch.mockResolvedValue([]);
     render(<LayoutRulesMenuButton pageId="pg-home" backendConnectionId="local" />);

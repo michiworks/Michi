@@ -41,12 +41,10 @@ const storeState: Record<string, unknown> = {
   projects: [],
 };
 
-vi.mock('../../../state/chatStore', () => ({
+vi.mock('../../../state/chatStore', async () => ({
+  // The @ menu reads the node store only when it opens; these tests open none.
+  ChatNodeStoreContext: (await import('react')).createContext(null),
   useChatStore: () => storeState,
-  // These tests exercise send/agent plumbing, not the @-mention candidate
-  // list, and their Project fixtures omit `trees`; return an empty list.
-  useStructuralSelector: () => [],
-  shallowArrayEqual: Object.is,
   chatLabel: () => 'New thread',
 }));
 
@@ -184,7 +182,7 @@ describe('ManageComposer', () => {
   it('removes a pending attachment with a named button the keyboard reaches', async () => {
     render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
     await screen.findByRole('textbox');
-    fireEvent.click(screen.getByTitle('Attach file'));
+    fireEvent.click(screen.getByRole('button', { name: 'Attach file' }));
     fireEvent.change(document.querySelector('input[type="file"]')!, { target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] } });
     await screen.findByText('notes.txt');
     const remove = screen.getByRole('button', { name: 'Remove notes.txt' });
@@ -212,7 +210,7 @@ describe('ManageComposer', () => {
   it('uploads and sends attachment-only follow-ups and removes the file picker on unmount', async () => {
     const view = render(<ManageComposer workspaceId="ws1" parentNodeId="digest-1" onSubmitted={vi.fn()} />);
     await screen.findByRole('textbox');
-    fireEvent.click(screen.getByTitle('Attach file'));
+    fireEvent.click(screen.getByRole('button', { name: 'Attach file' }));
     const picker = document.querySelector('input[type="file"]')!;
     fireEvent.change(picker, { target: { files: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] } });
     await screen.findByText('notes.txt');
@@ -238,7 +236,7 @@ describe('ManageComposer', () => {
       });
       const view = render(<ManageComposer workspaceId="ws1" onSubmitted={vi.fn()} />);
       await screen.findByRole('textbox');
-      fireEvent.click(screen.getByTitle('Attach file'));
+      fireEvent.click(screen.getByRole('button', { name: 'Attach file' }));
       fireEvent.change(document.querySelector('input[type="file"]')!, {
         target: { files: [new File(['png'], 'shot.png', { type: 'image/png' })] },
       });

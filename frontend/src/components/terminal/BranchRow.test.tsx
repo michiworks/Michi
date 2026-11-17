@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import BranchRow from './BranchRow';
 import type { ChatNodeState, ProjectEdge } from '../../state/chatTypes';
 
@@ -9,6 +9,11 @@ const store = vi.hoisted(() => ({
   loaded: true,
   /** Nodes whose reply landed after their last view. */
   unread: new Set<string>(),
+  /** Nodes whose turn waits on the user, and nodes whose last turn failed. */
+  waiting: new Set<string>(),
+  failed: new Set<string>(),
+  pinned: new Set<string>(),
+  prefs: { sidebarRowStyle: 'classic', showSidebarTimestamps: false },
 }));
 
 function nodeState(nodeId: string): ChatNodeState {
@@ -16,18 +21,27 @@ function nodeState(nodeId: string): ChatNodeState {
     nodeId, kind: 'chat', chatId: null, projectId: 'p1', title: `Branch ${nodeId}`,
     messages: [], followUps: [], status: 'idle',
     ...(store.unread.has(nodeId) ? { lastAssistantAt: 5, viewedAt: 1 } : {}),
+    ...(store.waiting.has(nodeId)
+      ? { status: 'streaming', pendingPermission: { requestId: 'q1', title: 'Run rg', options: [] } }
+      : {}),
+    ...(store.failed.has(nodeId)
+      ? { status: 'error', error: 'Agent exited', errorCompletedAt: Date.now() - 1000, viewedAt: 10 }
+      : {}),
+    ...(store.pinned.has(nodeId) ? { pinnedAt: 1 } : {}),
   } as ChatNodeState;
 }
 
 vi.mock('../../state/prefs', () => ({
-  usePrefs: () => ({ prefs: { sidebarRowStyle: 'classic', sidebarInset: 0, showSidebarTimestamps: false } }),
+  usePrefs: () => ({ prefs: store.prefs }),
 }));
 
 vi.mock('../../state/chatStore', () => ({
-  useChatNode: (nodeId: string): ChatNodeState | undefined => (store.loaded ? nodeState(nodeId) : undefined),
   useChatProjects: () => ({ focusedNodeId: null, projects: [{ id: 'p0', edges: [] }, { id: 'p1', edges: store.edges }] }),
+  // Every node, once loaded.
   useStructuralSelector: <T,>(selector: (nodes: Record<string, ChatNodeState>) => T): T =>
-    selector(Object.fromEntries([...store.unread].map((id) => [id, nodeState(id)]))),
+    selector(new Proxy({}, {
+      get: (_, nodeId) => (store.loaded && typeof nodeId === 'string' ? nodeState(nodeId) : undefined),
+    })),
 }));
 
 function renderRow(nodeId: string, props: Partial<React.ComponentProps<typeof BranchRow>> = {}) {
@@ -149,6 +163,26 @@ describe('BranchRow unread dot', () => {
       store.unread = new Set();
     }
   });
+
+  it('in card rows, leaves the gutter to the pin star and paints the rail green instead', () => {
+    store.unread = new Set(['parent']);
+    store.pinned = new Set(['parent']);
+    store.prefs = { ...store.prefs, sidebarRowStyle: 'square-full' };
+    try {
+      renderBranch(false);
+      expect(row('parent').querySelector('.sb-unread-dot')).toBeNull();
+      expect(rail('parent').dataset.rail).toBe('unread');
+      const star = row('parent').querySelector('svg[aria-label="pinned"]') as SVGElement;
+      expect(star.style.position).toBe('absolute');
+      // 12px left of the title, which the row's 24px padding puts at 24px.
+      expect(row('parent').style.paddingLeft).toBe('24px');
+      expect(star.style.left).toBe('calc(12px)');
+    } finally {
+      store.unread = new Set();
+      store.pinned = new Set();
+      store.prefs = { ...store.prefs, sidebarRowStyle: 'classic' };
+    }
+  });
 });
 
 describe('BranchRow rename', () => {
@@ -165,5 +199,58 @@ describe('BranchRow rename', () => {
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(onRenameNode).toHaveBeenCalledWith('b1', '分支方案');
     expect(onRenameEnd).toHaveBeenCalledOnce();
+  });
+});
+
+describe('BranchRow state chips (R2)', () => {
+  const chip = (nodeId: string) => row(nodeId).querySelector('.sb-attn') as HTMLElement | null;
+
+  afterEach(() => {
+    store.waiting.clear();
+    store.failed.clear();
+  });
+
+  it('says a waiting branch needs you, and holds its rail still in the waiting hue', () => {
+    store.waiting.add('b1');
+    renderRow('b1');
+    expect(chip('b1')!.textContent).toBe('Needs you');
+    expect(row('b1').getAttribute('aria-label')).toBe('Branch b1, needs you');
+    const bar = rail('b1');
+    expect(bar.dataset.rail).toBe('waiting');
+    expect(bar.style.background).toBe('var(--term-waiting)');
+    expect(bar.style.boxShadow).toBe('');
+  });
+
+  it('says a failed branch, in danger words', () => {
+    store.failed.add('b1');
+    renderRow('b1', { openState: 'none' });
+    expect(chip('b1')!.textContent).toBe('Failed');
+    expect(chip('b1')!.style.getPropertyValue('--sb-attn-fg')).toBe('var(--term-danger-text)');
+    expect(row('b1').querySelector('[data-rail]')).toBeNull();
+  });
+
+  it('carries a hidden sub-branch\'s state while collapsed, and hands it down when expanded', () => {
+    store.failed.add('deep');
+    const tree = { nodeId: 'parent', depth: 1, children: [{ nodeId: 'kid', depth: 2, children: [{ nodeId: 'deep', depth: 3, children: [] }] }] };
+    const { rerender } = render(
+      <BranchRow
+        node={tree} depth={1} expanded={false}
+        isFocused={() => false} isSelected={() => false} isExpanded={() => false}
+        onToggle={vi.fn()} onSelect={vi.fn()} onContextMenu={vi.fn()}
+        openState="none" getOpenState={() => 'none'}
+      />,
+    );
+    expect(chip('parent')!.textContent).toBe('Failed');
+    rerender(
+      <BranchRow
+        node={tree} depth={1} expanded
+        isFocused={() => false} isSelected={() => false} isExpanded={() => false}
+        onToggle={vi.fn()} onSelect={vi.fn()} onContextMenu={vi.fn()}
+        openState="none" getOpenState={() => 'none'}
+      />,
+    );
+    // One level down: the parent hands the mark to the collapsed row that still hides it.
+    expect(chip('parent')).toBeNull();
+    expect(chip('kid')!.textContent).toBe('Failed');
   });
 });

@@ -1,50 +1,66 @@
-/* Settings › Memory. Sections, rows and notes come from SettingsSection. */
+/* Settings › Memory. Sections and rows come from SettingsSection; Your
+   memories and its levels use the parts Trash and Skills share (history.css). */
 
-.memory-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-.memory-toolbar .settings-row__select { flex: none; }
-.memory-toolbar__search.ui-input { flex: 1 1 200px; width: auto; min-width: 0; }
-
-.memory-add { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
-.memory-add--open { flex-direction: column; align-items: stretch; padding: 12px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-sm); }
-
-.memory-list { list-style: none; margin: 12px 0 0; padding: 0; }
-.memory-item { padding: 12px 0; min-width: 0; }
-.memory-item + .memory-item { border-top: 1px solid var(--term-line); }
-.memory-item[aria-busy='true'] { opacity: 0.7; }
-.memory-item__body { margin: 0; color: var(--term-fg); font-size: var(--fs-md); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
-.memory-item__meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 4px; color: var(--term-muted); font-size: var(--fs-md); }
-.memory-item__meta .settings-row__link { font-size: inherit; }
-.memory-item__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
-.memory-item__scope.ui-select { width: auto; max-width: 220px; padding-top: 2px; padding-bottom: 2px; font-size: var(--fs-md); }
-.memory-item__editor { display: flex; flex-direction: column; }
-.memory-item__textarea.ui-input { resize: vertical; min-height: 56px; line-height: 1.5; }
-.memory-item__notice { margin: 8px 0 0; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
-.memory-item__notice.is-error { color: var(--term-danger-text); }
-.memory-more { margin-top: 12px; }
-/* A memory shown from About the user: focused, and tinted for a moment (the
-   spread shadow widens the tint without moving the row). */
-.memory-item { transition: background var(--t-slow) ease, box-shadow var(--t-slow) ease; }
-.memory-item[data-marked] {
-  background: color-mix(in srgb, var(--term-accent) 9%, transparent);
-  box-shadow: 0 0 0 8px color-mix(in srgb, var(--term-accent) 9%, transparent);
+/* A shelf's topics after the first few. */
+.memory-more button {
+  display: block;
+  width: 100%;
+  padding: 11px var(--settings-inset) 11px 52px;
+  border: 0;
+  border-top: 1px solid var(--term-line);
+  background: transparent;
+  color: var(--term-accent-text);
+  font: inherit;
+  font-size: var(--fs-lg);
+  text-align: left;
+  cursor: pointer;
 }
-.memory-item:focus { outline: none; }
-.memory-item:focus-visible { outline: var(--focus-ring); outline-offset: 4px; }
-@media (prefers-reduced-motion: reduce) { .memory-item { transition: none; } }
+.memory-more button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.memory-more button:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.memory-profile-note .settings-row__link { font-size: inherit; }
+.memory-profile-note .settings-row__link:disabled { color: var(--term-faint); cursor: not-allowed; text-decoration: none; }
+.settings-history__note.is-error { color: var(--term-danger-text); }
 
-/* About the user: lines under their topics; each line's memories open below it. */
-.memory-profile__topic { margin-top: 12px; }
-.memory-profile__topic-title { margin: 0; color: var(--term-mid); font-size: var(--fs-md); font-weight: 600; line-height: 1.5; }
-.memory-profile__lines { list-style: none; margin: 2px 0 0; padding: 0; }
-.memory-profile__line { padding: 8px 0; min-width: 0; }
-.memory-profile__line + .memory-profile__line { border-top: 1px solid var(--term-line); }
-.memory-profile__line[aria-busy='true'] { opacity: 0.7; }
-.memory-profile__text { margin: 0; color: var(--term-fg); font-size: var(--fs-md); line-height: 1.55; overflow-wrap: anywhere; }
-.memory-profile__line .memory-item__actions { margin-top: 4px; }
-.memory-profile__cites-toggle {
+/* A memory's row shows its whole text, up to three lines. */
+.memory-settings .settings-history__row:has([data-history-open^='memory:']) .settings-history__title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-weight: 400;
+}
+
+/* A topic: its summary, then its memories. */
+.memory-summary__lines { margin: 0; padding: 8px 0 4px 18px; color: var(--term-fg); font-size: var(--fs-lg); line-height: 1.6; }
+.memory-summary__lines li + li { margin-top: 4px; }
+.memory-rows .settings-history__card { margin-top: 4px; }
+
+/* One memory: its text while edited, and its fields. */
+.memory-editor, .memory-add { display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; }
+.memory-add { margin-top: 14px; padding: 12px; border: 1px solid var(--term-line); background: var(--settings-card); }
+.memory-editor__text.ui-input { resize: vertical; min-height: 64px; font-size: var(--fs-lg); line-height: 1.5; }
+.memory-editor__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.memory-field.ui-select, .memory-field.ui-input { width: auto; min-width: 0; max-width: 240px; height: 30px; }
+input.memory-field.ui-input { width: 200px; }
+.memory-notice { margin: 0 0 14px; color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; }
+.memory-notice.is-error { color: var(--term-danger-text); }
+.memory-from { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; }
+.memory-from code { overflow-wrap: anywhere; }
+.memory-from small { color: var(--term-muted); font-size: var(--fs-md); }
+.memory-words { display: flex; flex-wrap: wrap; gap: 4px; }
+.memory-words span { padding: 1px 8px; border: 1px solid var(--term-line); border-radius: var(--ui-radius-pill); color: var(--term-mid); font-size: var(--fs-md); }
+
+/* A phone: finger-sized targets, and the fields full width. */
+.terminal-settings--drawer[data-stacked] .memory-more button { min-height: 48px; padding-left: 56px; }
+.terminal-settings[data-stacked] :is(.memory-field.ui-select, input.memory-field.ui-input) { flex: 1 1 100%; width: 100%; max-width: none; height: 40px; }
+
+/* Guesses: collapsed; each guess, the memories it rests on, and the two answers (always shown, never on hover). */
+.memory-guesses__toggle {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   padding: 0;
   border: 0;
   background: none;
@@ -53,16 +69,17 @@
   font-size: var(--fs-md);
   cursor: pointer;
 }
-.memory-profile__cites-toggle svg { transition: transform var(--t-soft) ease; }
-.memory-profile__cites-toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
-@media (hover: hover) and (pointer: fine) { .memory-profile__cites-toggle:hover { color: var(--term-fg); } }
-.memory-profile__cites-toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
-.memory-profile__confirm { color: var(--term-muted); font-size: var(--fs-md); }
-.memory-profile__cites { display: flex; flex-direction: column; gap: 4px; list-style: none; margin: 6px 0 0; padding: 0 0 0 16px; }
-.memory-profile__cite.settings-row__link { font-size: var(--fs-md); line-height: 1.5; text-align: left; overflow-wrap: anywhere; }
-.memory-profile__aside { display: inline-flex; align-items: baseline; gap: 0; white-space: nowrap; }
-.memory-profile__aside .settings-row__link:disabled { color: var(--term-faint); cursor: default; text-decoration: none; }
-@media (prefers-reduced-motion: reduce) { .memory-profile__cites-toggle svg { transition: none; } }
-
-/* A phone stacks the controls under the text, full width. */
-.terminal-settings[data-stacked] .memory-toolbar .settings-row__select { flex: 1 1 100%; }
+.memory-guesses__toggle svg { transition: transform var(--t-soft) ease; }
+.memory-guesses__toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+@media (hover: hover) and (pointer: fine) { .memory-guesses__toggle:hover { color: var(--term-fg); } }
+.memory-guesses__toggle:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.memory-guesses__list { list-style: none; margin: 8px 0 0; padding: 0; }
+.memory-guesses__item { padding: 10px 0; min-width: 0; }
+.memory-guesses__item + .memory-guesses__item { border-top: 1px solid var(--term-line); }
+.memory-guesses__item[aria-busy='true'] { opacity: 0.7; }
+.memory-guesses__text { margin: 0; color: var(--term-fg); font-size: var(--fs-md); line-height: 1.55; overflow-wrap: anywhere; }
+.memory-guesses__cites { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 4px 0 0; padding: 0 0 0 16px;
+  color: var(--term-muted); font-size: var(--fs-md); line-height: 1.5; overflow-wrap: anywhere; }
+.memory-guesses__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.memory-guesses__error { margin: 8px 0 0; color: var(--term-danger-text); font-size: var(--fs-md); line-height: 1.5; }
+@media (prefers-reduced-motion: reduce) { .memory-guesses__toggle svg { transition: none; } }

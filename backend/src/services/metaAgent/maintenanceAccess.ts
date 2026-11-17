@@ -1,8 +1,7 @@
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv-provider.js';
 /** Shared unattended access boundary: Michi state is writable; an external MCP
- * tool is usable only when it declares itself read-only (readOnlyHint, not
- * destructive). Nobody is there to approve anything else, so nothing else is
- * offered. Native shell/exec and delegation to unconstrained workers are
+ * tool is usable only when backgroundToolPolicy finds it read-only. Nobody is
+ * there to approve anything else, so nothing else is offered. Native shell/exec and delegation to unconstrained workers are
  * deliberately not an alternative call path. */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { McpClientManager, type McpToolInfo, type McpServerConfig } from '../mcpClientManager';
@@ -10,6 +9,7 @@ import { readPiMcpServers } from '../piMcpConfig';
 import { assertMaintenanceAuthority } from '../pages/maintenanceRepository';
 import type { MaintenanceExecutionContext } from '../pages/maintenanceWriter';
 import { PAGE_TOOL_NAMES } from '../../agents/pageToolNames';
+import { canUseExternalTool, readBackgroundToolOverrides, type BackgroundToolOverrides, type ExternalToolFacts } from './backgroundToolPolicy';
 
 export const MAINTENANCE_ACCESS_TOOL_NAMES = ['maintenance_list_tools', 'maintenance_call_tool'] as const;
 
@@ -25,10 +25,10 @@ const INTERNAL_TOOLS = new Set<string>([
 ]);
 
 export function isMaintenanceInternalTool(name: string): boolean { return INTERNAL_TOOLS.has(name); }
-export function isExternalReadOnlyTool(tool: McpToolInfo): boolean {
-  const annotations = tool.annotations as { readOnlyHint?: unknown; destructiveHint?: unknown } | undefined;
-  return annotations?.readOnlyHint === true && annotations.destructiveHint !== true
-    && tool.execution?.taskSupport !== 'required';
+export function isExternalReadOnlyTool(server: string, tool: McpToolInfo, overrides: BackgroundToolOverrides): boolean {
+  return canUseExternalTool('maintenance', {
+    server, tool: tool.name, annotations: tool.annotations as ExternalToolFacts['annotations'], taskSupport: tool.execution?.taskSupport,
+  }, overrides);
 }
 
 export interface MaintenanceAccessEntry {
@@ -40,6 +40,7 @@ export interface MaintenanceAccessEntry {
 export interface MaintenanceAccessDependencies {
   internalTools(context: MaintenanceExecutionContext): MaintenanceAccessEntry[];
   servers?: () => McpServerConfig[];
+  overrides?: () => BackgroundToolOverrides;
   manager?: () => Pick<McpClientManager, 'connect' | 'callTool' | 'dispose'>;
   assertAuthority?: (context: MaintenanceExecutionContext) => void;
 }
@@ -70,7 +71,7 @@ export function createMaintenanceAccessTools(
   };
   const internal = (context: MaintenanceExecutionContext) => deps.internalTools(context).filter(t => isMaintenanceInternalTool(t.name));
   const withServer = async <T>(name: string, context: MaintenanceExecutionContext, signal: AbortSignal | undefined,
-    action: (manager: Pick<McpClientManager, 'connect' | 'callTool' | 'dispose'>, tools: McpToolInfo[], config: McpServerConfig) => Promise<T>): Promise<T> => {
+    action: (manager: Pick<McpClientManager, 'connect' | 'callTool' | 'dispose'>, readOnly: McpToolInfo[], config: McpServerConfig) => Promise<T>): Promise<T> => {
     // Do not fall back to a host desktop configuration for a cloud principal.
     if (process.env.MICHI_CLOUD === '1') throw new Error('Background external tools require a local backend');
     const config = (deps.servers ?? readPiMcpServers)().find(s => s.serverName === name);
@@ -80,7 +81,8 @@ export function createMaintenanceAccessTools(
       const { tools } = await manager.connect(config, signal);
       signal?.throwIfAborted();
       check(context);
-      return await action(manager, tools, config);
+      const overrides = (deps.overrides ?? readBackgroundToolOverrides)();
+      return await action(manager, tools.filter(t => isExternalReadOnlyTool(config.serverName, t, overrides)), config);
     } finally { await manager.dispose(); }
   };
   const execute = (fn: (args: Record<string, unknown>, context: MaintenanceExecutionContext, signal?: AbortSignal) => Promise<CallToolResult>) =>
@@ -101,7 +103,7 @@ export function createMaintenanceAccessTools(
         let entries: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
         let servers: string[] | undefined;
         if (typeof args.server === 'string') {
-          entries = await withServer(args.server, context, signal, async (_manager, tools) => tools.filter(isExternalReadOnlyTool));
+          entries = await withServer(args.server, context, signal, async (_manager, readOnly) => readOnly);
         } else {
           entries = internal(context);
           servers = process.env.MICHI_CLOUD === '1' ? [] : (deps.servers ?? readPiMcpServers)().map(s => s.serverName);
@@ -119,10 +121,9 @@ export function createMaintenanceAccessTools(
       execute: execute(async (args, context, signal) => {
         if (typeof args.tool !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw new Error('tool and arguments are required');
         const input = args.arguments as Record<string, unknown>;
-        if (typeof args.server === 'string') return withServer(args.server, context, signal, async (manager, tools) => {
-          const tool = tools.find(t => t.name === args.tool);
-          const alternatives = tools.filter(isExternalReadOnlyTool).map(t => t.name);
-          if (!tool || !isExternalReadOnlyTool(tool)) return result({ status: 'unavailable', message: 'Not a read-only tool of this server; it was not run.', alternatives });
+        if (typeof args.server === 'string') return withServer(args.server, context, signal, async (manager, readOnly) => {
+          const tool = readOnly.find(t => t.name === args.tool);
+          if (!tool) return result({ status: 'unavailable', message: 'Not a read-only tool of this server; it was not run.', alternatives: readOnly.map(t => t.name) });
           // Fresh discovery per call prevents a previous list from authorizing a changed catalog.
           check(context);
           validateInput(tool.inputSchema, input);

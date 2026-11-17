@@ -57,17 +57,21 @@ export function selectAgentRunActivityGroups(
   return groups;
 }
 
-export function selectParentRunCards(
+/** The run cards of each message on one Backend, in creation order: one pass over the runs. */
+export function groupParentRunCards(
   runs: readonly LocatedAgentRun[],
   backendConnectionId: string,
-  parentMessageId: string,
-  parentToolCallId?: string | null,
-): LocatedAgentRun[] {
-  return runs.filter((resource) => {
-    const run = resource.value;
-    if (resource.backendConnectionId !== backendConnectionId || run.parentMessageId !== parentMessageId) return false;
-    return parentToolCallId === undefined || run.parentToolCallId === parentToolCallId;
-  }).sort((a, b) => a.value.createdAt - b.value.createdAt);
+): Map<string, LocatedAgentRun[]> {
+  const byMessage = new Map<string, LocatedAgentRun[]>();
+  for (const resource of runs) {
+    const messageId = resource.value.parentMessageId;
+    if (resource.backendConnectionId !== backendConnectionId || !messageId) continue;
+    const cards = byMessage.get(messageId);
+    if (cards) cards.push(resource);
+    else byMessage.set(messageId, [resource]);
+  }
+  for (const cards of byMessage.values()) cards.sort((a, b) => a.value.createdAt - b.value.createdAt);
+  return byMessage;
 }
 
 export function hasRecoveredAttempt(

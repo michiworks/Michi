@@ -1,7 +1,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { CompanionBriefDto, CompanionCheckinChangeDto, CompanionReminderDto } from 'michi-shared';
+import type { CompanionCheckinChangeDto, CompanionReminderDto, CompanionRunDto } from 'michi-shared';
 import { CompanionApiError } from '../../../services/api/companion';
 import { getCompanionPanelState, openCompanionPanel, resetCompanionPanelForTests } from '../../../state/companion/companionPanel';
 import { resetCompanionStoreForTests } from '../../../state/companion/companionStore';
@@ -12,7 +12,6 @@ const mocks = vi.hoisted(() => ({
   seen: vi.fn(),
   act: vi.fn(),
   check: vi.fn(),
-  curate: vi.fn(),
   addReminder: vi.fn(),
   setReminder: vi.fn(),
   toast: Object.assign(vi.fn(), { error: vi.fn() }),
@@ -26,59 +25,113 @@ vi.mock('../../../state/companion/companionStore', async (importOriginal) => ({
 vi.mock('../../../services/api/companion', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/companion')>()),
   checkCompanionNow: mocks.check,
-  curateCompanionBrief: mocks.curate,
   addCompanionReminder: mocks.addReminder,
   setCompanionReminderStatus: mocks.setReminder,
 }));
 
+/** Two things waiting on the user, and two Michi only read. */
 const items = [
-  companionItem('a', { title: 'CR-1 needs attention' }),
-  companionItem('b', { title: 'Pipeline blocked', source: 'pipeline', subtype: 'pipeline_blocked', status: 'seen' }),
-  companionItem('c', { title: 'Quarterly planning', source: 'email', subtype: 'email_unread', bucket: 'update', severity: 'digest' }),
+  companionItem('a', { title: 'CR-1 needs attention', summary: '2 comments · Add the retry', facts: { cr: 'CR-1', threadsAwaitingYou: 2 } }),
+  companionItem('b', {
+    title: 'Pipeline Checkout is blocked', source: 'pipeline', subtype: 'pipeline_blocked', status: 'seen',
+    facts: { pipeline: 'Checkout', failing: true, failingProd: true },
+  }),
+  companionItem('c', {
+    title: 'Email from Yuka', summary: 'Quarterly planning — 3 unread', source: 'email', subtype: 'email_unread',
+    bucket: 'update', severity: 'digest',
+  }),
   companionItem('d', { title: 'Standup in 10 minutes', source: 'calendar', subtype: 'meeting_soon', bucket: 'fyi', severity: 'digest' }),
 ];
 
+const CR_ROW = 'CR-1 has 2 comments waiting for your reply';
+
 function today(overrides: Parameters<typeof companionSnapshot>[0] = {}, props: Partial<React.ComponentProps<typeof CompanionToday>> = {}) {
-  const handlers = { onOpenItem: vi.fn(), onAsk: vi.fn(), onAction: vi.fn(), onOpenSettings: vi.fn() };
-  const view = render(<CompanionToday snapshot={companionSnapshot({ items, ...overrides })} catchUp={null} arrivals={{}} {...handlers} {...props} />);
+  const handlers = { onOpenItem: vi.fn(), onAsk: vi.fn(), onOpenSettings: vi.fn() };
+  const view = render(<CompanionToday snapshot={companionSnapshot({ items, ...overrides })} arrivals={{}} {...handlers} {...props} />);
   return { ...handlers, view };
+}
+
+/** A check-in that ran, as Activity keeps it. */
+function run(overrides: Partial<CompanionRunDto> = {}): CompanionRunDto {
+  return { id: 'cmr-1', kind: 'heartbeat', trigger: 'schedule', outcome: 'spoke', detail: null, startedAt: Date.now() - 600_000, finishedAt: Date.now() - 590_000, ...overrides };
 }
 
 let hasFocus: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   resetCompanionPanelForTests();
   hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
-  for (const mock of [mocks.seen, mocks.act, mocks.check, mocks.curate, mocks.addReminder, mocks.setReminder, mocks.toast, mocks.toast.error]) mock.mockReset();
+  for (const mock of [mocks.seen, mocks.act, mocks.check, mocks.addReminder, mocks.setReminder, mocks.toast, mocks.toast.error]) mock.mockReset();
 });
 afterEach(() => hasFocus.mockRestore());
 
 describe('the Today tab', () => {
-  it('lists what needs the user, with the other groups behind View all', () => {
+  it('counts what waits on the user and is those rows: the header can never disagree with them', () => {
     today();
-    const needsYou = screen.getByRole('region', { name: 'Needs you' });
-    expect(within(needsYou).getByText('CR-1 needs attention')).toBeTruthy();
-    expect(within(needsYou).getByText('Pipeline blocked')).toBeTruthy();
-    expect(screen.queryByText('Quarterly planning')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'View all (2)' }));
-    expect(within(screen.getByRole('region', { name: 'Updates' })).getByText('Quarterly planning')).toBeTruthy();
-    expect(within(screen.getByRole('region', { name: 'FYI' })).getByText('Standup in 10 minutes')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Show less' }));
-    expect(screen.queryByText('Quarterly planning')).toBeNull();
+    expect(screen.getByRole('heading', { name: '2 things waiting on you' })).toBeTruthy();
+    const waiting = screen.getByRole('region', { name: 'Waiting on you' });
+    expect(within(waiting).getByText('Checkout failed in production')).toBeTruthy();
+    expect(within(waiting).getByText(CR_ROW)).toBeTruthy();
+    // Nothing is waiting behind a fold here: the two rows are the two things.
+    expect(within(waiting).queryByRole('button', { name: /more waiting on you/ })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Today’s brief' })).toBeNull();
   });
 
-  it('says when nothing needs the user', () => {
+  it('says it plainly when nothing waits', () => {
     today({ items: [] });
-    expect(screen.getByText('Nothing needs you right now.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /View all/ })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Nothing is waiting on you' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Waiting on you' })).toBeNull();
   });
 
-  it('marks the new items on screen seen while the window has focus, and they keep their New dot', () => {
+  it('folds the user’s own work and the rest away, and every folded row keeps its step', () => {
+    const { onOpenItem } = today({
+      items: [...items, companionItem('e', { subtype: 'cr_approved', bucket: 'update', title: 'CR-7 is approved', summary: 'approved by Yuka · Add the retry', facts: { cr: 'CR-7' } })],
+    });
+    const mine = screen.getByRole('region', { name: 'On your plate' });
+    const fold = within(mine).getByRole('button', { name: /approved and not merged/ });
+    expect(fold.textContent).toContain('1 of your CRs is approved and not merged');
+    expect(within(mine).queryByRole('button', { name: /^Merge it/ })).toBeNull();
+    fireEvent.click(fold);
+    fireEvent.click(within(mine).getByRole('button', { name: 'Merge it: CR-7' }));
+    expect(onOpenItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'e' }));
+
+    const aside = screen.getByRole('region', { name: 'Everything else' });
+    expect(screen.queryByText('Standup in 10 minutes')).toBeNull();
+    fireEvent.click(within(aside).getByRole('button', { name: /Tucked away/ }));
+    expect(within(aside).getByText('Standup in 10 minutes')).toBeTruthy();
+    expect(within(aside).getByText('Yuka')).toBeTruthy();
+    fireEvent.click(within(aside).getByRole('button', { name: /Tucked away/ }));
+    expect(screen.queryByText('Standup in 10 minutes')).toBeNull();
+  });
+
+  it('keeps only three rows open and folds the rest as the same rows', () => {
+    today({
+      items: [
+        ...items,
+        companionItem('w', { source: 'michi', subtype: 'michi_waiting', title: 'Fix the flaky test', facts: { wait: 'question' } }),
+        companionItem('r', { subtype: 'cr_review_requested', title: 'Review requested: CR-9', severity: 'digest', facts: { cr: 'CR-9', idleWorkdays: 2 } }),
+      ],
+    });
+    const waiting = screen.getByRole('region', { name: 'Waiting on you' });
+    expect(screen.getByRole('heading', { name: '4 things waiting on you' })).toBeTruthy();
+    expect(within(waiting).queryByText('CR-9 is waiting for your review')).toBeNull();
+    const spill = within(waiting).getByRole('button', { name: /more waiting on you/ });
+    expect(spill.textContent).toContain('1 more waiting on you');
+    expect(spill.textContent).toContain('1 row');
+    fireEvent.click(spill);
+    // The folded row is the same row, with the same step.
+    expect(within(waiting).getByText('CR-9 is waiting for your review')).toBeTruthy();
+    expect(within(waiting).getByRole('button', { name: 'Review it: CR-9 is waiting for your review' })).toBeTruthy();
+  });
+
+  it('marks seen the new items it has on screen, not the ones still folded away', () => {
     const { view } = today();
     expect(mocks.seen).toHaveBeenCalledTimes(1);
     expect(mocks.seen).toHaveBeenCalledWith(['a']);
+    fireEvent.click(screen.getByRole('button', { name: /Tucked away/ }));
+    expect(mocks.seen).toHaveBeenLastCalledWith(['a', 'c', 'd']);
     // Marked seen: the dot stays for this visit.
     view.rerender(<CompanionToday snapshot={companionSnapshot({ items: items.map((entry) => ({ ...entry, status: 'seen' as const })) })}
-      catchUp={null} arrivals={{}} onOpenItem={vi.fn()} onAsk={vi.fn()} onAction={vi.fn()} onOpenSettings={vi.fn()} />);
+      arrivals={{}} onOpenItem={vi.fn()} onAsk={vi.fn()} onOpenSettings={vi.fn()} />);
     const row = document.querySelector('[data-item-id="a"]')!;
     expect(within(row as HTMLElement).getByLabelText('New')).toBeTruthy();
     expect(document.querySelector('[data-item-id="b"] [aria-label="New"]')).toBeNull();
@@ -90,7 +143,7 @@ describe('the Today tab', () => {
     expect(mocks.seen).not.toHaveBeenCalled();
   });
 
-  it('brings the item a notice is about into view, past View all, and highlights it briefly', async () => {
+  it('brings the item a notice is about into view, opening the fold it sits in, and highlights it briefly', async () => {
     vi.useFakeTimers();
     // jsdom has no scrollIntoView: record which rows were brought into view.
     const scrolled: string[] = [];
@@ -100,20 +153,20 @@ describe('the Today tab', () => {
     };
     try {
       today();
-      act(() => openCompanionPanel({ tab: 'today', focusItem: 'c' }));
-      const row = document.querySelector('[data-item-id="c"]')!;
+      act(() => openCompanionPanel({ tab: 'today', focusItem: 'd' }));
+      const row = document.querySelector('[data-item-id="d"]')!;
       expect(row).toBeTruthy();
-      expect(screen.getByRole('button', { name: 'Show less' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /Tucked away/ }).getAttribute('aria-expanded')).toBe('true');
       expect(row.hasAttribute('data-focused')).toBe(true);
-      expect(scrolled).toEqual(['c']);
+      expect(scrolled).toEqual(['d']);
       // Taken once: coming back to Today later does not jump to it again.
       expect(getCompanionPanelState().focusItem).toBeNull();
       act(() => { vi.advanceTimersByTime(2_000); });
-      expect(document.querySelector('[data-item-id="c"]')!.hasAttribute('data-focused')).toBe(false);
+      expect(document.querySelector('[data-item-id="d"]')!.hasAttribute('data-focused')).toBe(false);
       // Asked again: highlighted again.
-      act(() => openCompanionPanel({ tab: 'today', focusItem: 'c' }));
-      expect(document.querySelector('[data-item-id="c"]')!.hasAttribute('data-focused')).toBe(true);
-      expect(scrolled).toEqual(['c', 'c']);
+      act(() => openCompanionPanel({ tab: 'today', focusItem: 'd' }));
+      expect(document.querySelector('[data-item-id="d"]')!.hasAttribute('data-focused')).toBe(true);
+      expect(scrolled).toEqual(['d', 'd']);
     } finally {
       if (descriptor) Object.defineProperty(Element.prototype, 'scrollIntoView', descriptor);
       else delete (Element.prototype as Partial<Element>).scrollIntoView;
@@ -124,108 +177,79 @@ describe('the Today tab', () => {
   it('opens just Today for an item that is no longer open', () => {
     today();
     act(() => openCompanionPanel({ tab: 'today', focusItem: 'gone' }));
-    expect(screen.getByRole('button', { name: 'View all (2)' }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByRole('button', { name: /Tucked away/ }).getAttribute('aria-expanded')).toBe('false');
     expect(document.querySelector('[data-focused]')).toBeNull();
     expect(getCompanionPanelState()).toMatchObject({ open: true, tab: 'today', focusItem: null });
   });
 
-  it('shows Since you left and the activity line; Check now names another window that does the checking', async () => {
+  it('says how fresh the rows are: the last check, and when a check-in last really looked', async () => {
     mocks.check.mockRejectedValueOnce(new CompanionApiError(409, 'not the owner', { code: 'not_owner' }));
-    const { onOpenSettings } = today({}, { catchUp: { awaySince: 1, returnedAt: 2, changedItemIds: ['a'], line: '3 updates, 1 needs you.' } });
-    expect(screen.getByText(/3 updates, 1 needs you\./).textContent).toContain('Since you left');
+    const looked = new Date();
+    looked.setHours(9, 5, 0, 0);
+    const { onOpenSettings } = today({ activity: [run({ finishedAt: looked.getTime() })] });
     const activity = screen.getByLabelText('Activity');
     expect(activity.textContent).toContain('Not checked yet');
+    expect(activity.textContent).toContain('Michi looked at 09:05');
     expect(activity.textContent).not.toContain('turns today');
     fireEvent.click(within(activity).getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(mocks.toast.error).toHaveBeenCalledWith('Another Michi window is doing the checking'));
     fireEvent.click(within(activity).getByRole('button', { name: 'Activity & settings' }));
     expect(onOpenSettings).toHaveBeenCalled();
   });
+
+  it('says nothing about looking when no check-in has looked yet', () => {
+    today({ activity: [run({ outcome: 'error', detail: null, finishedAt: null })] });
+    expect(screen.getByLabelText('Activity').textContent).not.toContain('looked at');
+  });
 });
 
-describe('the brief on Today', () => {
-  const brief: CompanionBriefDto = {
-    id: 'brf-1', date: '2026-11-05', headline: 'Two things need you before lunch', origin: 'llm', createdAt: 1, cardFeedback: {},
-    closing: 'That’s all for today.',
-    cards: [
-      { title: 'Answer the review comments', body: 'Two comments on revision 3.', itemIds: ['a'], action: { label: 'Draft replies', prompt: 'Draft replies to the CR-1 comments.' } },
-      { title: 'Planning mail', body: 'Can wait until tomorrow.', itemIds: [], action: null },
-    ],
-  };
+describe('what Michi can’t do, above everything else', () => {
+  const auth = companionItem('mw', { source: 'system', subtype: 'system_auth', bucket: 'needs_you', title: 'Auth session expired', target: null });
 
-  it('shows its cards with the items they are about, and a card’s follow-up goes to the chat', () => {
-    const { onOpenItem, onAction } = today({ brief });
-    const section = screen.getByRole('region', { name: 'Today’s brief' });
-    expect(within(section).getByText('Two things need you before lunch')).toBeTruthy();
-    expect(within(section).getByText('That’s all for today.')).toBeTruthy();
-    fireEvent.click(within(section).getByRole('button', { name: 'CR-1 needs attention' }));
-    expect(onOpenItem).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }));
-    fireEvent.click(within(section).getByRole('button', { name: 'Draft replies' }));
-    expect(onAction).toHaveBeenCalledWith('Draft replies to the CR-1 comments.');
-    expect(within(section).getByRole('button', { name: 'Helpful: Planning mail' })).toBeTruthy();
+  it('says which sources a dead Auth hides, and checks again once the user refreshed credentials', async () => {
+    mocks.check.mockResolvedValueOnce(undefined);
+    today({ items: [...items, auth] });
+    const health = screen.getByLabelText('What Michi can’t do');
+    expect(health.textContent).toContain('Auth expired, so Michi can’t see your CRs, pipelines, mail and calendar. Refresh your credentials, then check again.');
+    fireEvent.click(within(health).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith('Checking now'));
+    expect(mocks.check).toHaveBeenCalledWith(undefined);
   });
 
-  /** The status as the backend reports it, with the next brief at `nextBriefAt`. */
-  const status = (nextBriefAt: number | null) => ({ ...companionSnapshot().status, nextBriefAt });
-  const tomorrowAt = (hours: number) => {
-    const date = new Date();
-    date.setDate(date.getDate() + 1);
-    date.setHours(hours, 0, 0, 0);
-    return date.getTime();
-  };
-
-  it('notes what to focus on tomorrow', async () => {
-    mocks.curate.mockResolvedValueOnce(undefined);
-    today({ brief, status: status(tomorrowAt(9)) });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Tomorrow, focus on' }), { target: { value: 'the launch review' } });
-    fireEvent.click(within(screen.getByRole('region', { name: 'Today’s brief' })).getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith('Noted for tomorrow’s brief'));
-    expect(mocks.curate).toHaveBeenCalledWith('the launch review');
+  it('names only the sources the user kept on', () => {
+    const base = companionSnapshot().settings;
+    today({ items: [auth], settings: { ...base, sources: { ...base.sources, email: { ...base.sources.email, enabled: false }, calendar: { ...base.sources.calendar, enabled: false } } } });
+    expect(screen.getByLabelText('What Michi can’t do').textContent).toContain('can’t see your CRs and pipelines');
   });
 
-  describe('before there is one', () => {
-    // The store remembers whether a brief ever reached this machine.
-    beforeEach(() => resetCompanionStoreForTests());
-    afterEach(() => {
-      localStorage.removeItem('michi:companion:brief-seen');
-      resetCompanionStoreForTests();
-    });
+  it('retries the one source that failed', async () => {
+    mocks.check.mockResolvedValueOnce(undefined);
+    today({ items: [companionItem('se', { source: 'system', subtype: 'system_source_error', title: 'Couldn’t check your CRs', summary: 'The request timed out.', facts: { source: 'cr', error: 'timeout', failures: 2 }, target: null })] });
+    const health = screen.getByLabelText('What Michi can’t do');
+    expect(health.textContent).toContain('Michi can’t check your CRs right now: it took too long.');
+    fireEvent.click(within(health).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(mocks.check).toHaveBeenCalledWith(['cr']));
+  });
 
-    it('says when the next one arrives, as the backend reports it, and the user can steer it already', async () => {
-      mocks.curate.mockResolvedValueOnce(undefined);
-      today({ status: status(tomorrowAt(9)) });
-      const section = screen.getByRole('region', { name: 'Today’s brief' });
-      // Never had a brief on this machine: the first one.
-      expect(within(section).getByText('Your first brief arrives tomorrow at 09:00.')).toBeTruthy();
-      expect(within(section).queryByText(/arrives at/)).toBeNull();
-      fireEvent.change(within(section).getByRole('textbox', { name: 'Tomorrow, focus on' }), { target: { value: 'the launch' } });
-      fireEvent.click(within(section).getByRole('button', { name: 'Save' }));
-      await waitFor(() => expect(mocks.curate).toHaveBeenCalledWith('the launch'));
+  it('says when it could not think, so the rows below are not read as its judgement', () => {
+    const started = new Date();
+    started.setHours(8, 30, 0, 0);
+    const { onOpenSettings } = today({
+      items,
+      activity: [
+        run({ id: 'cmr-2', outcome: 'error', detail: 'Claude needs a login. Run claude login.', startedAt: started.getTime() + 3_600_000, finishedAt: started.getTime() + 3_601_000 }),
+        run({ id: 'cmr-1', outcome: 'error', detail: 'Claude needs a login.', startedAt: started.getTime(), finishedAt: started.getTime() + 1_000 }),
+      ],
     });
+    const health = screen.getByLabelText('What Michi can’t do');
+    expect(health.textContent).toContain('Michi hasn’t been able to think since 08:30 — at least 2 check-ins failed: Claude needs a login. What follows is ranked by rule, not chosen by Michi.');
+    fireEvent.click(within(health).getByRole('button', { name: 'Open settings' }));
+    expect(onOpenSettings).toHaveBeenCalled();
+  });
 
-    it('calls it the next brief once a brief has reached this machine', () => {
-      localStorage.setItem('michi:companion:brief-seen', '1');
-      today({ status: status(tomorrowAt(9)) });
-      expect(screen.getByText('Next brief: tomorrow at 09:00.')).toBeTruthy();
-    });
-
-    it('promises no brief while the Companion is paused or no brief is scheduled', () => {
-      const base = companionSnapshot().settings;
-      const { view } = today({ settings: { ...base, displayName: 'Robin', paused: true }, status: { ...status(null), state: 'paused' } });
-      // Under the agent's name (§1.5).
-      expect(screen.getByText('Briefs resume when Robin is resumed.')).toBeTruthy();
-      expect(screen.queryByText(/arrives/)).toBeNull();
-      view.unmount();
-      today({ status: status(null) });
-      expect(screen.getByText('No brief is scheduled.')).toBeTruthy();
-      expect(screen.getByRole('textbox', { name: 'Next brief, focus on' })).toBeTruthy();
-    });
-
-    it('shows nothing when the user turned briefs off', () => {
-      const base = companionSnapshot().settings;
-      today({ settings: { ...base, brief: { ...base.brief, enabled: false } }, status: status(tomorrowAt(9)) });
-      expect(screen.queryByRole('region', { name: 'Today’s brief' })).toBeNull();
-    });
+  it('says nothing when Michi can see and think', () => {
+    today({ activity: [run()] });
+    expect(screen.queryByLabelText('What Michi can’t do')).toBeNull();
   });
 });
 

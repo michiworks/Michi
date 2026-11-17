@@ -21,9 +21,19 @@ function seconds(name) {
 }
 
 it('mirrors the CSS motion tokens in motion/tokens.ts', () => {
-  for (const key of ['quick', 'soft', 'enter', 'exit', 'decay', 'slow']) {
-    expect(DUR[key], `--t-${key}`).toBeCloseTo(seconds(`t-${key}`), 6);
+  const oneShot = ['quick', 'soft', 'brief', 'dismiss', 'enter', 'exit', 'move', 'collapse', 'scrim-exit', 'decay', 'slow'];
+  for (const name of oneShot) {
+    const key = name.replace(/-(\w)/g, (_, letter) => letter.toUpperCase());
+    expect(DUR[key], `--t-${name}`).toBeCloseTo(seconds(`t-${name}`), 6);
   }
   const ease = token('t-ease').match(/cubic-bezier\(([^)]+)\)/)?.[1].split(',').map((n) => Number(n.trim()));
   expect(EASE.term).toEqual(ease);
+});
+
+it('cuts CSS motion under the OS setting exactly as under Settings › Reduce motion', () => {
+  const declarations = (block) => (block ?? '').split(';').map((line) => line.trim()).filter(Boolean);
+  const app = css.match(/:root\[data-reduce-motion='on'\] \*,\s*:root\[data-reduce-motion='on'\] \*::before,\s*:root\[data-reduce-motion='on'\] \*::after \{([^}]*)\}/)?.[1];
+  const os = css.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\*,\s*\*::before,\s*\*::after \{([^}]*)\}/)?.[1];
+  expect(declarations(app)).toContain('animation-iteration-count: 1 !important');
+  expect(declarations(os)).toEqual(declarations(app));
 });

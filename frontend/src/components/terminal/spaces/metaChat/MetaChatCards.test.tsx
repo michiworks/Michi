@@ -180,7 +180,7 @@ describe('MetaChatCards', () => {
     render(<MetaChatCards tools={[started, declined]} context={context} />);
     const card = document.querySelector<HTMLElement>('[data-conversation-card="started"]')!;
     expect(card.textContent).toContain('New conversation 跑完事务回滚用例Kiro · rabbitholes · running');
-    expect(card.querySelector('[data-node="n-new"]')!.textContent).toBe('Open conversation →');
+    expect(card.querySelector('[data-node="n-new"]')!.textContent).toBe('Open conversation');
     expect(document.querySelector('[data-conversation-card="declined"]')!.textContent).toContain('you declined');
   });
 

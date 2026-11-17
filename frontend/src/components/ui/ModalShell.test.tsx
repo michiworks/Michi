@@ -81,6 +81,22 @@ describe('ModalShell shared focus lifecycle', () => {
 
   // motion="enter" lives in ModalShell.enter.test.tsx: it needs real timers.
 
+  it('takes Tab from <body>, where a control that unmounted left focus, into the newest panel', () => {
+    const modals = (inner: boolean, removed: boolean) => <>
+      <ModalShell open onClose={() => {}} aria-label="Workspace"><button>Name</button></ModalShell>
+      {inner && <ModalShell open onClose={() => {}} aria-label="Folders"><button>Up</button>{!removed && <button>Remove</button>}<button>Use</button></ModalShell>}
+    </>;
+    const view = render(modals(false, false));
+    act(() => vi.advanceTimersByTime(20));
+    view.rerender(modals(true, false));
+    act(() => vi.advanceTimersByTime(20));
+    screen.getByRole('button', { name: 'Remove' }).focus();
+    view.rerender(modals(true, true));
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.keyDown(document.body, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Up' }));
+  });
+
   it('keeps a dialog with no enabled controls keyboard focused', () => {
     render(<ModalShell open onClose={() => {}} aria-label="Loading"><button disabled>Wait</button></ModalShell>);
     act(() => vi.advanceTimersByTime(20));

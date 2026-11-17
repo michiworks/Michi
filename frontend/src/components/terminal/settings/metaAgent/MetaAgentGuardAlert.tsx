@@ -1,5 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { TriangleAlert } from 'lucide-react';
+import { WarningIcon } from '../../icons';
 import { toast } from 'sonner';
 import { joinAnd, type MetaAgentGuardStatus, type MetaAgentToolset } from 'michi-shared';
 import { Button } from '../../../ui/controls';
@@ -54,7 +54,7 @@ export function MetaAgentGuardAlert({ failures, onRetry, onChangeRuntime }: {
 
   return (
     <div className="meta-set__alert" role="alert">
-      <TriangleAlert className="meta-set__alert-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
+      <WarningIcon className="meta-set__alert-icon" size="lg" aria-hidden="true" />
       <div className="meta-set__alert-body">
         <b>
           {tools.length > 0
@@ -65,7 +65,7 @@ export function MetaAgentGuardAlert({ failures, onRetry, onChangeRuntime }: {
           {tools.length > 0 && <>Extra tools: {tools.map((tool, index) => (
             <React.Fragment key={tool}>{index > 0 && ', '}<code>{tool}</code></React.Fragment>
           ))}. </>}
-          On its own, {name} may only read and edit inside Michi, so {failures.length === 1 ? 'this run' : 'these runs'} did not start and {stops}.
+          On its own, {name} runs only with the tools it may use and couldn’t {tools.length > 0 ? 'turn these off' : 'confirm its tools'}, so {failures.length === 1 ? 'this run' : 'these runs'} did not start and {stops}.
         </p>
       </div>
       <div className="meta-set__alert-actions">

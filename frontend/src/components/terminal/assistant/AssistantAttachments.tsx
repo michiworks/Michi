@@ -1,14 +1,14 @@
 import { useState } from 'react';
 import type { MichiContextItem } from 'michi-shared';
-import { AllThreadsIcon, ChatIcon, DocIcon } from '../icons';
+import { AllThreadsIcon, ChatIcon, CloseIcon, DocIcon } from '../icons';
 import { attachmentChipLabel, VISIBLE_ATTACHMENTS } from '../../../state/assistant/assistantContext';
 import { removeAssistantAttachment, useAssistantComposer } from '../../../state/assistant/assistantComposer';
 import './assistant.css';
 
 function KindIcon({ kind }: { kind: MichiContextItem['kind'] }) {
-  if (kind === 'block') return <DocIcon size={12} />;
-  if (kind === 'row') return <AllThreadsIcon size={12} />;
-  return <ChatIcon size={12} />;
+  if (kind === 'block') return <DocIcon size="sm" />;
+  if (kind === 'row') return <AllThreadsIcon size="sm" />;
+  return <ChatIcon size="sm" />;
 }
 
 export function AttachmentChip({ item, onRemove }: { item: MichiContextItem; onRemove: () => void }) {
@@ -17,7 +17,7 @@ export function AttachmentChip({ item, onRemove }: { item: MichiContextItem; onR
     <span className="assistant-attach" data-assistant-attachment={item.kind}>
       <span className="assistant-attach__icon" aria-hidden="true"><KindIcon kind={item.kind} /></span>
       <span className="assistant-attach__text" title={label}>{label}</span>
-      <button type="button" className="assistant-attach__x" aria-label={`Remove ${label}`} onClick={onRemove}>×</button>
+      <button type="button" className="assistant-attach__x" aria-label={`Remove ${label}`} onClick={onRemove}><CloseIcon size="sm" /></button>
     </span>
   );
 }

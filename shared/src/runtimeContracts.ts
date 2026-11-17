@@ -67,6 +67,20 @@ export interface AgentModelInfo extends ModelReasoningCapabilities {
   label?: string;
   description?: string;
   isDefault?: boolean;
+  /** Speed tiers a chat can pick instead of the standard one (Codex: Ultrafast). Absent: none. */
+  serviceTiers?: ModelServiceTier[];
+}
+
+/** A speed tier a model serves requests at besides its standard one (Codex `model/list`). */
+export interface ModelServiceTier {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** A service tier id as runtimes name them (`ultrafast`); bounds what a chat can save. */
+export function isServiceTierId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z][a-z0-9_-]{0,31}$/.test(value);
 }
 
 export interface WebSearchProviderInfo {
@@ -172,10 +186,20 @@ function reasoning(value: Record<string, unknown>): ModelReasoningCapabilities {
   };
 }
 
+function serviceTiers(value: unknown): { serviceTiers?: ModelServiceTier[] } {
+  if (!Array.isArray(value)) return {};
+  const tiers = value.flatMap((entry) => {
+    const raw = object(entry);
+    return raw && isServiceTierId(raw.id) && string(raw.name) && raw.name
+      ? [{ id: raw.id, name: raw.name, ...optional('description', raw.description, string) }] : [];
+  });
+  return tiers.length ? { serviceTiers: tiers } : {};
+}
+
 export function normalizeAgentModel(value: unknown): AgentModelInfo | undefined {
   const raw = object(value);
   if (!raw || !string(raw.id) || !raw.id) return undefined;
-  return { id: raw.id, ...reasoning(raw), ...optional('label', raw.label, string), ...optional('description', raw.description, string), ...optional('isDefault', raw.isDefault, boolean) };
+  return { id: raw.id, ...reasoning(raw), ...optional('label', raw.label, string), ...optional('description', raw.description, string), ...optional('isDefault', raw.isDefault, boolean), ...serviceTiers(raw.serviceTiers) };
 }
 
 function provider(value: unknown): AgentProviderInfo | undefined {

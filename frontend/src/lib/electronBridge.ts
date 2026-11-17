@@ -1,7 +1,7 @@
 /** Typed access to the preload bridge. Browser callers must feature-detect it. */
 import type { LegacyDesktopBridge } from 'michi-shared';
 export type {
-  AppUpdateState, AppUpdateStatus, ChooseFolderResult, ChooseFoldersResult, SaveMarkdownResult, VibrancyMaterial,
+  AppUpdateState, AppUpdateStatus, ChooseFolderResult, ChooseFoldersResult, SaveMarkdownResult,
   BrowserSurfaceState, TerminalSurfaceSnapshot, FileTreeEntry, GitChangeEntry,
   DesktopLifetimeStatus, FilePreviewResult, BackgroundServiceStatus, ScheduledRunTarget,
   DesktopNotificationTarget, DesktopResidency, DesktopResidencyPatch,

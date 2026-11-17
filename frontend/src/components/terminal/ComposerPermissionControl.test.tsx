@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ComposerPermissionControl } from './ComposerPermissionControl';
 
@@ -74,6 +74,22 @@ describe('ComposerPermissionControl runtime ownership', () => {
     expect(labels.findIndex((text) => text.startsWith('Approve for me'))).toBeLessThan(labels.findIndex((text) => text.startsWith('Trust')));
     fireEvent.click(screen.getByText('Approve for me'));
     await vi.waitFor(() => expect(onChange).toHaveBeenCalledWith('approve'));
+  });
+
+  it('keeps the chip focusable while a choice saves, refusing clicks until it settles', async () => {
+    let finish = () => {};
+    const onChange = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    render(<ComposerPermissionControl mode="ask" runtimeIds={['kiro']} onChange={onChange} />);
+    const chip = screen.getByRole('button', { name: 'Permissions: Ask' });
+    fireEvent.click(chip);
+    fireEvent.click(await screen.findByText('Trust'));
+    await vi.waitFor(() => expect(chip.getAttribute('aria-disabled')).toBe('true'));
+    expect(chip.hasAttribute('disabled')).toBe(false);
+    expect(chip.getAttribute('aria-busy')).toBe('true');
+    fireEvent.click(chip);
+    expect(screen.queryByRole('menu')).toBeNull();
+    await act(async () => { finish(); });
+    expect(chip.hasAttribute('aria-disabled')).toBe(false);
   });
 
   it('shows Approve for me as the current choice, with the Ask shield', () => {

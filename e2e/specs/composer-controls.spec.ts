@@ -35,7 +35,9 @@ test('compact controls keep their geometry and respect reduced motion', async ({
     // A phone has no @ chip; typing @ still mentions.
     if (!await control.isVisible()) continue;
     await finishHover(control);
-    await expect(control).toHaveCSS('transition-duration', '0s');
+    // The reduce-motion catch-all cuts every transition to 0.01ms.
+    expect(await control.evaluate((element) => Math.max(...getComputedStyle(element).transitionDuration
+      .split(',').map((value) => Number.parseFloat(value))))).toBeLessThan(0.001);
     const bounds = (await control.boundingBox())!;
     expect(bounds.x).toBeGreaterThanOrEqual(frame.x);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(frame.x + frame.width);

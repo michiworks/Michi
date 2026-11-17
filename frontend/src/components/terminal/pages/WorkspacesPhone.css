@@ -75,8 +75,8 @@
   font-variant-numeric: tabular-nums;
 }
 .ws-phone__chip[data-tone='running'] b { color: var(--term-run); }
-.ws-phone__chip[data-tone='waiting'] { border-color: color-mix(in srgb, var(--term-accent) 45%, var(--term-line)); }
-.ws-phone__chip[data-tone='waiting'] b { color: var(--term-accent); }
+.ws-phone__chip[data-tone='waiting'] { border-color: color-mix(in srgb, var(--term-waiting) 45%, var(--term-line)); }
+.ws-phone__chip[data-tone='waiting'] b { color: var(--term-waiting-text); }
 .ws-phone__chip[aria-pressed='true'] {
   color: var(--term-fg);
   background: var(--term-alt);
@@ -102,6 +102,7 @@
 .ws-phone__search:focus-within {
   border-color: color-mix(in srgb, var(--term-accent) 70%, var(--term-line));
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-accent) 14%, transparent);
+  outline: 2px solid transparent;
 }
 .ws-phone__search > svg { flex: none; }
 .ws-phone__search input {
@@ -195,6 +196,7 @@
 }
 .ws-phone__open:active,
 .ws-phone__more:active { background: var(--term-hover-bg, var(--term-alt)); }
+.ws-phone__more[aria-expanded='true'] { background: var(--term-hover-bg, var(--term-alt)); color: var(--term-fg); }
 @media (hover: hover) {
   .ws-phone__open:hover,
   .ws-phone__more:hover { background: var(--term-hover-bg, var(--term-alt)); }
@@ -271,7 +273,7 @@
   text-overflow: ellipsis;
 }
 .ws-phone__label[data-tone='running'] { color: var(--term-run); }
-.ws-phone__label[data-tone='waiting'] { color: var(--term-accent); }
+.ws-phone__label[data-tone='waiting'] { color: var(--term-waiting-text); }
 .ws-phone__label[data-tone='failed'] { color: var(--term-danger-text); }
 .ws-phone__detail {
   flex: 1 1 0;
@@ -395,6 +397,7 @@
 .ws-phone__field:focus {
   border-color: var(--term-accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--term-accent) 14%, transparent);
+  outline: 2px solid transparent;
 }
 .ws-phone__field-note {
   margin: 0;

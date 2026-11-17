@@ -1,4 +1,4 @@
-import { Code2 } from 'lucide-react';
+import { CodeIcon } from '../../../icons';
 import type { BlockProps } from '../blockTypes';
 import { isObj, str } from '../michiPageModel';
 import { BorderBtn } from '../../../primitives';
@@ -19,7 +19,7 @@ export function CustomBlock({ block }: BlockProps) {
   return (
     <div className="michi-doc-widget" data-michi-block="custom">
       <div className="michi-doc-widget__head">
-        <span className="michi-doc-widget__glyph" aria-hidden="true"><Code2 size={12} strokeWidth={1.8} /></span>
+        <span className="michi-doc-widget__glyph" aria-hidden="true"><CodeIcon size="sm" /></span>
         <span className="michi-doc-widget__title" title={title}>{title}</span>
         <span className="michi-doc-widget__state michi-doc-mono">off</span>
       </div>

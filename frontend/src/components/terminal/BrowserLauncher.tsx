@@ -3,15 +3,19 @@ import { toast } from 'sonner';
 import { useChatActions, useChatPanes } from '../../state/chatStore';
 import { usePrefs } from '../../state/prefs';
 import { navPageEvent } from '../../state/appEvents';
+import { getElectron } from '../../lib/electronBridge';
 import { HoverTip } from '../ui/Popover';
 import { TOPBAR_TIP_DELAY_MS } from './TopbarIconButton';
+import { ICON_PX, strokeFor } from './icons';
 
 /** Open the browser directly, using the current pane's rendered width. */
 export default function BrowserLauncher() {
   const { openPanes, focusedPane, paneItems } = useChatPanes();
   const { openBrowserPane, focusPane, setPaneWidth } = useChatActions();
   const { prefs } = usePrefs();
-  return <HoverTip label="Browser" delayMs={TOPBAR_TIP_DELAY_MS}><button type="button" className="t-icon-btn" aria-label="Browser"
+  // Only the desktop app has a native surface; a web page cannot frame most sites.
+  if (!getElectron()?.browserCreate) return null;
+  return <HoverTip label="Browser" delayMs={TOPBAR_TIP_DELAY_MS}><button type="button" className="t-icon-btn topbar-icon-btn" aria-label="Browser"
     onClick={event => {
       try {
         const existing = openPanes.find(id => paneItems[id]?.kind === 'browser');
@@ -39,7 +43,7 @@ export default function BrowserLauncher() {
         toast.error(error instanceof Error ? error.message : 'Unable to open browser');
       }
     }}
-    style={{ width: 26, height: 26, color: 'var(--term-mid)', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></svg>
+    style={{ width: 26, height: 26, WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+    <svg width={ICON_PX.md} height={ICON_PX.md} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeFor(ICON_PX.md, 24)} aria-hidden><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="4" ry="9" /><path d="M3 12h18" /></svg>
   </button></HoverTip>;
 }

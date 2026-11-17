@@ -3,7 +3,7 @@ import { installMockApi } from '../fixtures/mockApi';
 import { writeFileSync } from 'node:fs';
 import { openThreadFromSidebar } from '../fixtures/shell';
 
-async function boot(page: Page, motion = 'soft-fade', count = 2, widthMode = 'adaptive') {
+async function boot(page: Page, count = 2, widthMode = 'adaptive') {
   await installMockApi(page, { custom: async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/agent-runs') { await route.fulfill({ json: { runs: [] } }); return true; }
@@ -12,7 +12,7 @@ async function boot(page: Page, motion = 'soft-fade', count = 2, widthMode = 'ad
     }
     return false;
   } });
-  await page.addInitScript(({ motion, count, widthMode }) => {
+  await page.addInitScript(({ count, widthMode }) => {
     localStorage.clear(); sessionStorage.clear();
     const ids = ['root', 'second', 'third', 'fourth'];
     const paragraph = 'A quiet workspace preserves the reading position and the shape of every paragraph. Pane changes should keep code readable and apply the final text width once, without squeezing words through intermediate columns.';
@@ -31,10 +31,10 @@ async function boot(page: Page, motion = 'soft-fade', count = 2, widthMode = 'ad
       edges: ids.slice(1).map(target => ({ source: 'root', target, kind: 'branch' })),
       trees: [{ id: 'tree', rootNodeId: 'root', name: 'root conversation', createdAt: 1, lastActiveAt: 1 }], activeTreeId: 'tree', contexts: [], createdAt: 1,
     }] }));
-    localStorage.setItem('michi:v1:prefs', JSON.stringify({ paneSpawnAnimation: motion, paneWidthMode: widthMode, defaultPaneWidth: 800, singlePaneContentWidth: null }));
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ paneWidthMode: widthMode, defaultPaneWidth: 800, singlePaneContentWidth: null }));
     sessionStorage.setItem('michi:panes:open', JSON.stringify({ 'motion-ws::tree': ids.slice(0, count) }));
     sessionStorage.setItem('michi:panes:focus', JSON.stringify({ 'motion-ws::tree': 'root' }));
-  }, { motion, count, widthMode });
+  }, { count, widthMode });
   await page.goto('/');
   await openThreadFromSidebar(page, 'root conversation');
   await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(count);
@@ -82,7 +82,7 @@ test.use({ viewport: { width: 1480, height: 1000 } });
 for (const width of [1480]) for (const id of ['root', 'second']) {
   test(`sequential 2->1 closes ${id} before fullscreen at ${width}px`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
-    await boot(page, 'soft-fade', 2);
+    await boot(page, 2);
     await page.locator(`[data-pane-caption-id="${id}"]`).evaluate(el => (el as HTMLElement).click());
     await page.waitForTimeout(300);
     const scene = await page.evaluateHandle(async id => {
@@ -156,7 +156,7 @@ for (const scenario of [
   { count: 4, id: 'second', width: 1480 },
 ]) test(`single cover ${scenario.count} panes closing ${scenario.id} at ${scenario.width}px has no removal edge`, async ({ page }, info) => {
   await page.setViewportSize({ width: scenario.width, height: 900 });
-  await boot(page, 'soft-fade', scenario.count);
+  await boot(page, scenario.count);
   await page.locator(`[data-pane-caption-id="${scenario.id}"]`).evaluate(el => (el as HTMLElement).click());
   await page.waitForTimeout(300);
   const scene = await page.evaluateHandle(async id => {
@@ -219,7 +219,7 @@ for (const scenario of [
 for (const count of [1, 2]) test(`long transcript ${count}->${count + 1} layout measurement and scrolled caption alignment`, async ({ page }, info) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  await boot(page, 'soft-fade', count);
+  await boot(page, count);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable');
   const metrics = async () => Object.fromEntries((await cdp.send('Performance.getMetrics')).metrics.map(m => [m.name, m.value]));
@@ -272,7 +272,7 @@ for (const count of [1, 2]) test(`long transcript ${count}->${count + 1} layout 
 });
 
 test('rapid retarget, user interruption, reopen and reduced motion', async ({ page }) => {
-  await boot(page, 'gentle-glide');
+  await boot(page);
   const result = await page.evaluate(async () => {
     const strip = document.querySelector<HTMLElement>('.terminal-dashboard')!;
     const open = () => (document.querySelector('[aria-label="New pane"]') as HTMLElement).click();
@@ -306,7 +306,7 @@ test('rapid retarget, user interruption, reopen and reduced motion', async ({ pa
 
 for (const interruption of ['close-again', 'reopen', 'resize', 'reduced-motion'] as const) {
   test(`claimed close is released after ${interruption}`, async ({ page }) => {
-    await boot(page, 'soft-fade', 4);
+    await boot(page, 4);
     await page.locator('[data-pane-caption-id="fourth"]').evaluate(el => (el as HTMLElement).click());
     await page.evaluate(async () => {
       (document.activeElement as HTMLElement)?.blur();
@@ -342,7 +342,7 @@ for (const interruption of ['close-again', 'reopen', 'resize', 'reduced-motion']
 
 for (const native of [true, false]) test(`scrolled middle close reveals its predecessor and retains vertical reading position (${native ? 'native' : 'fallback'})`, async ({ page }) => {
   if (!native) await page.addInitScript(() => Object.defineProperty(window, 'ScrollTimeline', { value: undefined }));
-  await boot(page, 'soft-fade', 4);
+  await boot(page, 4);
   const result = await page.evaluate(async () => {
     const strip = document.querySelector<HTMLElement>('.terminal-dashboard')!;
     const caption = document.querySelector<HTMLElement>('[data-pane-caption-id="second"]')!;
@@ -382,40 +382,38 @@ for (const native of [true, false]) test(`scrolled middle close reveals its pred
   await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(4);
 });
 
-for (const motion of ['soft-fade', 'gentle-glide', 'frozen-retract', 'phosphor', 'fission', 'thread-pull']) {
-  test(`${motion} entrance, close/reopen and last-pane behavior`, async ({ page }) => {
-    await boot(page, motion, 1);
-    const frames = await page.getByRole('complementary').getByText('second conversation', { exact: true }).first().evaluate(async el => {
-      (el as HTMLElement).click();
-      await new Promise(requestAnimationFrame);
-      const pane = document.querySelector<HTMLElement>('.terminal-dashboard > [data-node-id="second"]')!;
-      const surface = pane.querySelector<HTMLElement>('.pane-entry-surface')!;
-      const animations = surface.getAnimations();
-      const available = document.querySelector<HTMLElement>('.terminal-dashboard')!.clientWidth;
-      return animations.map(animation => ({ duration: animation.effect?.getTiming().duration, frames: (animation.effect as KeyframeEffect).getKeyframes(), width: pane.getBoundingClientRect().width, available }));
-    });
-    expect(frames).toHaveLength(1);
-    expect(Number(frames[0].duration)).toBeLessThanOrEqual(220);
-    // Adaptive sizing splits the strip in half for two panes.
-    expect(frames[0].width).toBe(frames[0].available / 2);
-    expect(frames[0].frames.every(f => !String(f.transform).includes('scale') && f.filter === undefined)).toBe(true);
-    expect(frames[0].frames.every(f => Number(f.opacity) === 1)).toBe(true);
-    await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })));
-    await page.getByRole('complementary').getByText('second conversation', { exact: true }).first().click();
-    await page.waitForTimeout(240);
-    await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(2);
-    await page.evaluate(() => {
-      (document.activeElement as HTMLElement)?.blur();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true }));
-    });
-    await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(1);
-    await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })));
-    await expect(page.locator('.terminal-dashboard')).toHaveCount(0);
+test('entrance, close/reopen and last-pane behavior', async ({ page }) => {
+  await boot(page, 1);
+  const frames = await page.getByRole('complementary').getByText('second conversation', { exact: true }).first().evaluate(async el => {
+    (el as HTMLElement).click();
+    await new Promise(requestAnimationFrame);
+    const pane = document.querySelector<HTMLElement>('.terminal-dashboard > [data-node-id="second"]')!;
+    const surface = pane.querySelector<HTMLElement>('.pane-entry-surface')!;
+    const animations = surface.getAnimations();
+    const available = document.querySelector<HTMLElement>('.terminal-dashboard')!.clientWidth;
+    return animations.map(animation => ({ duration: animation.effect?.getTiming().duration, frames: (animation.effect as KeyframeEffect).getKeyframes(), width: pane.getBoundingClientRect().width, available }));
   });
-}
+  expect(frames).toHaveLength(1);
+  expect(Number(frames[0].duration)).toBeLessThanOrEqual(220);
+  // Adaptive sizing splits the strip in half for two panes.
+  expect(frames[0].width).toBe(frames[0].available / 2);
+  expect(frames[0].frames.every(f => !String(f.transform).includes('scale') && f.filter === undefined)).toBe(true);
+  expect(frames[0].frames.every(f => Number(f.opacity) === 1)).toBe(true);
+  await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })));
+  await page.getByRole('complementary').getByText('second conversation', { exact: true }).first().click();
+  await page.waitForTimeout(240);
+  await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(2);
+  await page.evaluate(() => {
+    (document.activeElement as HTMLElement)?.blur();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true }));
+  });
+  await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(1);
+  await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', ctrlKey: true, bubbles: true, cancelable: true })));
+  await expect(page.locator('.terminal-dashboard')).toHaveCount(0);
+});
 
 for (const count of [1, 2]) test(`closing ${count} panes preserves outgoing transcript geometry`, async ({ page }, info) => {
-  await boot(page, 'soft-fade', count);
+  await boot(page, count);
   const result = await page.evaluate(async () => {
     const pane = document.querySelector<HTMLElement>('.terminal-dashboard > [data-node-id="root"]')!;
     const surface = pane.querySelector<HTMLElement>('.pane-entry-surface')!;
@@ -448,7 +446,7 @@ for (const count of [1, 2]) test(`closing ${count} panes preserves outgoing tran
 });
 
 for (const count of [4]) test(`closing the last of ${count} panes reveals its neighbour during the exit`, async ({ page }, info) => {
-  await boot(page, 'soft-fade', count);
+  await boot(page, count);
   const result = await page.evaluate(async count => {
     const strip = document.querySelector<HTMLElement>('.terminal-dashboard')!;
     const panes = [...strip.querySelectorAll<HTMLElement>(':scope > [data-node-id]')];
@@ -492,7 +490,7 @@ for (const count of [4]) test(`closing the last of ${count} panes reveals its ne
 
 for (const width of [1480, 390]) test(`mid-motion surfaces remain disjoint at ${width}px`, async ({ page }, info) => {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
-  await boot(page, 'gentle-glide', 3);
+  await boot(page, 3);
   const result = await page.evaluate(async () => {
     const strip = document.querySelector<HTMLElement>('.terminal-dashboard')!;
     // Close the first pane; the survivors must slide without scaling or overlap.
@@ -521,7 +519,7 @@ for (const width of [1480, 390]) test(`mid-motion surfaces remain disjoint at ${
 });
 
 for (const mode of ['fixed', 'half', 'adaptive']) test(`${mode} sizing, immediate manual resize and custom width preservation`, async ({ page }) => {
-  await boot(page, 'soft-fade', 2, mode);
+  await boot(page, 2, mode);
   const panes = page.locator('.terminal-dashboard > [data-node-id]');
   // Fixed panes take the 800px default; half (and adaptive with two panes) split the strip.
   const available = () => page.locator('.terminal-dashboard').evaluate(el => el.clientWidth);

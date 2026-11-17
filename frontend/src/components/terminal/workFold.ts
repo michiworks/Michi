@@ -19,7 +19,7 @@ export interface FinishedTurnSplit {
   notes: number;
 }
 
-const isLifted = (block: AssistantBlock) => block.kind === 'image' || block.kind === 'user-input';
+const isLifted = (block: AssistantBlock) => block.kind === 'image' || block.kind === 'blocks' || block.kind === 'user-input';
 const hasVisibleProse = (block: AssistantBlock) =>
   block.kind === 'answer' && projectAnswerRun([block]).visibleText.trim().length > 0;
 

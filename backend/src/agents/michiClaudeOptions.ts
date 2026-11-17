@@ -73,10 +73,9 @@ function claudePersonalCommandNames(): string[] {
 /**
  * ClaudeAdapterOptions.requireHostApproval for Michi (D19, Q26; DESIGN-v2
  * §2.8, D4): in a guarded turn (services/turnGuard.ts: Michi drove it, or it
- * holds outside content), a call Michi's consequence rules force to ask
- * (permissionPolicy.forcedChatDecision: it leaves the machine, Michi cannot
- * read it, or it reads the network or credentials in work that started from
- * someone else's content) goes through Michi's approval. A Claude chat loads
+ * is a check-in's own), a call Michi's consequence rules force to ask
+ * (permissionPolicy.forcedChatDecision: a dangerous egress) or refuse
+ * (backgroundRefusal) goes through Michi's approval. A Claude chat loads
  * the user's own Claude settings, whose allow rules and PreToolUse hooks
  * would otherwise approve Bash, WebFetch or Write before canUseTool, Michi's
  * policy, is asked (YOLO's bypassPermissions skips it too). Every other call
@@ -120,7 +119,19 @@ function michiClaudeLimits(): ClaudeLimits {
     approveTimeoutMs: approveTimeoutMs(),
     disposeTermTimeoutMs: parseInt(process.env.MICHI_CLAUDE_DISPOSE_TERM_TIMEOUT_MS ?? String(defaults.disposeTermTimeoutMs), 10),
     disposeKillTimeoutMs: parseInt(process.env.MICHI_CLAUDE_DISPOSE_KILL_TIMEOUT_MS ?? String(defaults.disposeKillTimeoutMs), 10),
+    sessionIdleTtlMs: claudeSessionIdleTtlMs(defaults.sessionIdleTtlMs),
   };
+}
+
+/**
+ * How long an idle Claude chat keeps its CLI (MICHI_CLAUDE_SESSION_IDLE_TTL_MS;
+ * 0 keeps them all). An invalid value takes the default, never 0: a typo must
+ * not turn idle release off.
+ */
+function claudeSessionIdleTtlMs(fallback: number): number {
+  const raw = process.env.MICHI_CLAUDE_SESSION_IDLE_TTL_MS;
+  const n = raw === undefined || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /** MICHI_CLAUDE_* CLI switches, read at each spawn; unset, the package's defaults. */

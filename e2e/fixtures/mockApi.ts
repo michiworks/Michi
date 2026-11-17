@@ -468,6 +468,8 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
   // `http://127.0.0.1:3001/src/services/api/artifacts.ts` (the `/api/` segment
   // sits mid-path), which would return JSON for a module script and white-screen
   // the app. Anchoring `/api/` to just after the host avoids that.
+  // Block submissions (forms, polls, choices and chat buttons): kept for this page, first write wins.
+  const blockSubmissions = new Map<string, { host: string; submission: Record<string, unknown> }>();
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     if (overrides.custom && (await overrides.custom(route))) return;
 
@@ -487,6 +489,25 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
         headers: { 'cache-control': 'no-cache' },
         body,
       });
+    }
+    if (/^\/workspaces\/[^/]+\/block-submissions$/.test(path)) {
+      const reply = (status: number, data: unknown) =>
+        route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) });
+      if (method === 'GET') {
+        const host = url.searchParams.get('host');
+        return reply(200, { submissions: [...blockSubmissions.values()].filter((row) => row.host === host).map((row) => row.submission) });
+      }
+      const body = route.request().postDataJSON() as {
+        host: { kind: 'page'; pageId: string } | { kind: 'chat'; nodeId: string; messageId: string };
+        blockId: string; signature: string; value: unknown; text: string;
+      };
+      const host = body.host.kind === 'page' ? `page:${body.host.pageId}` : `chat:${body.host.nodeId}:${body.host.messageId}`;
+      const key = `${host}\0${body.blockId}\0${body.signature}`;
+      const existing = blockSubmissions.get(key);
+      if (existing) return reply(409, { code: 'already_submitted', submission: existing.submission, error: 'already submitted' });
+      const submission = { blockId: body.blockId, signature: body.signature, value: body.value, text: body.text, submittedAt: Date.now() };
+      blockSubmissions.set(key, { host, submission });
+      return reply(201, { submission });
     }
     // Every thread is as current as its seeded rows: nothing to catch up on.
     if (method === 'POST' && path === '/chats/background/cursors') {
@@ -722,7 +743,7 @@ export async function installMockApi(page: Page, overrides: MockOverrides = {}) 
     if (await spacesHome.handle(route)) return;
     // Michi Memory: no memories, memory on, a quiet change feed, no automatic memory status.
     if (await memory.handle(route)) return;
-    // The Companion: quiet (no items, no brief, no conversation), every route answered.
+    // The Companion: quiet (no items, no conversation), every route answered.
     if (await companion.handle(route)) return;
 
     // Default: empty 200. Loud enough to find in traces if we missed something.

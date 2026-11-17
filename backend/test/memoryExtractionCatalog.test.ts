@@ -58,7 +58,7 @@ test('the extraction profile is a restricted Meta agent profile of exactly three
   assert.match(profileInstructions, /calling `memory_profile` exactly once/);
   assert.doesNotMatch(profileInstructions, /memory_extract/);
   const consolidation = CONSOLIDATION_INSTRUCTIONS(MEMORY_CONSOLIDATE_TOOL_NAME);
-  assert.match(consolidation, /Call memory_consolidate exactly once with \{ decisions \}/);
+  assert.match(consolidation, /Call memory_consolidate exactly once with \{ decisions, guesses \}/);
   assert.doesNotMatch(consolidation, /memory_extract|memory_profile/);
 });
 
@@ -71,7 +71,7 @@ test('an extraction slot serves only the extraction tools; a Pages maintenance s
   assert.match(extract.properties.forget.description, /^The refs \(m:…\) of listed memories not marked savedByUser whose content these turns decline or take back, said before them: they are deleted; \[\] when none\.$/);
   const memory = extract.properties.memories.items;
   assert.deepEqual(Object.keys(memory.properties).sort(),
-    ['about', 'body', 'event_date', 'explicit', 'keywords', 'kind', 'op', 'quote', 'source_turn', 'target', 'topic']);
+    ['about', 'body', 'event_date', 'explicit', 'keywords', 'kind', 'op', 'quote', 'source_turn', 'target', 'topic', 'valid_until']);
   assert.match(memory.properties.explicit.description, /asked in their own words to remember it/);
   assert.match(memory.properties.kind.description, /preference, fact, decision or convention/);
   assert.match(memory.properties.quote.description, /copied exactly/);
@@ -93,9 +93,11 @@ test('an extraction slot serves only the extraction tools; a Pages maintenance s
   assert.match(section.properties.lines.items.properties.refs.description, /refs \(m:…\) of the listed notes/);
   assert.deepEqual(profile.required ?? [], []);
   assert.equal(section.properties.topic.maxLength, undefined);
-  // memory_consolidate lists decisions of { ref, op, into, why }, with descriptions, enforcing nothing itself.
+  // memory_consolidate lists decisions of { ref, op, into, why } and guesses of { text, refs }, with descriptions, enforcing nothing itself.
   const consolidate = tools[2]!.inputSchema;
-  assert.deepEqual(Object.keys(consolidate.properties), ['decisions']);
+  assert.deepEqual(Object.keys(consolidate.properties), ['decisions', 'guesses']);
+  assert.deepEqual(Object.keys(consolidate.properties.guesses.items.properties).sort(), ['refs', 'text']);
+  assert.match(consolidate.properties.guesses.description, /^At most 2 things about the user/);
   const decision = consolidate.properties.decisions.items;
   assert.deepEqual(Object.keys(decision.properties).sort(), ['into', 'op', 'ref', 'why']);
   assert.match(decision.properties.op.description, /keep \(the default\), duplicate .* or outdated/);

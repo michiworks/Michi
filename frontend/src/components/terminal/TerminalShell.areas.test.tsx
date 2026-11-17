@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import TerminalShell from './TerminalShell';
 import { PrefsProvider } from '../../state/prefs';
+import { isDashboardUncovered } from '../../state/panePresenceVisibility';
 import { OPEN_NATIVE_PAGE_EVENT } from './spaces/SpacesPage';
 import { OPEN_SETTINGS_SECTION_EVENT } from './scheduled/metaAgent/metaAgentNav';
 import { openScheduledHome } from './scheduled/scheduledNav';
@@ -88,6 +89,7 @@ describe('TerminalShell areas', () => {
     expect(rail('conversations').getAttribute('aria-current')).toBe('page');
     expect(rail('settings').getAttribute('aria-expanded')).toBe('true');
     expect(document.documentElement.dataset.nativeSurfacesVisible).toBe('false');
+    expect(isDashboardUncovered(), 'Settings lies over the Dashboard').toBe(false);
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('button', { name: 'Runtime & model' }));
     expect(await screen.findByText('Model pane')).toBeTruthy();
 
@@ -95,6 +97,7 @@ describe('TerminalShell areas', () => {
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
     expect(screen.getByText('Conversation dashboard')).toBe(dashboard);
     expect(document.documentElement.dataset.nativeSurfacesVisible).toBe('true');
+    expect(isDashboardUncovered()).toBe(true);
 
     fireEvent.click(rail('settings'));
     expect(await screen.findByText('Model pane')).toBeTruthy();

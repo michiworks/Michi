@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import type { ReplyMemorySource } from 'michi-shared';
 import type { ChatMessage } from '../../state/chatTypes';
 
@@ -28,15 +28,6 @@ vi.mock('./AgentLineBlocks', async (original) => {
 import { MessageBlock } from './MessageBlock';
 import { ReplySourcesContext, removeReplySource, resetReplySources, type ReplySourcesTarget } from '../../state/memory/replySources';
 
-// jsdom has no PointerEvent, so fireEvent would drop pointerType.
-class TestPointerEvent extends MouseEvent {
-  pointerType: string;
-  constructor(type: string, init: PointerEventInit = {}) {
-    super(type, init);
-    this.pointerType = init.pointerType ?? '';
-  }
-}
-
 const TARGET: ReplySourcesTarget = { apiBase: 'http://localhost:3000/api', nodeId: 'n-1', backendConnectionId: 'local', workspaceId: 'ws-1', local: true };
 const SAVED: ReplyMemorySource = { kind: 'memory', memoryId: 'mem-1', text: 'Use pnpm, never npm.', savedBy: 'user', at: Date.now(), from: null };
 const reply = { id: 'a-1', role: 'assistant' as const, text: 'Install it with pnpm.', toolCalls: [], streaming: false } satisfies Partial<ChatMessage> as ChatMessage;
@@ -44,7 +35,7 @@ const reply = { id: 'a-1', role: 'assistant' as const, text: 'Install it with pn
 function block(m: ChatMessage, extra: { hideActions?: boolean; isErrorTail?: boolean } = {}) {
   return (
     <ReplySourcesContext.Provider value={TARGET}>
-      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts={false} fontFamily="inherit" density="comfortable"
+      <MessageBlock m={m} index={0} isDark={false} copyText={() => ''} showThoughts={false} density="comfortable"
         hideActions={extra.hideActions} isErrorTail={extra.isErrorTail} errorMessage={extra.isErrorTail ? 'It failed' : undefined} />
     </ReplySourcesContext.Provider>
   );
@@ -58,7 +49,6 @@ beforeEach(() => {
   resetReplySources();
   renders.blocks = 0;
 });
-afterEach(() => vi.unstubAllGlobals());
 
 describe('MessageBlock and what a reply was based on', () => {
   it('a settled reply shows it under its receipts and before its actions and error; a user message, a streaming reply or a running turn shows none', async () => {
@@ -87,22 +77,4 @@ describe('MessageBlock and what a reply was based on', () => {
     expect(renders.blocks).toBe(before);
   });
 
-  it('a tap on the line reveals nothing of the message\'s actions; a mouse over the reply still does', async () => {
-    vi.stubGlobal('PointerEvent', TestPointerEvent);
-    const { container } = render(block(reply));
-    const toggle = await screen.findByRole('button', { name: /^Based on/ });
-    const actions = screen.getByRole('button', { name: 'copy message' }).parentElement!;
-    expect(actions.style.opacity).toBe('0');
-    fireEvent.pointerOver(toggle, { pointerType: 'touch' });
-    fireEvent.pointerDown(toggle, { pointerType: 'touch' });
-    fireEvent.mouseOver(toggle);
-    fireEvent.click(toggle);
-    // The tap went to the toggle alone.
-    expect(actions.style.opacity).toBe('0');
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    const body = container.querySelector('.terminal-message-assistant')!;
-    fireEvent.pointerOver(body, { pointerType: 'mouse' });
-    fireEvent.mouseOver(body);
-    expect(actions.style.opacity).toBe('1');
-  });
 });

@@ -26,7 +26,6 @@ import {
   COMPANION_OWNER,
   COMPANION_PURGED_TOOL_OUTPUT,
   applyItemAction,
-  buildCatchUp,
   cancelReminder,
   clearSubtypeDemotion,
   countOpenReminders,
@@ -34,7 +33,6 @@ import {
   createReminder,
   decideCard,
   demoteSubtype,
-  getBrief,
   getCard,
   getCompanionMeta,
   getCompanionNotesState,
@@ -43,10 +41,8 @@ import {
   getReminder,
   getRun,
   getSnapshots,
-  insertBrief,
   insertCard,
   isSubtypeDemoted,
-  latestCatchUp,
   listDemotedSubtypes,
   listItemEvents,
   listOpenItems,
@@ -352,7 +348,7 @@ describe('Companion user state', () => {
 
   describe('viewing (R2.8, R2.12)', () => {
     test('messages the check-ins posted after the user last looked are unread; runs that posted nothing and polls never are', () => {
-      const post = (kind: 'heartbeat' | 'brief' | 'welcome' | 'wake', at: number, outcome: 'spoke' | 'quiet' = 'spoke') => {
+      const post = (kind: 'heartbeat' | 'welcome' | 'wake', at: number, outcome: 'spoke' | 'quiet' = 'spoke') => {
         const run = recordRun({ kind, trigger: 'schedule', startedAt: at - 1000, outcome, finishedAt: at });
         if (outcome === 'spoke') recordRunPost(run.id, { messageId: companionPostId(run.id), at, changes: [] });
         return run;
@@ -360,77 +356,22 @@ describe('Companion user state', () => {
       assert.equal(countUnreadMessages(), 0);
       post('heartbeat', T0 - 2 * HOUR);
       post('wake', T0 - 2 * HOUR, 'quiet');
-      recordRun({ kind: 'brief', trigger: 'schedule', startedAt: T0 - 2 * HOUR, outcome: 'spoke', finishedAt: T0 - 2 * HOUR + 1000 });
+      recordRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: T0 - 2 * HOUR, outcome: 'spoke', finishedAt: T0 - 2 * HOUR + 1000 });
       recordRun({ kind: 'poll', trigger: 'cr', startedAt: T0 - 2 * HOUR, outcome: 'ok', finishedAt: T0 - 2 * HOUR + 1000 });
       assert.equal(countUnreadMessages(), 1, 'never viewed: every post is unread; a run that spoke but posted nothing is not');
       const first = recordCompanionView(T0 - HOUR);
-      assert.deepEqual(first, { previousViewedAt: null, catchUp: null, hadUnread: true }, 'the first look has nothing to catch up on');
+      assert.deepEqual(first, { previousViewedAt: null, hadUnread: true }, 'the first look: nothing was read before it');
       assert.equal(countUnreadMessages(), 0);
-      post('brief', T0 - 29 * MINUTE);
+      post('wake', T0 - 29 * MINUTE);
       post('welcome', T0 - 19 * MINUTE);
       assert.equal(countUnreadMessages(), 2);
       assert.equal(snapshotDto({ now: T0, conversation: null }).counts.unreadMessages, 2);
       const again = recordCompanionView(T0 - 10 * MINUTE);
-      assert.deepEqual(again, {
-        previousViewedAt: T0 - HOUR,
-        catchUp: { awaySince: T0 - HOUR, returnedAt: T0 - 10 * MINUTE, changedItemIds: [], line: 'Nothing new since 11:00.' },
-        hadUnread: true,
-      }, 'away 50 minutes, and nothing changed in the feed');
+      assert.deepEqual(again, { previousViewedAt: T0 - HOUR, hadUnread: true },
+        'away 50 minutes: nothing is summarized for the return any more (the brief went on 2026-11-17)');
       assert.equal(recordCompanionView(T0 - 5 * MINUTE).hadUnread, false);
     });
 
-    test('back after half an hour or more: "Since you left" lists what was created, changed or reopened and is still open', () => {
-      const before = upsertItem(draft('cr:before:mine'), T0 - 3 * HOUR).item;
-      const changed = upsertItem(draft('cr:changed:mine'), T0 - 3 * HOUR).item;
-      const reopened = upsertItem(draft('cr:reopened:mine'), T0 - 3 * HOUR).item;
-      resolveItems([reopened.id], T0 - 2 * HOUR);
-      recordCompanionView(T0 - HOUR);
-
-      upsertItem(draft('cr:baseline:mine'), T0 - 50 * MINUTE, { baseline: true });
-      const update = upsertItem(draft('pipeline:P', { source: 'pipeline', subtype: 'pipeline_recovered', bucket: 'update', severity: 'digest' }), T0 - 45 * MINUTE).item;
-      const needs = upsertItem(draft('cr:needs:mine'), T0 - 40 * MINUTE).item;
-      const dismissed = upsertItem(draft('cr:dismissed:mine'), T0 - 35 * MINUTE).item;
-      applyItemAction(dismissed.id, { action: 'dismiss' }, T0 - 34 * MINUTE);
-      upsertItem(draft('cr:changed:mine', { version: 'v2' }), T0 - 30 * MINUTE);
-      upsertItem(draft('cr:reopened:mine', { version: 'v2' }), T0 - 25 * MINUTE);
-
-      const view = recordCompanionView(T0);
-      assert.equal(view.previousViewedAt, T0 - HOUR);
-      assert.deepEqual(view.catchUp, {
-        awaySince: T0 - HOUR,
-        returnedAt: T0,
-        changedItemIds: [reopened.id, changed.id, needs.id, update.id],
-        line: '4 updates, 3 need you.',
-      }, 'newest change first; not the item from before, the baseline sighting or the dismissed one');
-      assert.equal(view.catchUp?.changedItemIds.includes(before.id), false);
-      assert.deepEqual(latestCatchUp(T0 + 10 * MINUTE), view.catchUp, 'kept for the snapshot');
-      assert.deepEqual(snapshotDto({ now: T0 + 10 * MINUTE, conversation: null }).catchUp, view.catchUp);
-      assert.equal(latestCatchUp(T0 + 30 * MINUTE), null, 'for half an hour');
-      assert.equal(latestCatchUp(T0 - 1), null);
-
-      const soon = recordCompanionView(T0 + 20 * MINUTE);
-      assert.equal(soon.catchUp, null, 'away 20 minutes: no catch-up');
-      assert.deepEqual(latestCatchUp(T0 + 25 * MINUTE), view.catchUp, 'the stored one is not replaced');
-      setCompanionMeta('companion:catch_up', '{broken');
-      assert.equal(latestCatchUp(T0 + 25 * MINUTE), null);
-    });
-
-    test('the catch-up line counts updates and what needs the user', () => {
-      const at = (minutes: number) => T0 + minutes * MINUTE;
-      upsertItem(draft('cr:a:mine'), at(1));
-      upsertItem(draft('cr:b:mine'), at(2));
-      upsertItem(draft('pipeline:c', { source: 'pipeline', subtype: 'pipeline_recovered', bucket: 'update', severity: 'digest' }), at(3));
-      upsertItem(draft('pipeline:d', { source: 'pipeline', subtype: 'pipeline_recovered', bucket: 'update', severity: 'digest' }), at(4));
-      const line = (from: number, to: number) => buildCatchUp(at(from), at(to)).line;
-      assert.equal(line(0, 1), '1 thing needs you.');
-      assert.equal(line(0, 2), '2 things need you.');
-      assert.equal(line(2, 3), '1 update.');
-      assert.equal(line(2, 4), '2 updates.');
-      assert.equal(line(1, 3), '2 updates, 1 needs you.');
-      assert.equal(line(0, 4), '4 updates, 2 need you.');
-      assert.equal(line(5, 6), 'Nothing new since 12:05.');
-      assert.deepEqual(buildCatchUp(at(5), at(6)).changedItemIds, []);
-    });
   });
 
   test('purgeExpired keeps only what retention allows (R2.10), and a second pass finds nothing', () => {
@@ -465,7 +406,7 @@ describe('Companion user state', () => {
       before: { status: 'new', snoozedUntil: null }, after: { status: 'snoozed', snoozedUntil: ago(39) }, reason: 'Waiting on the salary review', now: ago(40) });
     recordRunChange({ runId: oldQuiet.id, targetKind: 'item', targetId: emailOpen.id, action: 'snooze',
       before: null, after: null, reason: 'Gone with its run', now: ago(40) });
-    const oldRunning = startRun({ kind: 'brief', trigger: 'schedule', startedAt: ago(40) });
+    const oldRunning = startRun({ kind: 'heartbeat', trigger: 'schedule', startedAt: ago(40) });
     const recentPoll = recordRun({ kind: 'poll', trigger: 'cr', startedAt: ago(1), outcome: 'ok', finishedAt: ago(1, 1) });
 
     const oldCard = insertCard({ kind: 'goal.add', payload: { text: 'x' }, summary: 'Add a goal: "x"', reason: null, now: ago(40) });
@@ -473,9 +414,6 @@ describe('Companion user state', () => {
     const oldPendingCard = insertCard({ kind: 'goal.add', payload: { text: 'y' }, summary: 'Add a goal: "y"', reason: null, now: ago(40) });
     const recentCard = insertCard({ kind: 'goal.add', payload: { text: 'z' }, summary: 'Add a goal: "z"', reason: null, now: ago(1) });
     decideCard(recentCard.id, 'applied', ago(1));
-
-    const oldBrief = insertBrief({ date: '2026-09-30', headline: 'Old', cards: [], closing: 'Done.', origin: 'fallback', now: ago(36) })!;
-    const recentBrief = insertBrief({ date: '2026-11-04', headline: 'Recent', cards: [], closing: 'Done.', origin: 'fallback', now: ago(1) })!;
 
     const oldFired = createReminder({ text: 'Old one-off', at: ago(39) }, ago(40));
     markReminderFired(oldFired.id, ago(39));
@@ -485,7 +423,7 @@ describe('Companion user state', () => {
     markReminderFired(recentFired.id, ago(1));
 
     const result = purgeExpired(T0);
-    assert.deepEqual(result, { items: 2, events: 5, notices: 2, runs: 3, cards: 1, briefs: 1, reminders: 2, snapshots: 0 });
+    assert.deepEqual(result, { items: 2, events: 5, notices: 2, runs: 3, cards: 1, reminders: 2, snapshots: 0 });
 
     // Email and calendar items closed a week ago keep only their key and version.
     for (const [item, title] of [[emailOld, 'Email thread'], [meeting, 'Calendar event']] as const) {
@@ -516,14 +454,12 @@ describe('Companion user state', () => {
     assert.equal(getCard(oldCard.id), null);
     assert.equal(getCard(oldPendingCard.id)?.status, 'pending');
     assert.ok(getCard(recentCard.id));
-    assert.equal(getBrief(oldBrief.id), null);
-    assert.ok(getBrief(recentBrief.id));
     assert.equal(getReminder(oldFired.id), null);
     assert.equal(getReminder(oldCancelled.id), null);
     assert.equal(getReminder(oldDaily.id)?.status, 'active');
     assert.ok(getReminder(recentFired.id));
 
-    assert.deepEqual(purgeExpired(T0), { items: 0, events: 0, notices: 0, runs: 0, cards: 0, briefs: 0, reminders: 0, snapshots: 0 });
+    assert.deepEqual(purgeExpired(T0), { items: 0, events: 0, notices: 0, runs: 0, cards: 0, reminders: 0, snapshots: 0 });
     // An email that comes back gets its words back with it.
     assert.equal(upsertItem(draft('email:old', { source: 'email', subtype: 'email_unread', title: 'Re: salary review' }), T0).item.title, 'Re: salary review');
   });
@@ -635,19 +571,18 @@ describe('Companion user state', () => {
       assert.equal(getItem(email.id)!.title, 'Email thread');
     });
 
-    test('nothing of a source that is off is notified, escalated or caught up on', () => {
+    test('nothing of a source that is off is notified or escalated', () => {
       const blocked = upsertItem(draft('pipeline:Alpha', { source: 'pipeline', subtype: 'pipeline_blocked', title: 'Pipeline Alpha is blocked' }), T0).item;
       const waiting = upsertItem(draft('michi:node:n1', { source: 'michi', subtype: 'michi_waiting', severity: 'digest', title: 'A chat waits for you' }), T0).item;
       const visible = () => [
         listUnnotifiedNowItems(T0).map((item) => item.id),
         listUnescalatedItems('michi_waiting', T0, T0).map((item) => item.id),
-        buildCatchUp(T0 - HOUR, T0 + MINUTE).changedItemIds.sort(),
       ];
-      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort()]);
+      assert.deepEqual(visible(), [[blocked.id], [waiting.id]]);
       patchCompanionSettings({ sources: { pipeline: { enabled: false }, michi: { enabled: false } } });
-      assert.deepEqual(visible(), [[], [], []]);
+      assert.deepEqual(visible(), [[], []]);
       patchCompanionSettings({ sources: { pipeline: { enabled: true }, michi: { enabled: true } } });
-      assert.deepEqual(visible(), [[blocked.id], [waiting.id], [blocked.id, waiting.id].sort()], 'back with its source');
+      assert.deepEqual(visible(), [[blocked.id], [waiting.id]], 'back with its source');
     });
 
     test('with every source behind the Auth check off, the Auth item is out of sight too, and back with any of them (B2)', () => {
@@ -658,19 +593,18 @@ describe('Companion user state', () => {
         return {
           items: snapshot.items.map((item) => item.id).sort(),
           needsYou: snapshot.counts.needsYou,
-          // What every turn's material and the fallback brief read.
+          // What every turn's material reads.
           open: listOpenItems(T0 + MINUTE, { limit: 500 }).map((item) => item.id).sort(),
           unnotified: listUnnotifiedNowItems(T0 + MINUTE).map((item) => item.id),
-          catchUp: buildCatchUp(T0 - HOUR, T0 + MINUTE).changedItemIds.sort(),
         };
       };
       const both = [auth.id, waiting.id].sort();
-      const everything = { items: both, needsYou: 2, open: both, unnotified: [auth.id], catchUp: both };
+      const everything = { items: both, needsYou: 2, open: both, unnotified: [auth.id] };
       assert.deepEqual(shown(), everything);
       patchCompanionSettings({ sources: { cr: { enabled: false }, pipeline: { enabled: false }, email: { enabled: false } } });
       assert.deepEqual(shown(), everything, 'the calendar still needs the session');
       patchCompanionSettings({ sources: { calendar: { enabled: false } } });
-      assert.deepEqual(shown(), { items: [waiting.id], needsYou: 1, open: [waiting.id], unnotified: [], catchUp: [waiting.id] });
+      assert.deepEqual(shown(), { items: [waiting.id], needsYou: 1, open: [waiting.id], unnotified: [] });
       assert.equal(getItem(auth.id)!.status, 'new', 'kept as it was, not resolved');
       patchCompanionSettings({ sources: { email: { enabled: true } } });
       assert.deepEqual(shown(), everything, 'back with a source that needs the session');

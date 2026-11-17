@@ -1,8 +1,7 @@
 import React from 'react';
-import { Calendar, CirclePause, Lightbulb } from 'lucide-react';
 import type { HomeCardKind } from 'michi-shared';
 import { Button } from '../../ui/controls';
-import { BranchIcon, ChevronRightIcon, DocIcon, RetryIcon } from '../icons';
+import { BranchIcon, CalendarIcon, ChevronRightIcon, DocIcon, IdeaIcon, PauseIcon, RetryIcon } from '../icons';
 import './homeCards.css';
 
 /** What a card shows; both stored cards and the new-user cards fit it. */
@@ -15,16 +14,14 @@ export interface HomeCardView {
   buttonText: string;
 }
 
-const ICON_SIZE = 12;
-
 const KIND_LOOK: Record<HomeCardKind, { tone: string; icon: React.ReactNode }> = {
-  continue: { tone: 'accent', icon: <ChevronRightIcon size={ICON_SIZE} /> },
-  try: { tone: 'mauve', icon: <BranchIcon size={ICON_SIZE} /> },
-  'from-space': { tone: 'select', icon: <DocIcon size={ICON_SIZE} /> },
-  review: { tone: 'digest', icon: <Calendar size={ICON_SIZE} strokeWidth={1.6} aria-hidden="true" /> },
-  stalled: { tone: 'muted', icon: <CirclePause size={ICON_SIZE} strokeWidth={1.6} aria-hidden="true" /> },
-  discover: { tone: 'muted', icon: <RetryIcon size={ICON_SIZE} /> },
-  tip: { tone: 'muted', icon: <Lightbulb size={ICON_SIZE} strokeWidth={1.6} aria-hidden="true" /> },
+  continue: { tone: 'accent', icon: <ChevronRightIcon size="sm" /> },
+  try: { tone: 'mauve', icon: <BranchIcon size="sm" /> },
+  'from-space': { tone: 'select', icon: <DocIcon size="sm" /> },
+  review: { tone: 'digest', icon: <CalendarIcon size="sm" /> },
+  stalled: { tone: 'muted', icon: <PauseIcon size="sm" /> },
+  discover: { tone: 'muted', icon: <RetryIcon size="sm" /> },
+  tip: { tone: 'muted', icon: <IdeaIcon size="sm" /> },
 };
 
 function HomeCardButton({ card, index, onPick }: { card: HomeCardView; index: number; onPick: (id: string) => void }) {
@@ -42,7 +39,7 @@ function HomeCardButton({ card, index, onPick }: { card: HomeCardView; index: nu
       <span className="home-card__kind">{look.icon}<span className="home-card__label">{card.label}</span></span>
       <span className="home-card__title">{card.title}</span>
       <span className="home-card__reason">{card.reason}</span>
-      <span className="home-card__go">{card.buttonText}<ChevronRightIcon size={ICON_SIZE} /></span>
+      <span className="home-card__go">{card.buttonText}<ChevronRightIcon size="sm" /></span>
     </button>
   );
 }
@@ -71,11 +68,11 @@ export function HomeCardGrid({
         <span className="home-cards__links">
           {canShuffle && (
             <Button variant="ghost" size="sm" className="home-cards__link" onClick={onShuffle}>
-              <RetryIcon size={ICON_SIZE} />Shuffle
+              <RetryIcon size="sm" />Shuffle
             </Button>
           )}
           <Button variant="ghost" size="sm" className="home-cards__link" onClick={onOpenSpacesHome}>
-            Full summary on Pages Home<ChevronRightIcon size={ICON_SIZE} />
+            Full summary on Pages Home<ChevronRightIcon size="sm" />
           </Button>
         </span>
       </div>

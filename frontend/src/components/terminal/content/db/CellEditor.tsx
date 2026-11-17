@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, MoveRight } from 'lucide-react';
+import { CheckIcon, MoveRightIcon } from '../../icons';
 import type { MichiDatabase, MichiDbColumn, MichiDbEditOp, MichiDbRow } from 'michi-shared';
 import { DbPopover } from './DbPopover';
 import { OptionPill } from './CellView';
@@ -219,7 +219,7 @@ function DateEditor({ db, column, value, onSave, onCancel }: CellEditorProps) {
         onKeyDown={keys}
         onClick={() => setRange((r) => !r)}
       >
-        <MoveRight size={13} strokeWidth={1.8} aria-hidden="true" />
+        <MoveRightIcon aria-hidden="true" />
       </button>
     </span>
   );
@@ -326,7 +326,7 @@ function OptionsEditor({ db, column, value, anchor, onSave, onCancel, onRefused 
                   onClick={() => pick(o.value)}
                 >
                   <OptionPill db={db} column={column} value={o.value} />
-                  {on && <Check size={13} strokeWidth={2} aria-hidden="true" />}
+                  {on && <CheckIcon aria-hidden="true" />}
                 </button>
               );
             })}
@@ -408,7 +408,7 @@ function ThreadsEditor({ db, column, value, row, anchor, onSave, onCancel }: Cel
           <ThreadStateDot kind={kind} size={8} />
           <span className="michi-db-thread__title">{title}</span>
         </span>
-        {on && <Check size={13} strokeWidth={2} aria-hidden="true" />}
+        {on && <CheckIcon aria-hidden="true" />}
       </button>
     );
   };

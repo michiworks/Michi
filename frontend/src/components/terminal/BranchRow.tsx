@@ -2,17 +2,18 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { DUR, EASE } from '../../motion/tokens';
 import { isFresh } from '../../motion/useFresh';
-import { useChatNode, useChatProjects, useStructuralSelector } from '../../state/chatStore';
-import type { ProjectEdge } from '../../state/chatTypes';
+import { useChatProjects, useStructuralSelector } from '../../state/chatStore';
+import type { ChatNodeState, ProjectEdge } from '../../state/chatTypes';
 import { usePrefs } from '../../state/prefs';
 import { Row, RowKebab } from './primitives';
-import { CardCaret, Chevron, CARD_FILL, CARD_FILL_SELECT, PinMark } from './ThreadRow';
-import { rowGeom, rowPadding, pinMarkEndMargin } from './sidebarRowStyle';
+import { CardCaret, Chevron, CARD_FILL, CARD_FILL_SELECT, PIN_MARK_LEAD, PinMark, sameRowFields } from './ThreadRow';
+import { rowGeom, rowPadding } from './sidebarRowStyle';
 import type { TreeNode } from '../../state/tree';
-import { branchSubtreeHasUnread, isNodeUnread, type OpenState } from '../../state/sidebarSelectors';
+import { branchSubtreeHasUnread, hiddenBranchAttention, isNodeUnread, maxAttention, nodeAttention, type OpenState, type RowAttention } from '../../state/sidebarSelectors';
 import { BRANCH_TITLE_CHARS } from '../../state/branchAnchors';
-import { UnreadDot, UNREAD_DOT_LEAD, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
+import { UnreadDot, UNREAD_TITLE_WEIGHT, type UnreadMark } from './UnreadDot';
 import { SidebarOpenRail } from './RailAfterglow';
+import { RowAttentionChip, attentionLabel } from './RowAttentionChip';
 import { relativeTime } from '../../lib/relativeTime';
 import { useNewPanePulse } from './useNewPanePulse';
 import { useTreePrefetchIntent } from '../../state/treePrefetch';
@@ -20,6 +21,7 @@ import { InlineRenameInput } from '../ui/InlineRenameInput';
 import { isBranchEdge } from '../../state/tree';
 import { PROVISIONAL_LABEL_STYLE, rowLabel } from './sidebar/rowLabel';
 import { rowKeyDown } from './sidebar/rowKeyboard';
+import { CheckIcon } from './icons';
 
 interface Props {
   /** This branch node and its descendants. */
@@ -125,20 +127,32 @@ export default function BranchRow({
   onRenameEnd,
   baseIndent = 0,
 }: Props) {
-  const n = useChatNode(node.nodeId);
   const prefetchIntent = useTreePrefetchIntent(node.nodeId);
   const { prefs } = usePrefs();
   const newPanePulse = useNewPanePulse(node.nodeId);
   const hasChildren = node.children.length > 0;
-  // With no title yet, an excerpt of the first message, styled as provisional,
-  // cut at a branch row's 40 characters.
-  const { text: title, provisional } = rowLabel(undefined, n, BRANCH_TITLE_CHARS);
-  const nodeUpdatedAt = n?.lastAssistantAt ?? n?.messages[n.messages.length - 1]?.createdAt ?? 0;
   const focused = isFocused(node.nodeId);
   const selected = isSelected(node.nodeId);
   const menuOpen = !!isMenuTarget?.(node.nodeId);
   const { focusedNodeId, projects } = useChatProjects();
-  const unread = !!n && isNodeUnread(n, focusedNodeId);
+  const nodeId = node.nodeId;
+  // What the row shows of its node, as primitives: a streamed chunk replaces
+  // the node but leaves these fields and the structure version alone, so it
+  // re-renders no row.
+  const fieldsSelector = useCallback((nodes: Record<string, ChatNodeState>) => {
+    const n = nodes[nodeId];
+    // With no title yet, an excerpt of the first message, styled as provisional,
+    // cut at a branch row's 40 characters.
+    const { text, provisional } = rowLabel(undefined, n, BRANCH_TITLE_CHARS);
+    return {
+      title: text,
+      provisional,
+      unread: !!n && isNodeUnread(n, focusedNodeId),
+      pinnedAt: n?.pinnedAt,
+      updatedAt: n?.lastAssistantAt ?? n?.messages[n.messages.length - 1]?.createdAt ?? 0,
+    };
+  }, [nodeId, focusedNodeId]);
+  const { title, provisional, unread, pinnedAt, updatedAt: nodeUpdatedAt } = useStructuralSelector(fieldsSelector, sameRowFields);
   // A collapsed branch hides its sub-branches, so an unread one below it shows
   // here as a ring. Expanded, each sub-branch shows its own dot.
   const hiddenUnreadSelector = useCallback(
@@ -148,6 +162,16 @@ export default function BranchRow({
   );
   const hiddenUnread = useStructuralSelector(hiddenUnreadSelector);
   const unreadMark: UnreadMark = unread ? 'self' : hiddenUnread ? 'within' : 'none';
+  // What this branch needs from the user (R2), plus — while it is collapsed —
+  // what its own sub-branches need, as its unread ring does.
+  const attentionSelector = useCallback((nodes: Record<string, ChatNodeState>): RowAttention => {
+    const now = Date.now();
+    const perNode = (id: string) => nodeAttention(id, nodes[id], focusedNodeId, now);
+    const own = perNode(nodeId);
+    if (expanded || !hasChildren) return own;
+    return maxAttention(own, hiddenBranchAttention(node.children, perNode));
+  }, [nodeId, focusedNodeId, expanded, hasChildren, node.children]);
+  const attention = useStructuralSelector(attentionSelector);
   // Decided once, on mount: a row a branch, fan-out or spawn just added grows
   // in under its parent. Hydrated rows, and rows shown by expanding a thread
   // (100+ times a day), render settled. Looked up in every workspace, so a
@@ -158,10 +182,8 @@ export default function BranchRow({
   });
   const [grown, setGrown] = useState(false);
   const [washed, setWashed] = useState(false);
-  const geom = rowGeom(prefs.sidebarRowStyle, prefs.sidebarInset);
+  const geom = rowGeom(prefs.sidebarRowStyle);
   const cardPaddingLeft = rowPadding(geom, baseIndent + depth * geom.indentStep).paddingLeft;
-  // The star ends the row and takes the caret's place, so it clears the ⋯.
-  const pinTakesEnd = !!n?.pinnedAt && geom.isCard && !hasChildren && !prefs.showSidebarTimestamps && !selected;
 
   const renaming = renamingNodeId === node.nodeId;
   const renameRef = useRef<HTMLInputElement>(null);
@@ -216,7 +238,7 @@ export default function BranchRow({
         tabIndex={0}
         className="t-row-focus"
         // Its title, not the ⋯ inside it.
-        aria-label={title}
+        aria-label={attentionLabel([title], attention)}
         aria-current={focused ? 'true' : undefined}
         aria-expanded={hasChildren ? expanded : undefined}
         active={focused || selected}
@@ -307,15 +329,13 @@ export default function BranchRow({
             }}
           />
         )}
-        {/* In the gutter just left of where the row's content starts: before the
-            title in card modes, before the chevron in classic. Kept mid-row
-            so the entrance wash stays the first child and the rail the last. */}
-        <UnreadDot
-          mark={unreadMark}
-          left={geom.isCard
-            ? `calc(${cardPaddingLeft} - ${UNREAD_DOT_LEAD}px)`
-            : `calc(${1 + depth * 10}px + var(--sb-inset, 0px))`}
-        />
+        {/* In the gutter just left of where the row's content starts: the
+            star before the title in card modes (unread is the rail's there),
+            the dot before the chevron in classic. Kept mid-row so the entrance
+            wash stays the first child and the rail the last. */}
+        {geom.isCard
+          ? !!pinnedAt && <PinMark gutterLeft={`calc(${cardPaddingLeft} - ${PIN_MARK_LEAD}px)`} />
+          : <UnreadDot mark={unreadMark} left={`calc(${1 + depth * 10}px + var(--sb-inset, 0px))`} />}
         {renaming ? (
           <InlineRenameInput
             ref={renameRef}
@@ -356,10 +376,9 @@ export default function BranchRow({
             {title}
           </span>
         )}
+        <RowAttentionChip attention={attention} />
         {/* After the title, so it can't push the title off its indent; see PinMark. */}
-        {!!n?.pinnedAt && (
-          <PinMark endMargin={pinTakesEnd ? pinMarkEndMargin(geom, 6) : undefined} />
-        )}
+        {!geom.isCard && !!pinnedAt && <PinMark />}
         {geom.isCard && hasChildren && (
           <CardCaret expanded={expanded} geom={geom} onToggle={() => onToggle(node.nodeId)} />
         )}
@@ -369,9 +388,7 @@ export default function BranchRow({
           </span>
         )}
         {selected && (
-          <span style={{ color: 'var(--term-select)', fontSize: 'var(--fs-sm)', fontWeight: 700 }}>
-            ✓
-          </span>
+          <CheckIcon size="sm" style={{ color: 'var(--term-select)', flexShrink: 0 }} />
         )}
         <RowKebab
           open={menuOpen}
@@ -384,6 +401,8 @@ export default function BranchRow({
           isCard={geom.isCard}
           pulseOnce={newPanePulse}
           drawIn={!!entrance?.rail && !washed}
+          unread={geom.isCard ? unreadMark : 'none'}
+          waiting={attention === 'waiting'}
         />
       </Row>
       </GrowIn>

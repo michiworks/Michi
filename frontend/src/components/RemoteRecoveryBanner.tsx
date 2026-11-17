@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ServerOff } from 'lucide-react';
+import { ServerOffIcon } from './terminal/icons';
 import { retryRemoteConnection, useVisibleRemoteRecoveryIssues, type RemoteRecoveryIssue } from '../state/remoteRecovery';
 import { RemoteDiagnostics } from './RemoteDiagnostics';
 import { Button } from './ui/controls';
@@ -15,7 +15,7 @@ export function RemoteRecoveryIndicator({ onOpenDetails }: { onOpenDetails: () =
   if (!issues.length) return null;
   return <Button variant="ghost" size="sm" className="remote-recovery-indicator" onClick={onOpenDetails}
     aria-label={`Remote connection details: ${recoveryLabel(issues)}`} aria-haspopup="dialog" title={recoveryLabel(issues)}>
-    <ServerOff size={14} aria-hidden="true" />
+    <ServerOffIcon aria-hidden="true" />
   </Button>;
 }
 
@@ -40,7 +40,7 @@ function RemoteRecoveryMachine({ issue }: { issue: RemoteRecoveryIssue }) {
   const [expanded, setExpanded] = useState(false);
   return <section className="remote-recovery-machine" aria-label={`Remote recovery: ${issue.name}`}>
     <div className="remote-recovery-machine__heading">
-      <ServerOff size={16} aria-hidden="true" />
+      <ServerOffIcon size="lg" aria-hidden="true" />
       <h3>{issue.name}</h3>
       <Button size="sm" disabled={issue.retrying} onClick={() => { void retryRemoteConnection(issue.connectionId); }}>{issue.retrying ? 'Trying…' : 'Try again'}</Button>
     </div>

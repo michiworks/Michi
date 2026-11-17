@@ -5,6 +5,7 @@ import type { PageBlock, PageDto, WorkspaceHomeDto } from 'michi-shared';
 
 const mocks = vi.hoisted(() => ({
   home: null as unknown,
+  homeStatus: 'ready',
   page: null as unknown,
   chatIds: ['n1'] as string[],
   activity: [] as unknown[],
@@ -30,7 +31,7 @@ vi.mock('../../../../state/metaAgent/spacesFirstRun', async (importOriginal) => 
 }));
 
 vi.mock('../../../../state/pages/useSpacesHome', () => ({
-  useWorkspaceHome: () => ({ data: mocks.home, status: 'ready', error: null, stale: false, refresh: vi.fn() }),
+  useWorkspaceHome: () => ({ data: mocks.home, status: mocks.homeStatus, error: null, stale: false, refresh: vi.fn() }),
   useSpaceActivity: () => ({ data: mocks.activity, status: 'ready', error: null, stale: false, refresh: vi.fn() }),
   useHomeSections: () => ({ data: mocks.sections, status: 'ready', error: null, stale: false, refresh: vi.fn() }),
 }));
@@ -99,6 +100,7 @@ const view = (onOpenPage = vi.fn()) => render(<WorkspaceHomeView workspaceId="ws
 beforeEach(() => {
   mocks.home = home([block('l', 'Michi merged into dev.'), block('m', 'Metrics')], run('done', { readCount: 38 }));
   mocks.page = (mocks.home as WorkspaceHomeDto).page;
+  mocks.homeStatus = 'ready';
   mocks.chatIds = ['n1'];
   mocks.activity = [];
   mocks.sections = null;
@@ -115,6 +117,29 @@ beforeEach(() => {
 });
 
 describe('Workspace home', () => {
+  it('hands a skeleton watched on screen over to the home as Home does, and shows a home read before at once', () => {
+    const read = { home: mocks.home, page: mocks.page };
+    mocks.home = null;
+    mocks.page = null;
+    mocks.homeStatus = 'loading';
+    const { rerender } = view();
+    expect(screen.getByRole('status').textContent).toBe('Loading…');
+    mocks.home = read.home;
+    mocks.page = read.page;
+    mocks.homeStatus = 'ready';
+    rerender(<WorkspaceHomeView workspaceId="ws-1" backendConnectionId="local" onOpenPage={vi.fn()} />);
+    const main = screen.getByRole('main', { name: 'rabbitholes' });
+    expect(main.hasAttribute('data-arriving')).toBe(true);
+    // The skeleton fades out from where it was, hidden from assistive technology; the kicker both show stays.
+    expect(main.querySelector('.spaces-arrival-ghost .michi-doc-skeleton')).toBeTruthy();
+    expect(main.querySelector('.spaces-arrival-ghost')?.getAttribute('aria-hidden')).toBe('true');
+    expect(main.querySelector('.spaces-home__head [data-still]')?.textContent).toBe('rabbitholes · workspace home');
+    cleanup();
+    view();
+    expect(screen.getByRole('main', { name: 'rabbitholes' }).hasAttribute('data-arriving')).toBe(false);
+    expect(document.querySelector('.spaces-arrival-ghost')).toBeNull();
+  });
+
   it('shows one page update time below the title and keeps the read source after the lead', () => {
     mocks.home = { ...(mocks.home as WorkspaceHomeDto), incremental: { readThrough: 1301, tidiedAt: Date.now() - 5 * 60_000 } };
     view();

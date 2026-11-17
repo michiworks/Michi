@@ -1,4 +1,5 @@
 import React from 'react';
+import { AnimatePresence } from 'motion/react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -88,22 +89,26 @@ describe('Spaces main area', () => {
     const [open, setOpen] = React.useState(false);
     return <>
       <button type="button" onClick={() => setOpen(true)}>New page</button>
-      {open && <CreateSpaceDialog activeWorkspaceId="ws-local" onClose={() => setOpen(false)} onCreated={vi.fn()} />}
+      <AnimatePresence>
+        {open && <CreateSpaceDialog key="create" activeWorkspaceId="ws-local" onClose={() => setOpen(false)} onCreated={vi.fn()} />}
+      </AnimatePresence>
     </>;
   }
 
   it.each([
     ['Esc', () => fireEvent.keyDown(window, { key: 'Escape' })],
     ['Cancel', () => fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))],
-  ])('gives focus back to what opened it when %s closes it', async (_how, close) => {
+  ])('gives focus back to what opened it when %s closes it, then fades out as an inert ghost', async (_how, close) => {
     render(<Opener />);
     const opener = screen.getByRole('button', { name: 'New page' });
     opener.focus();
     fireEvent.click(opener);
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'Create a page' }).contains(document.activeElement)).toBe(true));
     close();
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(opener));
+    expect(document.activeElement).toBe(opener);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.querySelector('.ui-modal-positioner')?.hasAttribute('inert')).toBe(true);
+    await waitFor(() => expect(document.querySelector('.ui-modal-positioner')).toBeNull());
   });
 
   it('cannot be closed while the page is being created', async () => {

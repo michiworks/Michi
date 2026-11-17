@@ -21,7 +21,7 @@ Capabilities — you have these tools available and should use them proactively:
 - Artifacts: \`save_artifact\` — save a named reusable document or register any existing workspace file (referenced as @name). \`update_artifact\` — revise an existing artifact.{{ARTIFACT_TOOLS}}{{SCHEDULING_TOOLS}}
 - Branching: \`spawn_branches\` — fan out parallel child threads (only when user explicitly asks to branch/split).{{MULTI_MODEL_TOOLS}}
 - Agent Runs: \`list_agents\`, \`spawn_agent\`, \`check_agent\`, \`wait_agent\`, \`send_agent_input\`, \`cancel_agent\`, \`watch_agent_runs\`, and \`update_agent_watch\` supervise durable workers without creating conversation branches. Use bounded \`wait_agent\` calls only; for longer work create a Watch with \`wake\` or \`notify\` and end the turn instead of polling.
-- Media: \`show_image\` — display an image inline in the conversation.
+- Media: \`show_image\` — display an image inline in the conversation. \`show_blocks\` — show a form, poll, choice or buttons to collect a structured answer, or stats and charts to show results compactly, inline in your reply; the user's answer arrives as their next message. Long documents belong in Pages.
 - Tasks: \`list_tasks\` reads this workspace's tasks; answer a plain question about them from it, read-only, and when there are none say so and offer to organize them from its conversations. When the user asks you to organize the workspace's tasks, turn its conversations into tasks, or make a task board, first read the Tasks section of the \`pages-and-components\` document with \`michi_docs\` and follow its steps: a task is a goal and never invented; a conversation that reached its goal, even a short answered question, is evidence for a Done task; build the tasks from this workspace's conversations, also when the task database is empty, without stopping to ask.
 
 Use tools proactively when the user's question relates to workspace content, prior conversations, or file-based tasks. If answering requires reading a file or checking thread history, just do it — don't wait to be told.`;
@@ -335,6 +335,7 @@ export function buildStableSystemPrompt(
     if (toolCapabilities === 'companion') return head;
     return head + (nativeAskUser
         ? '\n\nUse AskUserQuestion or the Michi ask_user tool for structured questions; both are connected to the user interface.'
+            + ' For a typed answer (a number, a slider, a date or a time), use ask_user with a field.'
         : ASK_USER_INSTRUCTION);
 }
 
@@ -358,9 +359,10 @@ const ASK_USER_INSTRUCTION = `
 Tool override — AskUserQuestion:
 Do NOT use the built-in AskUserQuestion tool. It does not work in this environment.
 Instead, use the MCP tool ____michi_internal____ask_user to ask the user structured
-questions with selectable options. The schema is identical: questions[] with question,
-header, options[{label, description}], and multiSelect. The tool blocks until the user
-responds in the UI.`;
+questions with selectable options. The schema is the same: questions[] with question,
+header, options[{label, description}], and multiSelect. A question may instead have a
+field (a number, slider, date, time, text box or checkbox) in place of options, and its
+answer comes back typed. The tool blocks until the user responds in the UI.`;
 
 
 export interface FirstTurnPrefixInput {
@@ -504,7 +506,10 @@ function renderSkillCatalog(librarySkillsLoaded: boolean): string {
  */
 function renderNativeForkNotice(parentNodeId: string, parentTitle?: string | null): string {
     return `\nThis conversation is a branch of the thread "${sanitizeThreadTitle(parentTitle)}" (node ${parentNodeId}) in the same conversation tree: `
-        + "the history above is that thread's, copied when the user branched, and the parent thread has continued on its own since.";
+        + "the history above is that thread's, copied when the user branched, and the parent thread has continued on its own since. "
+        + "Background work started in that history (workflows, background agents, shell commands) belongs to the parent thread: "
+        + "it keeps running there and reports its results there, not here. Do not take it as interrupted, and do not relaunch or resume it here; "
+        + `to see its progress, inspect the parent thread (node ${parentNodeId}).`;
 }
 
 function renderExtraContexts(ctxs: ExtraContext[], cwd: string): string {

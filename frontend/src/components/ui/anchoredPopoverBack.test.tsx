@@ -1,7 +1,9 @@
 import React from 'react';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { AnimatePresence } from 'motion/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backTarget, hasBackLayer, registerBackLayer } from '../../lib/backStack';
+import { ActionMenu } from './ActionMenu';
 import { DbPopover } from '../terminal/content/db/DbPopover';
 import { MichiMenu } from '../terminal/content/page/MichiMenu';
 import { SourcesPopover } from '../terminal/content/page/SourcesPopover';
@@ -39,6 +41,24 @@ const surfaces: Array<[string, Surface]> = [
   )],
 ];
 
+/** The surfaces that grow in and, inside AnimatePresence, fade out (all but the source preview). */
+const fading: Array<[string, Surface]> = [
+  ...surfaces.filter(([name]) => name !== 'a source preview'),
+  ['a row\'s actions (ActionMenu)', (anchor, onClose) => (
+    <ActionMenu anchor={anchor as HTMLButtonElement} label="Row actions" items={[{ id: 'open', label: 'Open', onSelect: () => {} }]} onClose={onClose} />
+  )],
+];
+
+function FadingHost({ surface, open, onClose }: { surface: Surface; open: boolean; onClose: () => void }) {
+  const [anchor, setAnchor] = React.useState<HTMLButtonElement | null>(null);
+  return (
+    <>
+      <button type="button" ref={setAnchor}>Open</button>
+      <AnimatePresence>{open && anchor && surface(anchor, onClose)}</AnimatePresence>
+    </>
+  );
+}
+
 function Host({ surface }: { surface: Surface }) {
   const [anchor, setAnchor] = React.useState<HTMLButtonElement | null>(null);
   const [open, setOpen] = React.useState(true);
@@ -66,6 +86,26 @@ describe("anchored popovers and the phone's Back", () => {
     } finally {
       removePage();
     }
+  });
+
+  it.each(fading)('%s fades out inside AnimatePresence as a ghost that takes no keys, presses or Back', async (_name, surface) => {
+    const onClose = vi.fn();
+    const view = render(<FadingHost surface={surface} open onClose={onClose} />);
+    const node = document.querySelector<HTMLElement>('[data-menu-motion="grow"]')!;
+    expect(node).not.toBeNull();
+    view.rerender(<FadingHost surface={surface} open={false} onClose={onClose} />);
+    expect(node.getAttribute('aria-hidden')).toBe('true');
+    expect(node.hasAttribute('inert')).toBe(true);
+    expect(hasBackLayer()).toBe(false);
+    const page = vi.fn();
+    window.addEventListener('keydown', page);
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    window.removeEventListener('keydown', page);
+    fireEvent.pointerDown(document.body);
+    fireEvent(window, new Event('resize'));
+    expect(page).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
+    await waitFor(() => expect(node.isConnected).toBe(false));
   });
 
   it.each(surfaces)('%s arms the system Back on a page with nothing else to go back to', (_name, surface) => {

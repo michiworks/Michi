@@ -8,7 +8,7 @@ import { MetaChatDecorationsContext, type MetaChatDecorations } from '../../stat
 const noop = () => {};
 const LINE = 'Anything that would leave this machine asks first: this conversation read check-in material earlier.';
 
-function show(message: Partial<ChatMessage>, decorations: MetaChatDecorations | null = null) {
+function view(message: Partial<ChatMessage>, decorations: MetaChatDecorations | null = null, fresh = false) {
   const block = (
     <MessageBlock
       m={{ id: 'u-1', role: 'user', text: 'And now run the deploy.', toolCalls: [], streaming: false, ...message }}
@@ -17,12 +17,14 @@ function show(message: Partial<ChatMessage>, decorations: MetaChatDecorations | 
       onEdit={noop}
       copyText={() => ''}
       showThoughts={false}
-      fontFamily="inherit"
       density="comfortable"
+      fresh={fresh}
     />
   );
-  return render(decorations ? <MetaChatDecorationsContext.Provider value={decorations}>{block}</MetaChatDecorationsContext.Provider> : block);
+  return decorations ? <MetaChatDecorationsContext.Provider value={decorations}>{block}</MetaChatDecorationsContext.Provider> : block;
 }
+
+const show = (message: Partial<ChatMessage>, decorations: MetaChatDecorations | null = null) => render(view(message, decorations));
 
 afterEach(cleanup);
 
@@ -37,6 +39,16 @@ describe('an ordinary chat that read check-in material on an earlier turn (TR cr
     show({ role: 'assistant', companionTurn: { carriedTaint: 'collector' } });
     show({ companionTurn: { startTaint: 'checkin', carriedTaint: 'checkin' } });
     expect(screen.queryByRole('note')).toBeNull();
+  });
+
+  it.each([
+    ['grows the line in when the route comes after a send made on screen', true, '0px'],
+    ['shows the line settled under a message that came with history', false, 'auto'],
+  ] as const)('%s', (_name, fresh, height) => {
+    const { rerender } = render(view({}, null, fresh));
+    rerender(view({ companionTurn: { carriedTaint: 'checkin' } }, null, fresh));
+    // A growing box starts at 0px, a settled one at its own height.
+    expect(screen.getByRole('note').parentElement!.style.height).toBe(height);
   });
 
   it('leaves the line to the agent\'s conversation, which draws its route lines itself', () => {

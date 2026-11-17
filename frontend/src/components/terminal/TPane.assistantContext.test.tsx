@@ -172,15 +172,15 @@ describe('TPane — the assistant context', () => {
   it('leaves attach and mention out of the assistant’s composer, keeping them on a worker’s', async () => {
     embeddedNodeId = null;
     const nodeId = await mount();
-    expect(await screen.findByTitle('Mention context or node')).toBeTruthy();
-    expect(screen.getByTitle(/attach/i)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Mention context or node' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Attach file' })).toBeTruthy();
     act(() => { store.closePane(nodeId); });
     await waitFor(() => expect(panes.openPanes).not.toContain(nodeId));
     embeddedNodeId = nodeId;
     act(() => store.setComposerDraft(nodeId, { value: 'x', mentions: [] }));
     await screen.findByTestId('composer');
-    expect(screen.queryByTitle('Mention context or node')).toBeNull();
-    expect(screen.queryByTitle(/attach/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Mention context or node' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Attach file' })).toBeNull();
     embeddedNodeId = null;
   });
 

@@ -118,8 +118,8 @@ describe('shared pane layout motion', () => {
     expect(animate).not.toHaveBeenCalled();
   });
 
-  it.each(['soft-fade', 'gentle-glide', 'frozen-retract', 'phosphor', 'fission', 'thread-pull'])('%s uses short unscaled entrances', mode => {
-    const { frames, duration } = paneEntrance(mode);
+  it('uses a short unscaled entrance', () => {
+    const { frames, duration } = paneEntrance();
     expect(duration).toBeGreaterThanOrEqual(150);
     expect(duration).toBeLessThanOrEqual(220);
     expect(frames.every(frame => Object.keys(frame).every(key => key === 'opacity' || key === 'transform'))).toBe(true);

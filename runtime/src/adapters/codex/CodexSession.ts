@@ -41,6 +41,7 @@ import { resolveShowImage } from '../../core/showImage';
 import { hostEventSink } from '../../core/hostEventSink';
 import { prepareAttachments } from '../../core/attachments';
 import { formElicitationContent, formElicitationFields } from '../../core/formElicitation';
+import { askUserAnswers } from '../../mcp-host/askUser';
 import { codexChatTurnPolicy } from './codexTurnPolicy';
 import { CODEX_RESTRICTED_TURN_POLICY } from './codexRestrictedProfile';
 import { CODEX_MEMORIES_OFF, CODEX_THREAD_FEATURES_OFF, codexDisableMcpServers, isCodexModeKind } from './codexProtocol';
@@ -62,7 +63,7 @@ import {
   codexRunAskOptions,
   codexUserInputQuestions,
 } from './codexApprovalMapping';
-import { codexStartedTurnId, codexTitleText, codexTurnInput, codexTurnStartParams } from './codexTurnRequest';
+import { codexStartedTurnId, codexTitleText, codexTurnInput, codexTurnServiceTier, codexTurnStartParams } from './codexTurnRequest';
 import {
   codexChildNarration,
   codexChildThreadInfo,
@@ -130,6 +131,8 @@ export interface CodexSessionDeps {
    * checks app-server's listing), or null to send the skill as text.
    */
   skillInput?: (skill: SkillTurnInvocation, cwd: string) => Promise<CodexSkillInput | null>;
+  /** The speed tier ids the runtime's catalog lists for a model (null: the default model); none when absent. */
+  serviceTiers?: (modelId: string | null) => readonly string[];
 }
 
 export class CodexSession implements AgentSession {
@@ -251,6 +254,7 @@ export class CodexSession implements AgentSession {
   private readonly titleTimeoutMs: (() => number) | undefined;
   private readonly hostText: CodexHostText | undefined;
   private readonly skillInput: CodexSessionDeps['skillInput'];
+  private readonly serviceTiers: CodexSessionDeps['serviceTiers'];
   public requiresRestart = false;
   /** Native thread/fork id only — never becomes a Michi node id. */
   private alignedForkThreadId: string | null = null;
@@ -326,6 +330,7 @@ export class CodexSession implements AgentSession {
     this.titleTimeoutMs = deps.titleTimeoutMs;
     this.hostText = deps.hostText;
     this.skillInput = deps.skillInput;
+    this.serviceTiers = deps.serviceTiers;
 
     this.queue = new EventQueue((idleMs) => {
       if (this.state === 'in_turn') {
@@ -497,6 +502,8 @@ export class CodexSession implements AgentSession {
         threadId: this.threadId,
         input: turnInput,
         effort: this.effort,
+        serviceTier: codexTurnServiceTier(this.host.config.features.serviceTier?.(this.owner, this.ownerUserId),
+          this.serviceTiers?.(this.currentModelId) ?? []),
         modeId: this.currentModeId,
         modelId: this.currentModelId,
       })).then(
@@ -1174,19 +1181,9 @@ export class CodexSession implements AgentSession {
         if (!r.ok) return { error: r.error };
         return { relPath: r.relPath, mimeType: r.mimeType, size: r.size };
       },
-      onAskUser: async (questions: Array<{
-        question: string;
-        header?: string;
-        options: Array<{ label: string; description?: string }>;
-        multiSelect: boolean;
-      }>) => {
+      onAskUser: async (questions: UserInputQuestion[]) => {
         const answers = await this.requestUserInput(questions);
-        if (!answers) return null;
-        const result: Record<string, string> = {};
-        for (const answer of answers) {
-          result[answer.question] = answer.answer;
-        }
-        return result;
+        return answers && askUserAnswers(questions, answers);
       },
       ...(!this.isMetaAgent && this.interactive ? {
         onSetBranchOverview: (overview: string) => {

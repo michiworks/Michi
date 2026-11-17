@@ -13,10 +13,11 @@ const DEFAULT_COLUMNS = `minmax(0, 1fr) minmax(${SIDE_MIN}px, 31%)`;
 /**
  * A pane's list column on its right (the Files tree, the Review changes):
  * the grid's columns, a ref for the column, and the handle on its left edge
- * that drags its width. The width is saved under `key` for every pane of the
- * kind; double-click goes back to the default. A phone gets no handle.
+ * that drags its width (`label` names it). The width is saved under `key` for
+ * every pane of the kind; double-click goes back to the default. A phone gets
+ * no handle.
  */
-export function useSideColumn(key: string): {
+export function useSideColumn(key: string, label: string): {
   columns: string;
   columnRef: React.RefObject<HTMLElement | null>;
   handle: React.ReactNode;
@@ -32,7 +33,9 @@ export function useSideColumn(key: string): {
     <ResizeHandle
       paneRef={columnRef}
       side="left"
+      label={label}
       min={SIDE_MIN}
+      max={() => (columnRef.current?.parentElement?.clientWidth ?? 0) - MAIN_MIN}
       onResize={(w) => {
         const total = columnRef.current?.parentElement?.clientWidth;
         saved.set(total ? Math.max(SIDE_MIN, Math.min(w, total - MAIN_MIN)) : w);

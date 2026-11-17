@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './fonts.css';
+import { StandaloneMotionRoot } from './motion/MotionRoot';
 import { startFrameMetrics } from './services/frameMetrics';
 import { startupMark } from './services/startupTrace';
 
@@ -52,17 +53,11 @@ if (previewPageId && previewWorkspaceId) {
   // An agent's read-only look at one Page, opened from a preview_page link
   // (backend/src/services/pages/pagePreview.ts); no app shell.
   void import('./components/terminal/spaces/PagePreview').then(({ default: PagePreview }) => {
-    root.render(<PagePreview pageId={previewPageId} workspaceId={previewWorkspaceId} palette={previewParams.get('palette')} />);
-  });
-} else if (specimen === 'agent-blocks') {
-  // Dev-only specimen sheet for visual verification of the agent-block
-  // variants — bypasses the app shell entirely.
-  void import('./components/terminal/AgentBlocksSpecimen').then(({ default: AgentBlocksSpecimen }) => {
-    root.render(<AgentBlocksSpecimen />);
+    root.render(<StandaloneMotionRoot><PagePreview pageId={previewPageId} workspaceId={previewWorkspaceId} palette={previewParams.get('palette')} /></StandaloneMotionRoot>);
   });
 } else if (specimen === 'native-blocks') {
   void import('./components/terminal/content/page/NativeBlocksSpecimen').then(({ default: NativeBlocksSpecimen }) => {
-    root.render(<NativeBlocksSpecimen />);
+    root.render(<StandaloneMotionRoot><NativeBlocksSpecimen /></StandaloneMotionRoot>);
   });
 } else {
   root.render(

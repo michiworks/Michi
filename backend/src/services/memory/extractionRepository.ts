@@ -259,7 +259,7 @@ export type ExtractionStopReason = 'invalid_limit' | 'budget';
  * user's profile (userProfile.ts), or tidy Michi's own notes (consolidation.ts,
  * migration 0077).
  */
-export type ExtractionRunKind = 'extract' | 'profile' | 'consolidate';
+export type ExtractionRunKind = 'extract' | 'profile' | 'consolidate' | 'topics';
 
 /**
  * An existing memory a run's prompt listed (an update may target only these).
@@ -300,7 +300,7 @@ function relatedRefs(stored: string | null): ExtractionRelatedRef[] {
 }
 
 function runKind(kind: string | null): ExtractionRunKind {
-  return kind === 'profile' || kind === 'consolidate' ? kind : 'extract';
+  return kind === 'profile' || kind === 'consolidate' || kind === 'topics' ? kind : 'extract';
 }
 
 function runDto(row: RunRow): ExtractionRunRecord {

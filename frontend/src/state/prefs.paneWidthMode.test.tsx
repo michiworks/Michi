@@ -9,8 +9,6 @@ function Probe() {
   const { prefs, setPref, resetTerminal } = usePrefs();
   return <>
     <output data-testid="mode">{prefs.paneWidthMode}</output>
-    <output data-testid="motion">{prefs.paneSpawnAnimation}</output>
-    <button onClick={() => setPref('paneSpawnAnimation', 'soft-fade')}>Soft Fade</button>
     <button onClick={() => setPref('paneWidthMode', 'fixed')}>Fixed</button>
     <button onClick={resetTerminal}>Reset appearance</button>
   </>;

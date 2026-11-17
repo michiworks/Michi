@@ -4,7 +4,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { backTarget } from '../../lib/backStack';
 import TerminalShell from './TerminalShell';
 import { PrefsProvider } from '../../state/prefs';
-import { openCompanionPanel, resetCompanionPanelForTests } from '../../state/companion/companionPanel';
+import { closeCompanionPanel, openCompanionPanel, resetCompanionPanelForTests } from '../../state/companion/companionPanel';
+import { isDashboardUncovered } from '../../state/panePresenceVisibility';
 
 const topbar = vi.hoisted(() => ({ rail: [] as Array<boolean | undefined>, phoneBack: undefined as (() => void) | undefined }));
 
@@ -21,12 +22,19 @@ vi.mock('./Topbar', () => ({
 vi.mock('./companion/CompanionPanel', async () => {
   const { useCompanionPanel } = await vi.importActual<typeof import('../../state/companion/companionPanel')>('../../state/companion/companionPanel');
   return {
-    CompanionPanelHost: ({ covered }: { covered?: boolean }) => (
-      useCompanionPanel().open ? <aside aria-label="Michi panel" data-covered={String(!!covered)} /> : null
-    ),
+    CompanionPanelHost: ({ covered, onShownChange }: { covered?: boolean; onShownChange?: (shown: boolean) => void }) => {
+      const { open } = useCompanionPanel();
+      // On screen whenever it is open, reported as the real host reports it.
+      React.useLayoutEffect(() => {
+        if (!open) return undefined;
+        onShownChange?.(true);
+        return () => onShownChange?.(false);
+      }, [open, onShownChange]);
+      return open ? <aside aria-label="Michi panel" data-companion-panel="" tabIndex={-1} data-covered={String(!!covered)} /> : null;
+    },
   };
 });
-vi.mock('./pages/Home', () => ({ default: () => <div>Conversation home</div> }));
+vi.mock('./pages/Home', () => ({ default: () => <div>Conversation home<button type="button">Home action</button></div> }));
 vi.mock('./pages/Dashboard', () => ({ default: () => <div>Conversation dashboard</div> }));
 vi.mock('./pages/Scheduled', async () => {
   const nav = await vi.importActual<typeof import('./scheduled/scheduledNav')>('./scheduled/scheduledNav');
@@ -95,6 +103,18 @@ describe('TerminalShell in a narrow window', () => {
     expect(areas()).toBeTruthy();
     act(() => backTarget()?.back());
     await waitFor(() => expect(areas()).toBeNull());
+  });
+
+  it('lands a released swipe at once under Reduce motion', async () => {
+    localStorage.setItem('michi:v1:prefs', JSON.stringify({ onboardingCompletedAt: 1, sidebarCollapsed: false, reduceMotion: true }));
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    const home = await screen.findByText('Conversation home');
+    await closeFirstLoadDialog();
+    fireEvent.touchStart(home, { touches: [{ identifier: 1, clientX: 6, clientY: 300 }] });
+    fireEvent.touchMove(home, { touches: [{ identifier: 1, clientX: 40, clientY: 300 }] });
+    expect(areas()).toBeTruthy();
+    fireEvent.touchEnd(home, { touches: [] });
+    expect(areas()).toBeNull();
   });
 
   it('goes Back to the page a page opened, but starts afresh from a drawer choice', async () => {
@@ -206,6 +226,58 @@ describe('TerminalShell in a narrow window', () => {
     expect(panel()).toBeNull();
   });
 
+  it('makes the page under the panel inert while it shows, and hands focus back to it once it is live again', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    const action = await screen.findByRole('button', { name: 'Home action' });
+    await closeFirstLoadDialog();
+    const page = action.closest('.terminal-content-col')!;
+    act(() => action.focus());
+    act(() => openCompanionPanel());
+    expect(page.hasAttribute('inert')).toBe(true);
+    act(() => panel()!.focus());
+    act(() => closeCompanionPanel());
+    expect(page.hasAttribute('inert')).toBe(false);
+    expect(document.activeElement).toBe(action);
+  });
+
+  it('holds the focus in the drawer over an inert page, and hands it back to ≡ when dismissed', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    const action = await screen.findByRole('button', { name: 'Home action' });
+    await closeFirstLoadDialog();
+    const page = action.closest('.terminal-content-col')!;
+    act(() => toggle().focus());
+    fireEvent.click(toggle());
+    const drawer = document.querySelector('aside.terminal-sidebar')!;
+    expect(document.activeElement).toBe(drawer);
+    expect(page.hasAttribute('inert')).toBe(true);
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+    expect(drawer.contains(document.activeElement) && document.activeElement !== drawer).toBe(true);
+    act(() => backTarget()?.back());
+    expect(document.activeElement).toBe(toggle());
+    expect(page.hasAttribute('inert')).toBe(false);
+    await waitFor(() => expect(areas()).toBeNull());
+  });
+
+  it('says the Dashboard is covered while the panel or the drawer lies over it', async () => {
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    await screen.findByText('Conversation home');
+    await closeFirstLoadDialog();
+    expect(isDashboardUncovered(), 'Home is up').toBe(false);
+    fireEvent.keyDown(window, { key: '1', metaKey: true });
+    expect(await screen.findByText('Conversation dashboard')).toBeTruthy();
+    expect(isDashboardUncovered()).toBe(true);
+    act(() => openCompanionPanel());
+    expect(isDashboardUncovered(), 'under the Michi panel').toBe(false);
+    act(() => closeCompanionPanel());
+    expect(isDashboardUncovered()).toBe(true);
+    fireEvent.click(toggle());
+    expect(areas()).toBeTruthy();
+    expect(isDashboardUncovered(), 'under the drawer').toBe(false);
+    act(() => backTarget()?.back());
+    await waitFor(() => expect(areas()).toBeNull());
+    expect(isDashboardUncovered()).toBe(true);
+  });
+
   it('opens the drawer over the panel, which a dismissal keeps and a choice in the drawer closes', async () => {
     render(<PrefsProvider><TerminalShell /></PrefsProvider>);
     await screen.findByText('Conversation home');
@@ -229,6 +301,18 @@ describe('TerminalShell in a narrow window', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Digest' }));
     expect(await screen.findByText('Job detail page')).toBeTruthy();
     expect(panel()).toBeNull();
+  });
+
+  it('leaves the Dashboard uncovered beside the docked panel when the window is wide', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
+    render(<PrefsProvider><TerminalShell /></PrefsProvider>);
+    await screen.findByText('Conversation home');
+    await closeFirstLoadDialog();
+    fireEvent.keyDown(window, { key: '1', metaKey: true });
+    expect(await screen.findByText('Conversation dashboard')).toBeTruthy();
+    act(() => openCompanionPanel());
+    expect(panel()).toBeTruthy();
+    expect(isDashboardUncovered()).toBe(true);
   });
 
   it('keeps the overlay open when the window is wide, where there is none', async () => {

@@ -32,6 +32,8 @@ import {
   companionCheckinTurnId,
   companionCheckinTurnRunId,
   companionDelegationPath,
+  companionItemRaise,
+  companionRaiseUntil,
   companionRunUndoPath,
   companionSendTurnId,
   companionSendTurnRunId,
@@ -133,6 +135,9 @@ describe('posted check-in metadata (DESIGN-v2 §3.3)', () => {
         { kind: 'goal', id: 'cmg-2', applied: 1, proposed: 0, action: 'add', reason: '  ' },
         { kind: 'item', id: 'cmi-3', applied: 1, proposed: 0, action: 'snooze', reason: 'x'.repeat(COMPANION_LIMITS.maxChangeReasonChars + 1) },
         { kind: 'item', id: 'cmi-4', applied: 1, proposed: 0, reason: 'no action' },
+        { kind: 'item', id: 'cmi-5', applied: 1, proposed: 0, action: 'raise', reason: 'Its reviewer waits on you' },
+        { kind: 'item', id: 'cmi-6', applied: 1, proposed: 0, action: 'lower', reason: 'They answered it' },
+        { kind: 'goal', id: 'cmg-3', applied: 1, proposed: 0, action: 'raise', reason: 'raising is about a Today item' },
       ],
     });
     assert.deepEqual(post?.changes, [
@@ -143,9 +148,12 @@ describe('posted check-in metadata (DESIGN-v2 §3.3)', () => {
       { kind: 'goal', id: 'cmg-2', applied: 1, proposed: 0, action: 'add' },
       { kind: 'item', id: 'cmi-3', applied: 1, proposed: 0, action: 'snooze' },
       { kind: 'item', id: 'cmi-4', applied: 1, proposed: 0 },
+      { kind: 'item', id: 'cmi-5', applied: 1, proposed: 0, action: 'raise', reason: 'Its reviewer waits on you' },
+      { kind: 'item', id: 'cmi-6', applied: 1, proposed: 0, action: 'lower', reason: 'They answered it' },
+      { kind: 'goal', id: 'cmg-3', applied: 1, proposed: 0 },
     ]);
     assert.deepEqual([...companionChangeActionsFor('item')], [...COMPANION_ITEM_CHANGE_ACTIONS]);
-    assert.deepEqual([...COMPANION_ITEM_CHANGE_ACTIONS], ['snooze', 'dismiss', 'restore']);
+    assert.deepEqual([...COMPANION_ITEM_CHANGE_ACTIONS], ['snooze', 'dismiss', 'restore', 'raise', 'lower']);
     assert.deepEqual([...companionChangeActionsFor('goal')], [...COMPANION_GOAL_CHANGE_ACTIONS]);
     assert.deepEqual([...COMPANION_GOAL_CHANGE_ACTIONS], ['add', 'reword', 'remove']);
     assert.deepEqual([...companionChangeActionsFor('page')], []);
@@ -242,6 +250,20 @@ describe('names and sources the v2 migration and renderers rely on (W0 review #1
   test('the limits the W0 review added', () => {
     assert.equal(COMPANION_LIMITS.maxChangeReasonChars, 500);
     assert.equal(COMPANION_LIMITS.maxSnapshotCheckinChanges, 50);
+  });
+});
+
+describe('a check-in\u2019s raise says what waits today (2026-11-17)', () => {
+  test('holds until the local midnight after it was given, and not a moment past it', () => {
+    const at = new Date(2026, 10, 17, 23, 59, 0, 0).getTime();
+    const midnight = new Date(2026, 10, 18, 0, 0, 0, 0).getTime();
+    assert.equal(companionRaiseUntil(at), midnight);
+    assert.equal(companionRaiseUntil(midnight), new Date(2026, 10, 19).getTime(), 'one given at midnight holds for that whole day');
+    const item = { raised: { reason: 'Jun is blocked on it', at, until: companionRaiseUntil(at) } };
+    assert.equal(companionItemRaise(item, midnight - 1), item.raised);
+    assert.equal(companionItemRaise(item, midnight), null);
+    assert.equal(companionItemRaise({ raised: null }, at), null);
+    assert.equal(companionItemRaise({}, at), null, 'an older backend sends none');
   });
 });
 

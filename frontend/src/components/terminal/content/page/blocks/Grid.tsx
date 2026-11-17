@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeftIcon, ArrowRightIcon, SlidersIcon } from '../../../icons';
 import type { MichiPageBlock } from 'michi-shared';
 import type { BlockProps } from '../blockTypes';
 import { blocksOf, objects, str } from '../michiPageModel';
@@ -103,8 +103,8 @@ export function ResponsiveGrid({ block, ctx, renderRegion }: BlockProps & {
           style={{ '--grid-span': span, '--grid-tablet-span': region.tabletSpan ?? 12 } as React.CSSProperties}>
           {region.title && <h3 className="michi-doc-grid__title">{region.title}</h3>}
           {arranging && ctx.updateBlock && <div className="michi-doc-grid__controls" data-block-chrome="">
-            <button type="button" aria-label={`Move ${name} earlier`} title="Move region earlier" disabled={index === 0 || !!preview} onClick={() => move(index, -1)}><ArrowLeft size={14} /></button>
-            <button type="button" aria-label={`Move ${name} later`} title="Move region later" disabled={index === regions.length - 1 || !!preview} onClick={() => move(index, 1)}><ArrowRight size={14} /></button>
+            <button type="button" aria-label={`Move ${name} earlier`} title="Move region earlier" disabled={index === 0 || !!preview} onClick={() => move(index, -1)}><ArrowLeftIcon /></button>
+            <button type="button" aria-label={`Move ${name} later`} title="Move region later" disabled={index === regions.length - 1 || !!preview} onClick={() => move(index, 1)}><ArrowRightIcon /></button>
             <label>Width<select aria-label={`${name} width`} value={span} disabled={!!preview} onChange={(event) => save(regions.map((candidate) => candidate.id === region.id ? { ...candidate, span: Number(event.target.value) } : candidate))}>
               {widths.map((width) => <option key={width} value={width}>{width}/12</option>)}
             </select></label>
@@ -119,7 +119,7 @@ export function ResponsiveGrid({ block, ctx, renderRegion }: BlockProps & {
     </div>
     {ctx.updateBlock && <div className="michi-doc-grid__tools" data-block-chrome="">
       <button type="button" aria-pressed={arranging} onClick={() => { cleanup.current?.(); setPreview(null); setArranging(!arranging); }}>
-        <SlidersHorizontal size={14} />{arranging ? 'Done arranging' : 'Arrange layout'}
+        <SlidersIcon />{arranging ? 'Done arranging' : 'Arrange layout'}
       </button>
     </div>}
   </div>;

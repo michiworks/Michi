@@ -5,11 +5,12 @@ import { openBackgroundWork, useBackgroundWorkNodeId } from '../backgroundWork/b
 import { useConversationSubagent, useSubagentToneCounts } from '../backgroundWork/useConversationSubagent';
 import { usePhoneLayout } from '../../../hooks/usePhoneLayout';
 import { FadeOnChange, GlyphSwap } from '../agentBlockMotion';
+import { ChevronRightIcon, CloseIcon, SubagentIcon } from '../icons';
+import { StateGlyph } from '../backgroundWork/workCardParts';
 import {
   SUBAGENT_TONE_COLOR,
   SUBAGENT_TONE_LABEL,
   shownSubagent,
-  subagentDisplayName,
   subagentDurationMs,
   subagentShownDurationMs,
   subagentSummary,
@@ -26,16 +27,21 @@ const MONO = 'var(--font-mono)';
 const ellipsis: React.CSSProperties = { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' };
 
 /**
- * Running → breathing dot, failed → red ×, otherwise a muted dot. A change
- * of kind cross-scales.
+ * Running → breathing dot, failed → red ×, completed → Background work's
+ * green ✓, otherwise (stopped, ended, in background) a quiet dot. Without a
+ * `tone`, a finished status reads completed, as its word does. A change of
+ * kind cross-scales.
  */
-export function SubagentStatusGlyph({ status }: { status: string | undefined }) {
+export function SubagentStatusGlyph({ status, tone }: { status: string | undefined; tone?: SubagentTone }) {
   const failed = isFailedStatus(status);
   const running = isRunningStatus(status);
+  const completed = !failed && !running && (tone === undefined || tone === 'completed');
   return (
-    <GlyphSwap glyph={failed ? 'failed' : running ? 'running' : 'done'} style={{ width: 8, ...(failed ? null : { alignSelf: 'center' }) }}>
+    <GlyphSwap glyph={failed ? 'failed' : running ? 'running' : completed ? 'completed' : 'done'} style={{ width: 8, ...(failed ? null : { alignSelf: 'center' }) }}>
       {failed ? (
-        <span aria-hidden style={{ color: 'var(--term-danger)', fontSize: 'var(--fs-xs)', lineHeight: 1 }}>×</span>
+        <CloseIcon size={8} style={{ color: 'var(--term-danger)' }} />
+      ) : completed ? (
+        <StateGlyph state="completed" />
       ) : (
         <span aria-hidden className={running ? 'term-dot-i term-dot-i--run' : 'term-dot-i'} />
       )}
@@ -68,17 +74,13 @@ const SUMMARY_COLOR: Record<SubagentSummaryTone, string> = {
   now: 'var(--term-accent)',
   status: 'var(--term-muted)',
   result: 'var(--term-mid)',
-  error: 'var(--term-danger)',
+  error: 'var(--term-danger-text)',
   mission: 'var(--term-muted)',
 };
 
-/** The 'line' agent-block chrome's type scale: 14px words, 12px mono, error text in --term-danger-text. */
-const LINE_SUMMARY_COLOR: Record<SubagentSummaryTone, string> = { ...SUMMARY_COLOR, error: 'var(--term-danger-text)' };
-
 /** "now ❯ Read src/a.ts", the status line, the result's first line or the mission. */
-export function SubagentSummaryText({ summary, scale = 'chrome' }: { summary: { tone: SubagentSummaryTone; text: string }; scale?: SubagentLineScale }) {
+export function SubagentSummaryText({ summary }: { summary: { tone: SubagentSummaryTone; text: string } }) {
   const now = summary.tone === 'now';
-  const line = scale === 'line';
   return (
     <span
       data-testid="subagent-summary-text"
@@ -88,23 +90,21 @@ export function SubagentSummaryText({ summary, scale = 'chrome' }: { summary: { 
       style={{
         ...ellipsis,
         flex: 1,
-        fontSize: line ? (now ? 'var(--fs-md)' : 'var(--fs-xl)') : now ? 'var(--fs-xs)' : 'var(--fs-sm)',
+        fontSize: now ? 'var(--fs-md)' : 'var(--fs-xl)',
         fontFamily: now ? MONO : undefined,
       }}
     >
       {/* The ornament stays out of the transcript line's accessible name; "now" reads. */}
       {now && <span style={{ color: 'var(--term-muted)' }}>now <span aria-hidden="true">❯</span> </span>}
-      <span style={{ color: (line ? LINE_SUMMARY_COLOR : SUMMARY_COLOR)[summary.tone] }}>{summary.text}</span>
+      <span style={{ color: SUMMARY_COLOR[summary.tone] }}>{summary.text}</span>
     </span>
   );
 }
 
-export type SubagentLineScale = 'chrome' | 'line';
-
 const lineStyle: React.CSSProperties = {
   display: 'flex',
-  alignItems: 'baseline',
-  gap: 7,
+  alignItems: 'center',
+  gap: 8,
   width: '100%',
   minWidth: 0,
   boxSizing: 'border-box',
@@ -112,11 +112,10 @@ const lineStyle: React.CSSProperties = {
   textAlign: 'left',
 };
 
+/** No fill or ink: the button's class (.agent-line) owns both, hover included. */
 const buttonReset: React.CSSProperties = {
   border: 0,
   margin: 0,
-  background: 'transparent',
-  color: 'inherit',
   font: 'inherit',
   cursor: 'pointer',
 };
@@ -137,9 +136,7 @@ export function SubagentSummaryLine({
   status: ownStatus,
   fallback,
   glyph,
-  nameStyle,
   style,
-  scale = 'chrome',
   className,
 }: {
   /** The roster entry. Without one there is nothing to open. */
@@ -149,13 +146,10 @@ export function SubagentSummaryLine({
   status: string | undefined;
   /** Mission from the delegation input when the roster has none. */
   fallback?: string;
-  /** Leading glyph; defaults to the status dot (which then moves beside the label). */
-  glyph?: React.ReactNode;
-  nameStyle?: React.CSSProperties;
+  /** Leading glyph naming the kind; the status dot sits beside the label. */
+  glyph: React.ReactNode;
   style?: React.CSSProperties;
-  /** 'line': the line chrome's 14px scale; status words and error text use their text tokens. */
-  scale?: SubagentLineScale;
-  className?: string;
+  className: string;
 }) {
   const nodeId = useBackgroundWorkNodeId();
   const hintId = useId();
@@ -168,33 +162,31 @@ export function SubagentSummaryLine({
   const status = shown.folded ? subagentToolStatus(shown.subagent, shown.active) : ownStatus;
   const running = isRunningStatus(status);
   const failed = isFailedStatus(status);
+  // The agent's own tone when the line shows it, else the status word alone.
+  const tone = subagent && status === subagentToolStatus(subagent, active) ? subagentTone(subagent, active) : undefined;
   const summary = subagentSummary(subagent, { running, fallback });
-  const line = scale === 'line';
-  const statusColor = failed ? (line ? 'var(--term-danger-text)' : 'var(--term-danger)') : running ? 'var(--term-run)' : 'var(--term-muted)';
+  const statusColor = failed ? 'var(--term-danger-text)' : running ? 'var(--term-run)' : 'var(--term-digest)';
   const statusLabel = subagentStatusLabel(status);
-  const statusSize = line ? 'var(--fs-md)' : 'var(--fs-xs)';
-  const nameLook: React.CSSProperties = line
-    ? { fontSize: 'var(--fs-xl)', fontWeight: 500, color: failed ? 'var(--term-danger-text)' : 'var(--term-mid)' }
-    : { fontSize: 'var(--fs-sm)', fontWeight: 600, color: failed ? 'var(--term-danger-text)' : 'var(--term-fg)' };
+  const statusSize = 'var(--fs-md)';
+  const nameLook: React.CSSProperties = { fontSize: 'var(--fs-xl)', fontWeight: 500, color: failed ? 'var(--term-danger-text)' : 'var(--term-mid)' };
   const content = (
     <>
-      {glyph ?? <SubagentStatusGlyph status={status} />}
-      <span data-subagent-name="" style={{ ...ellipsis, flexShrink: 0, maxWidth: '45%', ...nameLook, ...nameStyle }}>
+      {glyph}
+      <span data-subagent-name="" style={{ ...ellipsis, flexShrink: 0, maxWidth: '45%', ...nameLook }}>
         {name}
       </span>
-      {summary ? <SubagentSummaryText summary={summary} scale={scale} /> : <span style={{ flex: 1 }} />}
+      {summary ? <SubagentSummaryText summary={summary} /> : <span style={{ flex: 1 }} />}
       <span style={{ flexShrink: 0, paddingLeft: 8, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-        {/* A custom leading glyph names the kind; the dot still says the state. */}
-        {glyph && <SubagentStatusGlyph status={status} />}
-        {subagent && status === subagentToolStatus(subagent, active)
+        {/* The leading glyph names the kind; the dot says the state. */}
+        <SubagentStatusGlyph status={status} tone={tone} />
+        {subagent && tone
           ? <SubagentToneLabel subagent={subagent} active={active} fontSize={statusSize} />
           : <FadeOnChange k={statusLabel} style={{ fontSize: statusSize, color: statusColor }}>{statusLabel}</FadeOnChange>}
       </span>
     </>
   );
-  const look: React.CSSProperties = line ? { ...lineStyle, alignItems: 'center', gap: 8 } : lineStyle;
   if (!subagent || !nodeId) {
-    return <div data-testid="subagent-summary" className={className} style={{ ...look, ...style }}>{content}</div>;
+    return <div data-testid="subagent-summary" className={className} style={{ ...lineStyle, ...style }}>{content}</div>;
   }
   return (
     <button
@@ -204,31 +196,14 @@ export function SubagentSummaryLine({
       aria-haspopup="dialog"
       aria-describedby={hintId}
       title="Show in background work"
-      className={className ?? 't-hover-bg-alt'}
+      className={className}
       onClick={() => openBackgroundWork({ nodeId, focus: { kind: 'subagent', sessionId: subagent.sessionId } })}
-      style={{ ...buttonReset, ...look, ...style }}
+      style={{ ...buttonReset, ...lineStyle, ...style }}
     >
       {/* The line's content is its name (what the agent does or returned); the hint is its description. */}
       {content}
       <span id={hintId} hidden>Show in background work</span>
     </button>
-  );
-}
-
-/**
- * One subagent as a compact row. Used where one delegation owns several
- * agents (Kiro crews, Codex spawns) and for agents no chip claims.
- */
-export function SubagentRow({ subagent }: { subagent: SubagentInfo }) {
-  return (
-    <div data-testid="subagent-row" data-subagent-id={subagent.sessionId} style={{ minWidth: 0 }}>
-      <SubagentSummaryLine
-        subagent={subagent}
-        name={subagentDisplayName(subagent)}
-        status={subagentToolStatus(subagent)}
-        style={{ padding: '1px 0' }}
-      />
-    </div>
   );
 }
 
@@ -250,11 +225,12 @@ function subagentCountParts(counts: Readonly<Record<SubagentTone, number>>) {
 }
 
 /**
- * Subagents in a message that no tool chip claims, as one line of counts:
- * "✦ Subagents  1 working · 6 done · 2 stopped  Details ›". It takes the line
- * chrome's grid and type (AgentLineBlocks.css), so its words start where a
- * run's words do. The line opens the Background work drawer, which lists each
- * agent; the transcript does not repeat their results.
+ * The conversation's inline roster (inlineSubagentRoster) as one line of
+ * counts: "Subagents  1 working · 6 done · 2 stopped  Details ›". It takes
+ * the line chrome's grid and type (AgentLineBlocks.css), so its words start
+ * where a run's words do. The line opens the Background work drawer on
+ * these agents, which lists each; the transcript does not repeat their
+ * results.
  */
 export function MessageSubagents({ subagents }: { subagents: readonly SubagentInfo[] }) {
   const nodeId = useBackgroundWorkNodeId();
@@ -267,10 +243,8 @@ export function MessageSubagents({ subagents }: { subagents: readonly SubagentIn
   const content = (
     <>
       <span className="agent-line__ico">
-        {/* The line chrome's agent glyph (AgentLineBlocks PATHS.agent). */}
-        <svg width={16} height={16} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden focusable="false">
-          <path d="M8 2.25 9.3 6.7 13.75 8 9.3 9.3 8 13.75 6.7 9.3 2.25 8 6.7 6.7z" />
-        </svg>
+        {/* The line chrome's glyph for a delegation (AgentLineBlocks ICONS.agent). */}
+        <SubagentIcon size="lg" />
       </span>
       <span className="agent-line__txt">
         <span className="agent-line__lead"><span className="agent-line__layer">Subagents</span></span>
@@ -310,13 +284,11 @@ export function MessageSubagents({ subagents }: { subagents: readonly SubagentIn
         aria-describedby={hintId}
         title="Show in background work"
         className="agent-line"
-        onClick={() => openBackgroundWork({ nodeId })}
+        onClick={() => openBackgroundWork({ nodeId, subagentIds: subagents.map((subagent) => subagent.sessionId) })}
       >
         {content}
         <span aria-hidden className="agent-line__meta">{phone ? null : 'Details'}</span>
-        <svg className="agent-line__chev" width={12} height={12} viewBox="0 0 12 12" aria-hidden focusable="false">
-          <path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ChevronRightIcon size="sm" className="agent-line__chev" />
         <span id={hintId} hidden>Show in background work</span>
       </button>
     </section>

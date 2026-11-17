@@ -15,7 +15,7 @@ import { pageChangeHandlers } from './nativePageHost';
 import { pageBlockTarget } from './metaChat/blockTarget';
 import { DocumentHeader, DocumentShell } from '../content/page/DocumentShell';
 import { pageBackground } from '../../../lib/pageBackground';
-import { Maximize2 } from 'lucide-react';
+import { MaximizeIcon } from '../icons';
 import { toast } from 'sonner';
 import { CustomBlock } from './components/CustomBlock';
 import { openNativePageRoute } from './SpacesPage';
@@ -145,7 +145,7 @@ function PagePane({ item }: { item: PagePaneItem }) {
           <span className="page-pane-visibility">· {isCrossWorkspace ? `Belongs to ${ownerName}` : `${host?.name || ownerName} chats can read and write this`}</span>
         </div>
         <div className="page-pane-actions">
-          <button type="button" className="space-helper-icon" onClick={openStandalone} aria-label="Open standalone" title="Open standalone"><Maximize2 size={14} strokeWidth={1.6} /></button>
+          <button type="button" className="space-helper-icon" onClick={openStandalone} aria-label="Open standalone" title="Open standalone"><MaximizeIcon /></button>
         </div>
       </header>
       {readOnlyReason && <p className="page-pane-notice" role="status">{readOnlyReason}</p>}

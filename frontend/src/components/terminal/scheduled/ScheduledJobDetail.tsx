@@ -1,5 +1,5 @@
 import React from 'react';
-import { ChevronRight, Clock3, MessageSquare, Pencil, Play, Square, Trash2 } from 'lucide-react';
+import { ChatIcon, ChevronRightIcon, ClockIcon, EditIcon, PlayIcon, StopIcon, TrashIcon } from '../icons';
 import type { ScheduledJobDto, ScheduledJobRunDto } from 'michi-shared';
 import { ModalShell } from '../../ui/ModalShell';
 import { Button } from '../../ui/controls';
@@ -77,7 +77,7 @@ export function ScheduledJobDetail({ job, workspaceName, workspaceArchived = fal
     <ModalShell open onClose={onClose} title="Scheduled job" width={600} maxHeight="min(86vh, 820px)">
       <div className="sched-detail">
         <div className="sched-detail-scroll term-scrollbar">
-          <div className="sched-detail-eyebrow"><Clock3 size={15} aria-hidden="true" />{describeSchedule(job.schedule)}</div>
+          <div className="sched-detail-eyebrow"><ClockIcon aria-hidden="true" />{describeSchedule(job.schedule)}</div>
           <h2>{job.name}</h2>
           <dl>
             <dt>Next run</dt><dd>{next}</dd>
@@ -111,7 +111,7 @@ export function ScheduledJobDetail({ job, workspaceName, workspaceArchived = fal
                       </span>
                       {(run.summary || run.error) && <span className="sched-run-summary">{run.status === 'succeeded' ? run.summary : run.error ?? run.summary}</span>}
                     </span>
-                    {run.nodeId && <span className="sched-run-open"><MessageSquare size={14} aria-hidden="true" /><ChevronRight size={14} aria-hidden="true" /></span>}
+                    {run.nodeId && <span className="sched-run-open"><ChatIcon aria-hidden="true" /><ChevronRightIcon aria-hidden="true" /></span>}
                   </button>
                 </li>
               ))}
@@ -127,11 +127,11 @@ export function ScheduledJobDetail({ job, workspaceName, workspaceArchived = fal
         <footer>
           <div className="sched-detail-actions">
             {job.activeRunId
-              ? <Button onClick={onCancelRun} disabled={busy}><Square size={14} aria-hidden="true" />Stop run</Button>
-              : <Button variant="primary" onClick={onRunNow} disabled={busy || runBlocked} title={runBlocked ? 'Confirm the previous execution has stopped first' : undefined}><Play size={14} aria-hidden="true" />Run now</Button>}
-            <Button onClick={onEdit} disabled={busy}><Pencil size={14} aria-hidden="true" />Edit</Button>
+              ? <Button onClick={onCancelRun} disabled={busy}><StopIcon aria-hidden="true" />Stop run</Button>
+              : <Button variant="primary" onClick={onRunNow} disabled={busy || runBlocked} title={runBlocked ? 'Confirm the previous execution has stopped first' : undefined}><PlayIcon aria-hidden="true" />Run now</Button>}
+            <Button onClick={onEdit} disabled={busy}><EditIcon aria-hidden="true" />Edit</Button>
           </div>
-          <TrashIconButton icon={Trash2} tooltip="Delete job" aria-label={`Delete ${job.name}`} className="trash-danger" disabled={busy} onClick={onDelete} />
+          <TrashIconButton icon={TrashIcon} tooltip="Delete job" aria-label={`Delete ${job.name}`} className="trash-danger" disabled={busy} onClick={onDelete} />
         </footer>
       </div>
     </ModalShell>

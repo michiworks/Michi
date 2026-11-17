@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
-import { chromium } from 'playwright';
+import { chromium } from '@playwright/test';
 
 // Real gateway + browser cookies/CSP through a local HTTPS stand-in for Serve.
 // No Tailscale install, user data, SQLite, real backend or agent processes.

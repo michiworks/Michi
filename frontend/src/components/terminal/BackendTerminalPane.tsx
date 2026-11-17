@@ -8,6 +8,7 @@ import { useChatActions } from '../../state/chatStore';
 import { usePaneShellStyle } from '../../hooks/usePaneShellStyle';
 import { usePhoneLayout } from '../../hooks/usePhoneLayout';
 import { useKeyboardInset } from '../../hooks/useKeyboardInset';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { usePrefs } from '../../state/prefs';
 import { TERMINAL_CLIENT_ID } from '../../state/terminalTarget';
 import { createTerminal, restartTerminal, TerminalApiError, TerminalLink } from '../../services/api/terminals';
@@ -15,7 +16,7 @@ import { Button } from '../ui/controls';
 import { TerminalKeyBar, type TerminalBarKey } from './TerminalKeyBar';
 import { terminalKeySequence, withControl, type TerminalKeyName } from './terminalKeys';
 import { terminalTheme } from './terminalTheme';
-import { createPaneTerminal } from './terminalXterm';
+import { createPaneTerminal, paneSmoothScrollDuration } from './terminalXterm';
 import './backendTerminal.css';
 
 type Status = 'connecting' | 'ready' | 'reconnecting' | 'exited' | 'off' | 'unavailable' | 'closed';
@@ -47,8 +48,9 @@ function peersLabel(peers: TerminalPeers, phone: boolean): string | null {
 export default function BackendTerminalPane({ item, connectionId }: { item: TerminalPaneItem; connectionId: string }) {
   const { focusPane } = useChatActions();
   const { prefs } = usePrefs();
+  const reducedMotion = useReducedMotion();
   const phone = usePhoneLayout();
-  const shellStyle = usePaneShellStyle(item.id);
+  const { style: shellStyle, recede } = usePaneShellStyle(item.id);
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const linkRef = useRef<TerminalLink | null>(null);
@@ -160,6 +162,10 @@ export default function BackendTerminalPane({ item, connectionId }: { item: Term
     if (terminalRef.current) terminalRef.current.options.theme = terminalTheme(prefs.terminalPalette, prefs.terminalAccentOverrides);
   }, [prefs.terminalPalette, prefs.terminalAccentOverrides]);
 
+  useEffect(() => {
+    if (terminalRef.current) terminalRef.current.options.smoothScrollDuration = paneSmoothScrollDuration(reducedMotion);
+  }, [reducedMotion]);
+
   const onBarKey = useCallback((key: TerminalBarKey) => {
     const terminal = terminalRef.current;
     const link = linkRef.current;
@@ -235,6 +241,7 @@ export default function BackendTerminalPane({ item, connectionId }: { item: Term
       ) : phone && live ? (
         <TerminalKeyBar onKey={onBarKey} ctrlArmed={ctrlArmed} disabled={status !== 'ready'} />
       ) : null}
+      {recede}
     </div>
   );
 }

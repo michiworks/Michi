@@ -18,8 +18,8 @@ describe('WorkspaceIcon', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('renders badge with workspace letter when mode=badge', () => {
+  it('renders badge with workspace letter when mode=badge, hidden from screen readers', () => {
     const { getByText } = render(<WorkspaceIcon project={project} mode="badge" />);
-    expect(getByText('C')).toBeTruthy();
+    expect(getByText('C').getAttribute('aria-hidden')).toBe('true');
   });
 });

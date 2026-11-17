@@ -41,7 +41,7 @@ export type AttentionKind = 'needs_input' | 'finished' | 'failed';
 
 /** Why a record exists. needs_input: approval | question | needs_you (an
  *  item in Michi's Today); finished: completed | run_completed | update (a
- *  post of Michi's: the brief, a check-in, a delegated conversation that
+ *  post of Michi's: a check-in, a delegated conversation that
  *  finished); failed: error | run_failed. run_*: an Agent Run's or a Scheduled
  *  Job run's outcome. */
 export type AttentionReason =

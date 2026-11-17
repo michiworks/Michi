@@ -2,14 +2,17 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
   applyTurnEvent,
+  contentWithBlocksFallback,
   createDurableTurn,
   extractBranchOverview,
   extractTurnMetadata,
   finalizeTurnContent,
+  parseChatStreamEvent,
   hasClosedFollowUpSentinels,
   selfTurnAssistantId,
   stripTurnMetadataSentinels,
   turnLeftAnswer,
+  normalizeUserInputQuestions,
   userMessageIdFor,
   userTurnAssistantId,
   type ChatStreamEvent,
@@ -151,7 +154,7 @@ test('terminal interruption preserves the unanswered question without persisting
   }
 });
 
-test('a turn left an answer when its finalized content or a tool, image or question remains', () => {
+test('a turn left an answer when its finalized content or a tool, image, blocks or question remains', () => {
   const cases: Array<[string, Array<{ kind: string }>, boolean]> = [
     ['', [], false],
     ['All done.', [], true],
@@ -162,6 +165,7 @@ test('a turn left an answer when its finalized content or a tool, image or quest
     ['', [{ kind: 'tool' }], true],
     ['', [{ kind: 'image' }], true],
     ['', [{ kind: 'user-input' }], true],
+    ['', [{ kind: 'blocks' }], true],
   ];
   for (const [raw, blocks, expected] of cases) {
     assert.equal(turnLeftAnswer(finalizeTurnContent(raw), blocks), expected, JSON.stringify([raw, blocks]));
@@ -306,4 +310,65 @@ test('follow-up lines: text before the first one, several on a line, examples in
   assert.equal(stripTurnMetadataSentinels('body\n[BRANCH-OVERVIEW: read `a[0]`] tail\n'), 'body\ntail\n');
   // Without a closing `]` the old reading still applies.
   assert.deepEqual(extractTurnMetadata('body\n[FOLLOW-UP 1/3: a?\n[FOLLOW-UP 2/3: b?]').followUps, ['a?', 'b?']);
+});
+
+test('normalized user-input questions keep their field', () => {
+  const field = { key: 't', label: 'Time', type: 'time' as const };
+  assert.deepEqual(normalizeUserInputQuestions('i', [{ question: 'When?', options: [], multiSelect: false, field }]),
+    [{ id: 'i:q:0', question: 'When?', multiSelect: false, options: [], field }]);
+});
+
+describe('blocks a reply shows (show_blocks)', () => {
+  const shown = {
+    blocks: [{ type: 'poll', id: 'cb-1', question: 'Which day?', options: ['Mon', 'Tue'] }],
+    title: 'Plan',
+    fallbackText: 'Plan\n\nWhich day?\n- Mon\n- Tue',
+  };
+  const start = () => createDurableTurn({
+    turnId: 'turn-b', assistantId: 'a-b', nodeId: 'node-b', workspaceId: 'ws', displayUserText: 'hi', startedAt: 1,
+  });
+  const play = (events: ChatStreamEvent[]) => events.reduce(applyTurnEvent, start());
+  const events = [
+    event('chunk', { text: '[TITLE: Days]\nHere:', seq: 1, observedAt: 2 }),
+    event('blocks', { ...shown, seq: 2, observedAt: 3 }),
+    event('chunk', { text: ' answer when ready.', seq: 3, observedAt: 4 }),
+    event('done', { stopReason: 'end_turn', seq: 4, observedAt: 5 }),
+  ];
+
+  test('lands between the text it came with, closing the text before it, with the same id on every replay', () => {
+    const first = play(events);
+    const blocks = first.assistantMessage.blocks;
+    assert.deepEqual(blocks.map((block) => block.kind), ['answer', 'blocks', 'answer']);
+    const block = blocks[1] as Extract<typeof blocks[number], { kind: 'blocks' }>;
+    assert.equal(block.id, 'a-b-b-1');
+    assert.deepEqual(block.blocks, shown.blocks);
+    assert.equal(block.title, 'Plan');
+    assert.equal(block.fallbackText, shown.fallbackText);
+    assert.equal((blocks[0] as { endedAt?: number }).endedAt, 3);
+    assert.deepEqual(play(events).assistantMessage.blocks, blocks);
+  });
+
+  test('stores the answer text followed by the blocks\' plain text as the content', () => {
+    assert.equal(play(events).assistantMessage.content, 'Here: answer when ready.\n\nPlan\n\nWhich day?\n- Mon\n- Tue');
+    const onlyBlocks = play([events[1], event('done', { stopReason: 'end_turn', seq: 3 })]).assistantMessage;
+    assert.equal(onlyBlocks.content, shown.fallbackText);
+    assert.equal(turnLeftAnswer(onlyBlocks.content, onlyBlocks.blocks), true);
+  });
+
+  test('an interrupted reply keeps its blocks and their text', () => {
+    const cut = play([events[0], events[1], event('error', { message: 'boom', seq: 3 })]).assistantMessage;
+    assert.equal(cut.blocks[1]?.kind, 'blocks');
+    assert.equal(cut.content, `Here:\n\n${shown.fallbackText}`);
+  });
+
+  test('contentWithBlocksFallback leaves a reply without blocks as it is', () => {
+    assert.equal(contentWithBlocksFallback('  Hi  ', [{ kind: 'answer' }, { kind: 'image' }]), '  Hi  ');
+    assert.equal(contentWithBlocksFallback('', [{ kind: 'blocks', fallbackText: '  ' }]), '');
+    assert.equal(contentWithBlocksFallback('Hi', [{ kind: 'blocks', fallbackText: 'A' }, { kind: 'blocks', fallbackText: 'B' }]), 'Hi\n\nA\n\nB');
+  });
+
+  test('the wire parser keeps only object blocks and reads a missing fallback as empty', () => {
+    const parsed = parseChatStreamEvent('blocks', JSON.stringify({ blocks: [{ type: 'stat' }, 3, null, ['x']], seq: 7 }));
+    assert.deepEqual(parsed, { event: 'blocks', data: { blocks: [{ type: 'stat' }], title: undefined, fallbackText: '', seq: 7 } });
+  });
 });

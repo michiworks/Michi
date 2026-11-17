@@ -9,6 +9,7 @@ import {
   type ConsolidationBatch, type ConsolidationGroup, type ConsolidationNote, type ConsolidationWho,
 } from './consolidationPolicy';
 import { normalizeMemoryBody } from './extractionRepository';
+import { commitGuesses, type GuessCommitResult, type GuessProposal } from './guesses';
 import {
   activeMemoriesFromTurn, activeMichiNoteCount, consolidationActiveRows, consolidationRows, consolidationRowsAfter, consolidationWaiting,
   hasLearningSource, memoryTransaction, memoryWorkspaceIds, storedMemories, type ConsolidationMemoryRow,
@@ -34,6 +35,11 @@ import { remapProfileCitations } from './userProfile';
  * be what a note goes into. It shows the user nothing: no receipt, toast,
  * badge or status line; Settings › Memory lists the result as it lists any
  * change.
+ *
+ * A run may also propose up to two guesses (guesses.ts): patterns two or more
+ * of the user's notes show together, kept for the user to confirm in Settings
+ * › Memory and never used as facts; they are checked and saved with the
+ * decisions.
  *
  * Safety is mechanical: the batch and each decision are checked again at
  * commit on the current rows (status, version, protection, source, area, the
@@ -457,9 +463,13 @@ export interface ConsolidationDecision {
   intoId: string | null;
 }
 
-/** A validated answer: a decision for every input of a group (keep when the model gave none), at most one per note. */
+/**
+ * A validated answer: a decision for every input of a group (keep when the model gave none), at most one per note,
+ * and the guesses, their refs resolved to listed notes (an unlisted ref left out; the commit checks the rest).
+ */
 export interface ConsolidationPayload {
   decisions: ConsolidationDecision[];
+  guesses?: GuessProposal[];
 }
 
 /** An answer that breaks the schema or a rule; problems name each decision (decisions[1] m:… …). */
@@ -481,11 +491,11 @@ function schemaProblems(errorMessage: string | undefined): string[] {
     }));
 }
 
-/** decisions left out (or null) is none; an MCP client's own metadata (_meta) is no part of the answer. */
+/** decisions or guesses left out (or null) is none; an MCP client's own metadata (_meta) is no part of the answer. */
 function withDefaults(value: unknown): unknown {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
   const { _meta: _ignored, ...answer } = value as Record<string, unknown>;
-  return { ...answer, decisions: answer.decisions ?? [] };
+  return { ...answer, decisions: answer.decisions ?? [], guesses: answer.guesses ?? [] };
 }
 
 /** Maximal runs of decimal digits after NFKC, without leading zeros ("07" is 7). */
@@ -583,6 +593,7 @@ export function decisionProblem(op: Exclude<ConsolidationOp, 'keep'>, ref: Check
 }
 
 interface RawDecision { ref: string; op: ConsolidationOp; into: string | null; why?: string }
+interface RawGuess { text: string; refs: string[] }
 
 /** The listed note a ref names (a ref without a version names the listed one); null when it was not listed at that version. */
 function listedNote(batch: Pick<ListedBatch, 'notes'> | Pick<ConsolidationBatch, 'notes'>, text: string | null): CheckedNote | null {
@@ -606,7 +617,8 @@ function listedNote(batch: Pick<ListedBatch, 'notes'> | Pick<ConsolidationBatch,
  * problem. Lenient (the last answer): a decision breaking a rule, and a
  * missing one, becomes keep; schema problems always throw. A stale note (gone
  * or changed since it was listed) is not the model's to fix: its decisions
- * stand here, and the commit skips them.
+ * stand here, and the commit skips them. Guesses never fail an answer: each
+ * keeps the listed notes its refs name, and the commit checks the rest.
  */
 export function validateConsolidationPayload(raw: unknown, batch: ListedBatch | ConsolidationBatch, options: ValidateConsolidationOptions = {}): ConsolidationPayload {
   payloadCheck ??= new AjvJsonSchemaValidator().getValidator(CONSOLIDATION_PAYLOAD_SCHEMA as Record<string, unknown>);
@@ -676,7 +688,14 @@ export function validateConsolidationPayload(raw: unknown, batch: ListedBatch | 
   // In listing order: what the commit applies first.
   const order = new Map<string, number>();
   for (const group of batch.groups) for (const id of group.members) if (!order.has(id)) order.set(id, order.size);
-  return { decisions: [...decided.values()].sort((a, b) => (order.get(a.memoryId) ?? 0) - (order.get(b.memoryId) ?? 0)) };
+  const guesses = ((answer as { guesses: RawGuess[] }).guesses).map((guess): GuessProposal => ({
+    text: guess.text.replace(/\s+/gu, ' ').trim(),
+    cites: guess.refs.flatMap((ref) => {
+      const note = listedNote(batch, ref);
+      return note ? [{ memoryId: note.memoryId, version: note.version }] : [];
+    }),
+  })).filter((guess) => guess.text);
+  return { decisions: [...decided.values()].sort((a, b) => (order.get(a.memoryId) ?? 0) - (order.get(b.memoryId) ?? 0)), guesses };
 }
 
 // ── the commit ───────────────────────────────────────────────────────────────
@@ -703,6 +722,8 @@ export interface ConsolidationCommitResult {
   outcomes: Map<string, { decision: ConsolidationOp | null; intoId: string | null; outcome: ConsolidationOutcome }>;
   skipped: number;
   kept: number;
+  /** The guesses saved (guesses.ts) and those left out. */
+  guesses: GuessCommitResult;
 }
 
 function writeLog(ownerUserId: string, runId: string, batch: ListedBatch | ConsolidationBatch, outcomes: ConsolidationCommitResult['outcomes'], now: number): void {
@@ -723,6 +744,7 @@ function writeLog(ownerUserId: string, runId: string, batch: ListedBatch | Conso
  * both in an area (area), rules 6-9 on their current text (rule:<n>), the
  * caps (cap) — then applied (memoryService.mergeMemoryInto; a duplicate's
  * profile citations move to its into, userProfile.remapProfileCitations).
+ * The guesses that pass guesses.commitGuesses's checks are saved.
  * Every listed memory's outcome is logged, and the cursor moves past the
  * batch. A throw rolls everything back, the cursor included. Nothing is
  * announced: the caller emits 'superseded' for `applied` once committed.
@@ -779,9 +801,10 @@ export function commitConsolidation(payload: ConsolidationPayload, ctx: Consolid
         if (target) remapProfileCitations(ownerUserId, [{ from: { id: ref.memoryId, version: ref.version }, into: target }]);
       }
     }
+    const guesses = commitGuesses(ownerUserId, payload.guesses ?? [], { runId: ctx.runId, now });
     writeLog(ownerUserId, ctx.runId, batch, outcomes, now);
     moveCursor(ownerUserId, ctx.through ?? batch.through, now);
-    return { applied, outcomes, skipped, kept };
+    return { applied, outcomes, skipped, kept, guesses };
   });
 }
 

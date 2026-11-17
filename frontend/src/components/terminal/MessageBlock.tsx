@@ -1,17 +1,17 @@
 import { ASSISTANT_THREAD_MESSAGE_TITLE, closesFence, formatTokenCount, isCheckinNodeId, openingFence, type DurableUserInput, type MarkdownFence, type ThreadMessagePlanSource, type ThreadMessageSource, type UsageCharge } from 'michi-shared';
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence, PresenceContext, animate, motion, useIsPresent, useReducedMotionConfig } from 'motion/react';
-import { DUR, EASE, SPRING } from '../../motion/tokens';
+import { AnimatePresence, MotionGlobalConfig, PresenceContext, animate, motion, useIsPresent, useReducedMotionConfig } from 'motion/react';
+import { DUR, EASE } from '../../motion/tokens';
 import { AssistantBlock, ChatMessage, ToolCallState, SubagentInfo, UserInputRequest } from '../../state/chatTypes';
 import { turnErrorAction } from '../../state/turnErrorRecovery';
 import { interruptionCauseOfKind } from '../../state/turnInterruption';
 import { useRuntimeLabel } from '../../state/skillCatalog';
 import { skillSourceLabel } from '../../state/slashEntries';
 import { isSubagentActive } from '../../state/backgroundWork';
-import { isRunningStatus, isHiddenInternalTool, formatDurationMs, toolSpanMs, summarizeWork, failedToolCount } from './toolCallGrouping';
+import { isRunningStatus, isHiddenInternalTool, toolSpanMs } from './toolCallGrouping';
 import { AgentTurnContext, LineRun, LineWorkFold, useAgentTurnInfo, type LineRunItem } from './AgentLineBlocks';
 import { splitFinishedTurn } from './workFold';
-import { ownGroupTools, visibleGroupTools } from './subagents/subagentPresentation';
+import { visibleGroupTools } from './subagents/subagentPresentation';
 import { activityWindow, activityWindowMs } from './agentBlockTiming';
 import { ToolCallGroup } from './ToolCallGroup';
 import { useHoldHeightWhileLive } from './useHoldHeightWhileLive';
@@ -20,9 +20,8 @@ import { MultiModelReceipt } from './multiModel/MultiModelReceipt';
 import { MessageWorkflowRuns } from './workflows/MessageWorkflowRuns';
 import type { WorkflowPlacement } from '../../state/workflowDomain';
 import type { AgentResourceIdentity } from '../../state/agentIdentity';
-import { type TerminalDensity, useAgentBlockStyle } from '../../state/prefs';
-import { CardSpinner, SparkleIcon, LiveTimerLabel } from './AgentBlockVariants';
-import { GlyphSwap, LabelSwap, Reveal } from './agentBlockMotion';
+import type { TerminalDensity } from '../../state/prefs';
+import { Reveal, RevealOnShow, revealOpened } from './agentBlockMotion';
 import type { PlanEntry } from '../../services/api';
 import MarkdownContent from '../MarkdownContent';
 import { MarkdownTableLiveContext } from '../MarkdownFeatureTable';
@@ -35,7 +34,6 @@ import {
   sameBlockRefs,
   sameToolRefs,
   splitAssistantRuns,
-  thinkingRunRawText,
   useAnswerRunStream,
   useVisibleStream,
   type AssistantRun,
@@ -47,22 +45,24 @@ import { ANCHOR_GROW_FROM, ANCHOR_GROW_STYLE, ANCHOR_GROW_TO, BranchAnchorRow } 
 import { isFresh } from '../../motion/useFresh';
 import { BranchQuoteMarks } from './BranchQuoteMarks';
 import { ImageBlockView } from './ImageBlockView';
+import { ChatBlocksView } from './ChatBlocksView';
 import { SteeringReports } from './SteeringReports';
 import { streamingMarkdownBlocksEnabled } from './streamingMarkdownBlocksFlag';
+import { focusPaneComposer } from './paneFocus';
 import UserInputBanner, { ResolvedUserInput } from './UserInputBanner';
 import { useChatActions } from '../../state/chatStore';
 import { useIsCompanionNodeId } from '../../state/companion/companionStore';
 import { openCompanionPanel } from '../../state/companion/companionPanel';
 import { useCompanionName } from '../../state/companion/companionName';
-import { BranchIcon, CheckIcon, CopyIcon, EditIcon, ForkIcon, RetryIcon } from './icons';
+import { BranchIcon, CheckIcon, CopyIcon, EditIcon, ForkIcon, PlayIcon, RetryIcon, SettingsIcon } from './icons';
 import { useMetaChatDecorations } from '../../state/metaChat/metaChatDecorations';
 import { formatMessageTime } from '../../lib/messageTime';
 import { useCopyFeedback } from '../../hooks/useCopyFeedback';
 import { isImeComposing } from '../../lib/ime';
 import { kbd } from '../../lib/platform';
-import { lastInputWasTouch } from '../../lib/inputModality';
 import type { MultiModelBranchControls } from './multiModelBranch';
 import { ReplyMemorySources } from './ReplyMemorySources';
+import { TurnEndNote } from './TurnEndNote';
 import { MarkdownLinkRendererContext } from '../markdownLinkRenderer';
 
 const StreamingMarkdownContent = React.lazy(() => import('./StreamingMarkdownContent'));
@@ -146,33 +146,29 @@ function usageTitle(usage: TurnUsageInfo): string {
 }
 
 /**
- * What a tap inside a message acts on by itself. On a touch screen the tap's
- * hover must not reveal the message's actions when it lands on one: WebKit
- * drops a tap whose mouseover makes something visible, so the control would
- * only take the second tap. index.css's run-part hover rule repeats this list.
- */
-const TAP_CONTROL = 'a[href], button, input, select, textarea, summary, [role="button"], [data-mention], [data-tap-target]';
-
-/**
  * A message's action row. Under a user message: copy, retry, edit, branch
  * and the time, on hover. Under an answer it is the answer's meta line
  * (`answer`): copy, retry and branch, then "time · tokens" at the chrome's
- * 12px, all of it shown together. Shown while `visible`, and while focus is
- * in the answer or on the row's own buttons (index.css), so a keyboard
- * reaches them visibly.
+ * 12px, all of it shown together. index.css shows it while its message is
+ * hovered (a tap on a touch screen, unless it lands on a control), while
+ * keyboard focus is in the answer or on the row's own buttons, and at rest
+ * when `pinned`; a pointer over a message, even a streaming one, commits no
+ * render (ST-27).
  */
 function MessageActions({
-  visible,
+  pinned = false,
   restVisible = false,
   answer = false,
   time,
   copyText,
   onRetry,
   onEdit,
+  editRef,
   onBranch,
   usageInfo,
 }: {
-  visible: boolean;
+  /** Shown at rest: the latest answer's meta line. */
+  pinned?: boolean;
   /** Touch screens show this row without a tap (index.css). */
   restVisible?: boolean;
   answer?: boolean;
@@ -181,44 +177,30 @@ function MessageActions({
   copyText: () => string;
   onRetry?: () => void;
   onEdit?: () => void;
+  /** The Edit button, which takes focus back when its inline edit closes. */
+  editRef?: React.Ref<HTMLButtonElement>;
   onBranch?: () => void;
   usageInfo?: TurnUsageInfo | null;
 }) {
   const { result: copyResult, status: copyStatus, copy } = useCopyFeedback();
-  const btnStyle: React.CSSProperties = {
-    color: 'var(--term-muted)',
-  };
-  const iconSize = answer ? 14 : 13;
   const usageText = answer && usageInfo ? usageMetaText(usageInfo) : null;
   const usageDetails = answer && usageInfo ? usageTitle(usageInfo) : '';
   return (
     <div
-      data-msg-actions={restVisible ? 'rest' : undefined}
+      data-msg-actions={pinned ? 'pinned' : restVisible ? 'rest' : undefined}
       data-find-skip
       className={answer ? 't-answer-meta' : undefined}
       style={answer ? undefined : { display: 'flex', alignItems: 'center', marginTop: 4, paddingLeft: 0 }}
     >
-      <div
-        className="t-msg-actions"
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 2,
-          minWidth: 0,
-          opacity: visible ? 1 : 0,
-          transition: 'opacity var(--t-soft) ease-out',
-          pointerEvents: visible ? 'auto' : 'none',
-        }}
-      >
+      <div className="t-msg-actions" style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0 }}>
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); void copy(copyText()); }}
-          className="t-icon-btn"
-          style={btnStyle}
+          className="t-icon-btn t-rest-ink"
           title="copy message"
           aria-label="copy message"
         >
-          {copyResult === 'copied' ? <CheckIcon size={iconSize} /> : <CopyIcon size={iconSize} />}
+          {copyResult === 'copied' ? <CheckIcon /> : <CopyIcon />}
         </button>
         {/* Only while there is a result: a transcript would otherwise hold a live region per message. */}
         {copyStatus && <span className="sr-only" role="status">{copyStatus}</span>}
@@ -226,36 +208,34 @@ function MessageActions({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onRetry(); }}
-            className="t-icon-btn"
-            style={btnStyle}
+            className="t-icon-btn t-rest-ink"
             title="retry this turn"
             aria-label="retry this turn"
           >
-            <RetryIcon size={iconSize} />
+            <RetryIcon />
           </button>
         )}
         {onEdit && (
           <button
+            ref={editRef}
             type="button"
             onClick={(e) => { e.stopPropagation(); onEdit(); }}
-            className="t-icon-btn"
-            style={btnStyle}
+            className="t-icon-btn t-rest-ink"
             title="edit and resend"
             aria-label="edit and resend"
           >
-            <EditIcon size={iconSize} />
+            <EditIcon />
           </button>
         )}
         {onBranch && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onBranch(); }}
-            className="t-icon-btn"
-            style={btnStyle}
+            className="t-icon-btn t-rest-ink"
             title="branch from here"
             aria-label="branch from here"
           >
-            <BranchIcon size={iconSize} />
+            <BranchIcon />
           </button>
         )}
         {answer ? (
@@ -290,7 +270,7 @@ function TermPlanBlock({ entries }: { entries: PlanEntry[] }) {
       {entries.map((e, i) => (
         <div key={i} style={{ display: 'flex', gap: 6, lineHeight: 1.5, color: e.status === 'completed' ? 'var(--term-muted)' : 'var(--term-fg)' }}>
           <span style={{ fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-xs)', flexShrink: 0 }}>
-            {e.status === 'completed' ? '✓' : e.status === 'in_progress' ? '›' : '·'}
+            {e.status === 'completed' ? <CheckIcon size="sm" style={{ verticalAlign: 'text-bottom' }} /> : e.status === 'in_progress' ? '›' : '·'}
           </span>
           <span style={{ textDecoration: e.status === 'completed' ? 'line-through' : 'none' }}>{e.content}</span>
         </div>
@@ -298,11 +278,6 @@ function TermPlanBlock({ entries }: { entries: PlanEntry[] }) {
     </div>
   );
 }
-
-// Tail-mode height cap: ~10 lines at line-height 1.5, font-size 11px.
-const THOUGHT_TAIL_MAX_HEIGHT = 10 * 11 * 1.5;
-
-type ThoughtMode = 'tail' | 'expanded' | 'collapsed';
 
 /* ── Motion (motion.dev) ──
    Only what arrives while a message is on screen animates: everything a
@@ -312,235 +287,17 @@ type ThoughtMode = 'tail' | 'expanded' | 'collapsed';
 interface MessageMotionScope {
   /** True once the message has committed; blocks mounting later are new. */
   mounted: { current: boolean };
-  /** The pending dots' height while they show, so the block replacing them
-   *  grows from there. Cleared once they hide. */
-  pendingHeight: { current: number | null };
 }
 
 const MessageMotionContext = createContext<MessageMotionScope | null>(null);
 
-/** Where a block grows from (px) when it arrives live, or null to render it
- *  settled. Decided on the block's first render. */
-function useBlockEntrance(live: boolean | undefined): number | null {
+/** True when a block arrives live (it fades in), false to render it settled.
+ *  Decided on the block's first render. */
+function useBlockEntrance(live: boolean | undefined): boolean {
   const scope = useContext(MessageMotionContext);
-  const [from] = useState(() => (live && scope?.mounted.current ? scope.pendingHeight.current ?? 0 : null));
-  return from;
+  const [enters] = useState(() => !!live && !!scope?.mounted.current);
+  return enters;
 }
-
-/** Disclosure chevron: one ▸ that turns to point down while open. */
-function Chevron({ open, style }: { open: boolean; style?: React.CSSProperties }) {
-  return (
-    <motion.span
-      aria-hidden
-      initial={false}
-      animate={{ rotate: open ? 90 : 0 }}
-      transition={SPRING.snappy}
-      style={{ display: 'inline-block', fontSize: 'var(--fs-2xs)', color: 'var(--term-faint)', flexShrink: 0, ...style }}
-    >
-      ▸
-    </motion.span>
-  );
-}
-
-/** A thought body closing because its block finished, not because the user collapsed it. */
-const THOUGHT_FINISH = { duration: 0.22, ease: EASE.drawer } as const;
-
-const BLOCK_GROW = { duration: 0.2, ease: EASE.out } as const;
-const BLOCK_FADE = { duration: 0.12, ease: 'linear' } as const;
-
-/**
- * Grows `ref` from `from` px to its natural height (200ms ease-out), then
- * releases it. The natural height is measured every frame, so content
- * streaming in meanwhile is neither clipped nor snapped to, and a block that
- * finishes (shrinks) mid-grow is followed down. Hand-written, so it skips
- * itself under reduced motion; the fade stays on the motion root.
- */
-function useGrowFrom(ref: React.RefObject<HTMLElement | null>, from: number | null, ready: boolean) {
-  const reduce = useReducedMotionConfig();
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (from === null || !ready || reduce || !el) return;
-    let done = false;
-    const release = () => {
-      done = true;
-      el.style.height = '';
-      el.style.overflow = '';
-    };
-    el.style.overflow = 'hidden';
-    el.style.height = `${from}px`;
-    const controls = animate(0, 1, {
-      ...BLOCK_GROW,
-      onUpdate: (progress) => {
-        // A skipped animation can report its last frame after completing.
-        if (done) return;
-        if (progress >= 1) return release();
-        el.style.height = '';
-        const to = el.offsetHeight;
-        el.style.height = `${from + (to - from) * progress}px`;
-      },
-      onComplete: release,
-    });
-    return () => {
-      controls.stop();
-      release();
-    };
-  }, [ref, from, ready, reduce]);
-}
-
-interface ThoughtHeaderBase {
-  streaming: boolean;
-  phase?: StreamPhase;
-  /** The body is expanded: the chevron points down. */
-  open: boolean;
-  /** Stable across streamed chunks, so the memoized header skips them. */
-  onToggle: () => void;
-}
-
-// Headers re-render on state changes only (live ↔ done, phase, open), never
-// per streamed thought chunk. Done-state text is passed only once finished.
-
-const CardThoughtHeader = React.memo(function CardThoughtHeader({
-  streaming, phase, open, onToggle, startedAt, clockKey, workText, workFailed, durText, base, suffix,
-}: ThoughtHeaderBase & {
-  startedAt?: number;
-  clockKey?: string;
-  /** Finished with tools: what it did, failures, duration at the right. */
-  workText?: string;
-  workFailed?: number;
-  durText?: string;
-  /** Finished otherwise: "Thought for 4s" and its "· 3 steps" suffix. */
-  base?: string;
-  suffix?: string;
-}) {
-  // Finishing swaps the header in place: spinner → sparkle by scale, the live
-  // label up and out as the summary rises in.
-  return (
-    <div
-      onClick={onToggle}
-      className="t-hover-fg"
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '7px 11px',
-        cursor: 'pointer',
-        userSelect: 'none',
-        color: 'var(--term-muted)',
-      }}
-    >
-      <GlyphSwap glyph={streaming ? 'spinner' : 'sparkle'} justify="center">
-        {streaming ? <CardSpinner /> : <SparkleIcon size={13} color="var(--term-muted)" />}
-      </GlyphSwap>
-      <LabelSwap as="div" k={streaming ? 'live' : 'done'} style={{ flex: 1 }}>
-        {streaming ? (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="term-shimmer" style={{ fontSize: 'var(--fs-md)', fontWeight: 500 }}>
-              {phase === 'working' ? 'Working…' : 'Thinking…'}
-            </span>
-            <LiveTimerLabel active={streaming} startedAt={startedAt} clockKey={clockKey} />
-          </span>
-        ) : workText ? (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-            <span
-              title={workText}
-              style={{ fontSize: 'var(--fs-md)', fontWeight: 500, color: 'var(--term-mid)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-            >
-              {workText}
-            </span>
-            {!!workFailed && (
-              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-danger-text)', flexShrink: 0 }}>
-                · {workFailed} failed
-              </span>
-            )}
-            <span style={{ marginLeft: 'auto', paddingLeft: 4, fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>
-              {durText}
-            </span>
-            <Chevron open={open} />
-          </span>
-        ) : (
-          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 'var(--fs-md)', fontWeight: 500, color: 'var(--term-mid)' }}>{base}</span>
-            {suffix && <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--term-muted)' }}>{suffix}</span>}
-            <Chevron open={open} style={{ marginLeft: 'auto' }} />
-          </span>
-        )}
-      </LabelSwap>
-    </div>
-  );
-});
-
-const TerminalThoughtHeader = React.memo(function TerminalThoughtHeader({
-  streaming, phase, open, onToggle, hasTools, rightMeta,
-}: ThoughtHeaderBase & { hasTools?: boolean; rightMeta?: string }) {
-  return (
-    <LabelSwap as="div" k={streaming ? 'live' : 'done'}>
-      {streaming ? (
-        <div
-          onClick={onToggle}
-          style={{ display: 'flex', alignItems: 'baseline', gap: 7, cursor: 'pointer', userSelect: 'none', color: 'var(--term-muted)' }}
-        >
-          <span aria-hidden style={{ fontFamily: 'var(--font-mono)', color: 'var(--term-accent)', fontSize: 'var(--fs-sm)', flexShrink: 0 }}>❯</span>
-          <span className="term-shimmer">{phase === 'working' ? 'working' : 'thinking'}</span>
-          <span aria-hidden className="agent-caret" />
-        </div>
-      ) : (
-        <div
-          onClick={onToggle}
-          className="t-hover-fg"
-          style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none', color: 'var(--term-muted)' }}
-        >
-          <Chevron open={open} />
-          <span style={{ fontSize: 'var(--fs-2xs)', letterSpacing: 'var(--ls-caps-wide)', textTransform: 'uppercase', color: 'var(--term-muted)', fontWeight: 500, flexShrink: 0 }}>
-            {hasTools ? 'working' : 'thinking'}
-          </span>
-          <span aria-hidden style={{ flex: 1, borderTop: '1px dotted var(--term-line)', transform: 'translateY(1px)' }} />
-          {rightMeta && (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--term-muted)', flexShrink: 0 }}>{rightMeta}</span>
-          )}
-        </div>
-      )}
-    </LabelSwap>
-  );
-});
-
-const PlainThoughtHeader = React.memo(function PlainThoughtHeader({
-  streaming, phase, open, onToggle, doneLabel,
-}: ThoughtHeaderBase & { doneLabel?: string }) {
-  // The live dot shows while streaming unless the body is open; otherwise the
-  // chevron, which turns rather than swapping glyphs.
-  const liveDot = streaming && !open;
-  return (
-    <div
-      onClick={onToggle}
-      style={{
-        cursor: 'pointer',
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: 7,
-        fontSize: 'var(--fs-sm)',
-        color: 'var(--term-muted)',
-        fontFamily: 'var(--ui-font)',
-        userSelect: 'none',
-      }}
-      className="t-hover-fg"
-    >
-      <GlyphSwap glyph={liveDot ? 'dot' : 'chevron'} style={{ width: 8, alignSelf: liveDot ? 'center' : undefined }}>
-        {liveDot ? (
-          <span aria-hidden style={{ display: 'inline-flex' }}>
-            <span className="term-dot-i term-dot-i--run" />
-          </span>
-        ) : (
-          <Chevron open={open} />
-        )}
-      </GlyphSwap>
-      <LabelSwap k={streaming ? 'live' : 'done'}>
-        {streaming
-          ? <span className="term-shimmer">{phase === 'working' ? 'working' : 'thinking'}</span>
-          : <span>{doneLabel}</span>}
-      </LabelSwap>
-    </div>
-  );
-});
 
 /** Step-list renderer for Codex reasoning summaries (split by \n). */
 /** Strip lightweight Markdown formatting (bold, italic, code) so step text renders as plain text. */
@@ -564,7 +321,7 @@ function CodexStepList({ text, streaming }: { text: string; streaming?: boolean 
         return (
           <div key={i} style={{ display: 'flex', alignItems: 'baseline', gap: 5 }}>
             <span style={{ opacity: done ? 0.5 : 1, fontSize: 'var(--fs-xs)' }}>
-              {done ? '✓' : '●'}
+              {done ? <CheckIcon size="sm" style={{ verticalAlign: 'text-bottom' }} /> : '●'}
             </span>
             <span style={{ opacity: done ? 0.7 : 1 }}>
               {stripInlineMarkdown(part)}
@@ -609,376 +366,73 @@ export function TermThoughtBlock({
   text,
   streaming,
   phase,
-  children,
-  toolCount,
   runtimeId,
   durationMs,
   startedAt,
   endedAt,
-  clockKey,
   segments,
   subagents,
-  tools,
-  initialMode,
 }: {
-  text: string;
+  text?: string;
   streaming?: boolean;
   phase?: StreamPhase;
-  children?: React.ReactNode;
-  toolCount?: number;
   runtimeId?: string | null;
   /** Fallback duration (e.g. tool-span of the run) for hydrated turns. */
   durationMs?: number;
-  /** Durable activity window (backend clock, see agentBlockTiming). The live
-   *  timer counts from `startedAt`, so remounts, reloads and other windows
-   *  agree; with `endedAt` too it also gives the finished duration. */
+  /** Durable activity window (backend clock, see agentBlockTiming). With
+   *  `endedAt` too it gives the finished duration. */
   startedAt?: number;
   endedAt?: number;
-  /** Backend clock key (the assistant message id) for the live timer. */
-  clockKey?: string;
-  /** When provided, the body renders these interleaved chunks instead of
-   *  `text` + `children` (which are then only used for the header label). */
+  /** When provided, the run renders these interleaved chunks instead of `text`. */
   segments?: readonly ThoughtSegment[];
   /** Roster for tool groups rendered from `segments`. */
   subagents?: readonly SubagentInfo[];
-  /** Tools this block ran, for the card header's work summary. Defaults to
-   *  the tools inside `segments`. */
-  tools?: readonly ToolCallState[];
-  /** Initial user-mode override — used by the dev specimen to show an
-   *  expanded body statically. Live rendering leaves this unset. */
-  initialMode?: ThoughtMode;
 }) {
-  // Default mode: tail while streaming, collapsed once finished.
-  // User clicks cycle: tail/collapsed → expanded → (streaming ? tail : collapsed).
-  const [userMode, setUserMode] = useState<ThoughtMode | null>(initialMode ?? null);
-  const tailRef = useRef<HTMLDivElement | null>(null);
-  const expandedRef = useRef<HTMLDivElement | null>(null);
-  const expandedStickyRef = useRef(true);
-  const [expandedScrollable, setExpandedScrollable] = useState(false);
   const liveElapsed = useThinkingTimer(streaming);
-  const variant = useAgentBlockStyle();
-  const workLine = useMetaChatDecorations()?.workLine;
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const hasContent = !!(text || children || segments?.length);
-  // A block that starts streaming while its message is on screen grows in
-  // (from the pending dots it replaces); one already there renders settled.
-  const enterFrom = useBlockEntrance(streaming);
-  useGrowFrom(rootRef, enterFrom, hasContent);
+  // A block that starts streaming while its message is on screen fades in;
+  // one already there renders settled.
+  const enters = useBlockEntrance(streaming);
+  if (!text && !segments?.length) return null;
 
-  // Once streaming flips false, drop any sticky 'tail' override so the block
-  // auto-collapses to 0 rows. 'expanded' is preserved (user is reading).
-  useEffect(() => {
-    if (!streaming && userMode === 'tail') setUserMode(null);
-  }, [streaming, userMode]);
-
-  const mode: ThoughtMode = userMode ?? (streaming ? 'tail' : 'collapsed');
-  const showBody = mode === 'tail' || mode === 'expanded';
-  // The mode the body last showed in. A hiding tail is the block finishing;
-  // a hiding expanded body is the user collapsing it.
-  const shownModeRef = useRef<ThoughtMode>(mode);
-  useLayoutEffect(() => {
-    if (showBody) shownModeRef.current = mode;
-  });
-  const finishing = shownModeRef.current === 'tail';
-
-  // Stable while chunks stream (mode and streaming change rarely), so the
-  // memoized headers skip them.
-  const handleToggle = useCallback(() => {
-    if (mode === 'expanded') {
-      // Expanded → tail (still streaming) or collapsed (done).
-      setUserMode(streaming ? 'tail' : 'collapsed');
-    } else {
-      // Tail or collapsed → expanded.
-      expandedStickyRef.current = true;
-      setUserMode('expanded');
-    }
-  }, [mode, streaming]);
-
-  useLayoutEffect(() => {
-    const el = expandedRef.current;
-    if (mode !== 'expanded' || !el) return;
-    const measure = () => setExpandedScrollable(el.scrollHeight > el.clientHeight);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(el);
-    for (const child of el.children) observer.observe(child);
-    return () => observer.disconnect();
-  }, [mode, text, segments, children, variant]);
-
-  // Pin tail-mode scroll to the bottom as new tokens arrive. `segments`
-  // changes identity when cluster content grows (new tool rows), and the
-  // plain variant passes its tool groups as `children`.
-  useEffect(() => {
-    if (mode === 'tail' && tailRef.current) {
-      tailRef.current.scrollTop = tailRef.current.scrollHeight;
-    }
-    if (mode === 'expanded' && streaming && expandedStickyRef.current && expandedRef.current) {
-      expandedRef.current.scrollTop = expandedRef.current.scrollHeight;
-    }
-  }, [text, mode, streaming, segments, children]);
-
-  // Tool rows and their headers grow in over several frames after the render
-  // that added them, so a pin taken then lands short and the live row stays
-  // below the tail. Re-pin whenever the content itself resizes.
-  useEffect(() => {
-    const content = contentRef.current;
-    const viewport = mode === 'tail' ? tailRef.current : mode === 'expanded' && streaming ? expandedRef.current : null;
-    if (!content || !viewport || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => {
-      if (mode === 'expanded' && !expandedStickyRef.current) return;
-      viewport.scrollTop = viewport.scrollHeight;
-    });
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [mode, streaming, hasContent]);
-
-  if (!hasContent) return null;
-
-  // Pure reasoning → "thought for 12s". Any tool activity → "worked for".
   // Duration is the durable activity window when the blocks carry it;
   // otherwise (legacy turns) the mount-scoped live timer when this block
   // streamed here, or the tool-span for hydrated turns.
-  const hasTools = (toolCount ?? 0) > 0;
   const dur = activityWindowMs(startedAt, endedAt) ?? liveElapsed ?? durationMs;
-  const codexStepCount = runtimeId === 'codex'
-    ? text.split('\n').filter((s) => s.trim().length > 0).length
-    : 0;
-  const base = dur != null
-    ? `${hasTools ? 'worked' : 'thought'} for ${formatDurationMs(dur)}`
-    : (hasTools ? 'worked' : 'thoughts');
-  const suffix = hasTools
-    ? ` · ${toolCount} tool ${toolCount === 1 ? 'call' : 'calls'}`
-    : codexStepCount > 0
-      ? ` · ${codexStepCount} ${codexStepCount === 1 ? 'step' : 'steps'}`
-      : '';
-  const doneLabel = `${base}${suffix}`;
 
-  const thoughtProse = (chunk: string, chunkStreaming: boolean | undefined, key?: string) =>
-    runtimeId === 'codex' ? (
-      <CodexStepList key={key} text={chunk} streaming={chunkStreaming} />
-    ) : (
-      <MarkdownContent
-        key={key}
-        text={chunk}
-        size="xs"
-        style={thoughtProseVars}
-        className="[&_a]:underline"
-      />
-    );
-
-  // ── line chrome (W2): one disclosure line, the same box live and settled.
-  if (variant === 'line') {
-    const items: LineRunItem[] = segments
-      ? segments.flatMap((seg): LineRunItem[] => (seg.kind === 'text'
-        ? [{ kind: 'text', key: seg.key, text: seg.text }]
-        : visibleGroupTools(seg.tools, subagents).map((tool) => ({ kind: 'tool', key: tool.id, tool }))))
-      : text ? [{ kind: 'text', key: 'thought', text }] : [];
-    // Only hidden plumbing tools and no thought: nothing to say once settled.
-    if (!streaming && items.length === 0 && !(children && !segments)) return null;
+  const thoughtProse = (chunk: string, chunkStreaming: boolean | undefined, key?: string) => {
+    if (runtimeId === 'codex') return <CodexStepList key={key} text={chunk} streaming={chunkStreaming} />;
+    const prose = { text: chunk, size: 'xs', style: thoughtProseVars, className: '[&_a]:underline' } as const;
+    const settled = <MarkdownContent key={key} {...prose} />;
+    if (!chunkStreaming || !streamingMarkdownBlocksEnabled()) return settled;
+    // The streaming segment re-parses at the answer's cadence (MO-18), not on
+    // every commit; it takes no character fade, which stays the answer's.
     return (
-      <LineRun
-        items={items}
-        live={!!streaming}
-        phase={phase}
-        startedAt={startedAt}
-        durationMs={dur}
-        subagents={subagents}
-        renderProse={thoughtProse}
-        extraBody={segments ? undefined : children}
-        initialOpen={initialMode === 'expanded'}
-        enter={enterFrom !== null}
-        kind="thought"
-      />
-    );
-  }
-
-  const lastTextSegKey = segments
-    ? [...segments].reverse().find((s) => s.kind === 'text')?.key
-    : undefined;
-  // The newest tool group stays open while the block is live: folding it the
-  // moment its tools finish shrank the card before the answer had arrived.
-  // It folds with the rest of the body when the block finishes.
-  const lastToolSegKey = segments
-    ? [...segments].reverse().find((s) => s.kind === 'tools')?.key
-    : undefined;
-
-  const bodyContent = segments ? (
-    segments.map((seg) =>
-      seg.kind === 'text' ? (
-        thoughtProse(seg.text, streaming && seg.key === lastTextSegKey, seg.key)
-      ) : (
-        <ToolCallGroup
-          key={seg.key}
-          tools={seg.tools}
-          defaultExpanded={seg.tools.some((t) => isRunningStatus(t.status))}
-          holdOpen={!!streaming && seg.key === lastToolSegKey}
-          subagents={subagents}
-          receipts={false}
-        />
-      ),
-    )
-  ) : (
-    <>
-      {text ? thoughtProse(text, streaming) : null}
-      {children}
-    </>
-  );
-
-  const body = (ref: React.Ref<HTMLDivElement>, tail: boolean, chrome?: React.CSSProperties) => (
-    <div
-      ref={ref}
-      tabIndex={!tail && expandedScrollable ? 0 : undefined}
-      role={!tail && expandedScrollable ? 'region' : undefined}
-      aria-label={!tail && expandedScrollable ? 'Activity details' : undefined}
-      onScroll={tail ? undefined : (event) => {
-        const el = event.currentTarget;
-        // Nested tool lists also scroll; only this activity viewport controls
-        // whether newly streamed content follows the bottom.
-        if (event.target !== el) return;
-        expandedStickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
-      }}
-      style={{
-        ...(chrome ?? {
-          paddingLeft: 10,
-          marginLeft: 2,
-          borderLeft: '1px solid var(--term-line)',
-          color: 'var(--term-muted)',
-          lineHeight: 1.55,
-          marginTop: 4,
-        }),
-        ...(tail ? { maxHeight: THOUGHT_TAIL_MAX_HEIGHT, overflow: 'hidden' } : null),
-        ...(!tail ? { maxHeight: 'min(60vh, 480px)', overflowY: 'auto' } : null),
-      }}
-    >
-      {/* Measured by the tail pin: its height tracks the content, uncapped. */}
-      <div ref={contentRef}>{bodyContent}</div>
-    </div>
-  );
-
-  const bodyRef = mode === 'tail' ? tailRef : expandedRef;
-  const open = mode === 'expanded';
-  const live = !!streaming;
-
-  // Arrival: the whole block grows by height (useGrowFrom) and fades in. The
-  // tail body inside it never animates per streamed chunk; it only opens and
-  // closes as a whole. A settled block keeps a plain root (enterFrom never
-  // changes, so neither does the element type).
-  const root = (children: React.ReactNode, extra?: React.CSSProperties) => {
-    const style: React.CSSProperties = { marginBottom: 8, fontSize: 'var(--fs-sm)', ...extra };
-    return enterFrom === null ? (
-      <div data-agent-block style={style}>{children}</div>
-    ) : (
-      <motion.div ref={rootRef} data-agent-block initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={BLOCK_FADE} style={style}>
-        {children}
-      </motion.div>
+      <React.Suspense key={key} fallback={settled}>
+        <StreamingMarkdownContent {...prose} />
+      </React.Suspense>
     );
   };
-  const bodySlot = (chrome?: React.CSSProperties) => (
-    <Reveal show={showBody} exitTransition={finishing ? THOUGHT_FINISH : undefined}>
-      {body(bodyRef, mode === 'tail', chrome)}
-    </Reveal>
-  );
 
-  // ── 1b · card chrome: hairline square-corner card, spinner/sparkle header,
-  //    hairline-divided serif body. ──
-  if (variant === 'card') {
-    const cardBase = dur != null
-      ? `${hasTools ? 'Worked' : 'Thought'} for ${formatDurationMs(dur)}`
-      : (hasTools ? 'Worked' : 'Thoughts');
-    const cardSuffix = toolCount && toolCount > 0
-      ? `· ${toolCount} tool ${toolCount === 1 ? 'call' : 'calls'}`
-      : codexStepCount > 0
-        ? `· ${codexStepCount} ${codexStepCount === 1 ? 'step' : 'steps'}`
-        : '';
-    // Finished blocks with tools lead with what they did; the duration moves
-    // to the right edge. Computed only once done, never per streamed token.
-    // A window that words its own tools (the Companion's workLine) shows its
-    // line without the duration: next to one tool's name, the block's span
-    // (the reasoning before and after the call) reads as that tool's time.
-    const blockTools = !streaming && hasTools
-      ? ownGroupTools(tools ?? segments?.flatMap((s) => (s.kind === 'tools' ? s.tools : [])) ?? [], subagents)
-      : null;
-    const ownWork = blockTools && workLine ? workLine(blockTools) : null;
-    const work = ownWork ? { text: ownWork, failed: failedToolCount(blockTools ?? []) }
-      : blockTools ? summarizeWork(blockTools) : null;
-    return root(
-        <div style={{ border: '1px solid var(--term-line)', background: 'var(--term-surface)' }}>
-          <CardThoughtHeader
-            streaming={live}
-            phase={phase}
-            open={open}
-            onToggle={handleToggle}
-            startedAt={startedAt}
-            clockKey={clockKey}
-            workText={work?.text || undefined}
-            workFailed={work?.failed}
-            durText={!ownWork && work?.text && dur != null ? formatDurationMs(dur) : undefined}
-            base={live ? undefined : cardBase}
-            suffix={live ? undefined : cardSuffix}
-          />
-          {bodySlot({
-            borderTop: '1px solid var(--term-line)',
-            padding: '9px 12px',
-            color: 'var(--term-mid)',
-            lineHeight: 1.6,
-            // Mock spec: thought prose sits a step below the answer body
-            // (12px at the default 15px slider). Scales with the size slider.
-            ['--message-body-size' as never]: 'calc(var(--message-body-size-base, 15px) * 0.8)',
-            ['--message-body-leading' as never]: '1.6',
-          })}
-        </div>,
-      { fontFamily: 'var(--ui-font)' },
-    );
-  }
-
-  // ── 1d · terminal chrome: ❯-prompt streaming row with a blinking caret,
-  //    tracking-caps collapsed row with a dotted leader, accent-rule body. ──
-  if (variant === 'terminal') {
-    const rightMeta = [
-      dur != null ? formatDurationMs(dur) : null,
-      toolCount && toolCount > 0
-        ? `${toolCount} ${toolCount === 1 ? 'tool' : 'tools'}`
-        : codexStepCount > 0
-          ? `${codexStepCount} ${codexStepCount === 1 ? 'step' : 'steps'}`
-          : null,
-    ].filter(Boolean).join(' · ');
-    return root(
-      <>
-        <TerminalThoughtHeader
-          streaming={live}
-          phase={phase}
-          open={open}
-          onToggle={handleToggle}
-          hasTools={live ? undefined : hasTools}
-          rightMeta={live ? undefined : rightMeta}
-        />
-        {bodySlot({
-          marginTop: 5,
-          marginLeft: 3,
-          paddingLeft: 11,
-          borderLeft: '2px solid var(--term-accent-f)',
-          color: 'var(--term-muted)',
-          lineHeight: 1.55,
-          ['--message-body-size' as never]: 'calc(var(--message-body-size-base, 15px) * 0.8)',
-          ['--message-body-leading' as never]: '1.55',
-        })}
-      </>,
-      { fontFamily: 'var(--ui-font)' },
-    );
-  }
-
-  return root(
-    <>
-      <PlainThoughtHeader
-        streaming={live}
-        phase={phase}
-        open={open}
-        onToggle={handleToggle}
-        doneLabel={live ? undefined : doneLabel}
-      />
-      {bodySlot()}
-    </>,
+  // One disclosure line, the same box live and settled.
+  const items: LineRunItem[] = segments
+    ? segments.flatMap((seg): LineRunItem[] => (seg.kind === 'text'
+      ? [{ kind: 'text', key: seg.key, text: seg.text }]
+      : visibleGroupTools(seg.tools, subagents).map((tool) => ({ kind: 'tool', key: tool.id, tool }))))
+    : text ? [{ kind: 'text', key: 'thought', text }] : [];
+  // Only hidden plumbing tools and no thought: nothing to say once settled.
+  if (!streaming && items.length === 0) return null;
+  return (
+    <LineRun
+      items={items}
+      live={!!streaming}
+      phase={phase}
+      startedAt={startedAt}
+      durationMs={dur}
+      subagents={subagents}
+      renderProse={thoughtProse}
+      enter={enters}
+      kind="thought"
+    />
   );
 }
 
@@ -1004,8 +458,8 @@ function PendingDots({ ref }: { ref?: React.Ref<HTMLDivElement> }) {
     <motion.div
       ref={ref}
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: { duration: 0.12 } }}
-      exit={{ opacity: 0, transition: { duration: 0.08 } }}
+      animate={{ opacity: 1, transition: { duration: DUR.brief } }}
+      exit={{ opacity: 0, transition: { duration: DUR.dismiss } }}
       // Leaving dots are no longer a status.
       aria-hidden={present ? undefined : true}
     >
@@ -1016,23 +470,15 @@ function PendingDots({ ref }: { ref?: React.Ref<HTMLDivElement> }) {
 
 /**
  * Where the pending dots sit. When the first content replaces them they fade
- * out in place (popped out of the flow, so nothing jumps) while the arriving
- * block grows from their height. Placed before the message's content.
- * Memoized: streamed chunks re-render its parent, not it.
+ * out in place (popped out of the flow, so nothing jumps). Placed before the
+ * message's content. Memoized: streamed chunks re-render its parent, not it.
  */
 const PendingIndicatorSlot = React.memo(function PendingIndicatorSlot({ show }: { show: boolean }) {
-  const scope = useContext(MessageMotionContext);
-  const dotsRef = useRef<HTMLDivElement>(null);
-  // Record the dots' height when they show; clear it in the commit that hides
-  // them, after the block replacing them has rendered.
-  useLayoutEffect(() => {
-    if (scope) scope.pendingHeight.current = show ? dotsRef.current?.offsetHeight ?? null : null;
-  }, [scope, show]);
   return (
     // The positioned parent popLayout needs for the leaving dots.
     <div style={{ position: 'relative' }}>
       <AnimatePresence initial={false} mode="popLayout">
-        {show && <PendingDots key="pending" ref={dotsRef} />}
+        {show && <PendingDots key="pending" />}
       </AnimatePresence>
     </div>
   );
@@ -1042,19 +488,22 @@ const PendingIndicatorSlot = React.memo(function PendingIndicatorSlot({ show }: 
  * Under a user message of an ordinary chat whose live session read
  * check-in material on an earlier turn (the route's companionTurn.carriedTaint,
  * w3-fix D17): why its tools ask. The agent's own conversation draws its
- * route lines itself (CompanionChatTab's afterMessage decoration).
+ * route lines itself (CompanionChatTab's afterMessage decoration). The route
+ * arrives after the send: under a message sent on screen (`enter`) the note
+ * grows in.
  */
-function CarriedTaintNote({ message }: { message: Pick<ChatMessage, 'role' | 'companionTurn'> }) {
+function CarriedTaintNote({ message, enter }: { message: Pick<ChatMessage, 'role' | 'companionTurn'>; enter: boolean }) {
   const turn = message.role === 'user' ? message.companionTurn : undefined;
-  if (!turn?.carriedTaint || turn.startTaint) return null;
   return (
-    <p
-      role="note"
-      className="terminal-message-turn-note"
-      style={{ margin: '4px 0 0', textAlign: 'right', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}
-    >
-      Anything that would leave this machine asks first: this conversation read check-in material earlier.
-    </p>
+    <RevealOnShow show={!!turn?.carriedTaint && !turn.startTaint} enter={enter}>
+      <p
+        role="note"
+        className="terminal-message-turn-note"
+        style={{ margin: '4px 0 0', textAlign: 'right', fontFamily: 'var(--ui-font)', fontSize: 'var(--fs-sm)', color: 'var(--term-muted)' }}
+      >
+        Anything that would leave this machine asks first: this conversation read check-in material earlier.
+      </p>
+    </RevealOnShow>
   );
 }
 
@@ -1187,7 +636,7 @@ const proseVars: React.CSSProperties = {
   '--tw-prose-bold': 'var(--term-fg)',
   '--tw-prose-code': 'var(--term-fg)',
   '--tw-prose-quotes': 'var(--term-mid)',
-  '--tw-prose-links': 'var(--term-accent)',
+  '--tw-prose-links': 'var(--term-accent-text)',
   '--tw-prose-counters': 'var(--term-mid)',
   '--tw-prose-bullets': 'var(--term-mid)',
 } as React.CSSProperties;
@@ -1197,8 +646,13 @@ const thoughtProseVars: React.CSSProperties = {
   '--tw-prose-headings': 'inherit',
   '--tw-prose-bold': 'inherit',
   '--tw-prose-code': 'inherit',
-  '--tw-prose-links': 'var(--term-accent)',
+  '--tw-prose-links': 'var(--term-accent-text)',
 } as React.CSSProperties;
+
+/** A user message whose @mentions open on click: its chips are buttons. */
+const USER_MENTION_FEATURES: import('../MarkdownContent').MarkdownFeatureProfile = {
+  mentionButtons: true,
+};
 
 /** Feature profile for answer-segment Markdown: enables table controls
  *  (copy / download / fullscreen toolbar + auto-measure-then-lock column
@@ -1266,14 +720,11 @@ function renderSegments(
       chipIdx += 1;
       return <InlineUserInputSegment key={seg.interaction?.interactionId ?? `ui-${seg.requestId}`} requestId={seg.requestId} interaction={seg.interaction} />;
     }
-    const groupKey = seg.tools[0].id;
-    const defaultExpanded = seg.tools.some((t) => isRunningStatus(t.status));
     chipIdx += 1;
     return (
       <ToolCallGroup
-        key={groupKey}
+        key={seg.tools[0].id}
         tools={seg.tools}
-        defaultExpanded={defaultExpanded}
         subagents={subagents}
         live={!!opts?.liveTail && segmentIndex === segments.length - 1}
       />
@@ -1291,25 +742,6 @@ function relevantTools(blocks: readonly AssistantBlock[], toolsById: ReadonlyMap
     const tool = toolsById.get(block.toolCallId);
     return tool ? [tool] : [];
   });
-}
-
-function thinkingToolGroups(blocks: readonly AssistantBlock[], toolsById: ReadonlyMap<string, ToolCallState>): ToolCallState[][] {
-  const groups: ToolCallState[][] = [];
-  let current: ToolCallState[] | null = null;
-  for (const block of blocks) {
-    if (block.kind !== 'tool') {
-      current = null;
-      continue;
-    }
-    const tool = toolsById.get(block.toolCallId);
-    if (!tool) continue;
-    if (!current) {
-      current = [];
-      groups.push(current);
-    }
-    current.push(tool);
-  }
-  return groups;
 }
 
 interface AnswerRunViewProps {
@@ -1360,79 +792,10 @@ const AnswerRunView = React.memo(AnswerRunViewInner, (prev, next) =>
   prev.liveTail === next.liveTail,
 );
 
-interface ThinkingRunViewProps {
-  blocks: AssistantBlock[];
-  tools: ToolCallState[];
-  streaming: boolean;
-  subagents?: readonly SubagentInfo[];
-  runtimeId?: string | null;
-  /** Durable activity window and clock key, forwarded to TermThoughtBlock. */
-  startedAt?: number;
-  endedAt?: number;
-  clockKey?: string;
-}
-
-function ThinkingRunViewInner({
-  blocks, tools, streaming, subagents, runtimeId, startedAt, endedAt, clockKey,
-}: ThinkingRunViewProps) {
-  const toolsById = useMemo(() => toolMap(tools), [tools]);
-  const text = useMemo(() => thinkingRunRawText(blocks), [blocks]);
-  const groups = useMemo(() => thinkingToolGroups(blocks, toolsById), [blocks, toolsById]);
-  const groupedTools = useMemo(() => groups.flat(), [groups]);
-  const toolCount = useMemo(() => ownGroupTools(groupedTools, subagents).length, [groupedTools, subagents]);
-  const toolsActive = tools.some((t) => isRunningStatus(t.status));
-  // Hydrated turns have no live thinking timer; the run's tool-call span is
-  // the best available duration approximation. Keep the block live while
-  // tools still run so the timer covers thinking + tool work, not thought only.
-  const spanMs = useMemo(() => toolSpanMs(tools), [tools]);
-  return (
-    <>
-      <TermThoughtBlock
-        text={text}
-        streaming={streaming || toolsActive}
-        phase={streaming ? 'thinking' : toolsActive ? 'working' : 'done'}
-        toolCount={toolCount}
-        runtimeId={runtimeId}
-        durationMs={spanMs}
-        startedAt={startedAt}
-        endedAt={endedAt}
-        clockKey={clockKey}
-        tools={groupedTools}
-        subagents={subagents}
-      >
-        {groups.length > 0
-          ? groups.map((group) => (
-              <ToolCallGroup
-                key={group[0].id}
-                tools={group}
-                defaultExpanded={group.some((t) => isRunningStatus(t.status))}
-                subagents={subagents}
-                receipts={false}
-              />
-            ))
-          : null}
-      </TermThoughtBlock>
-      {/* Outside the block: it collapses once the turn ends. */}
-    </>
-  );
-}
-
-const ThinkingRunView = React.memo(ThinkingRunViewInner, (prev, next) =>
-  sameBlockRefs(prev.blocks, next.blocks) &&
-  sameToolRefs(prev.tools, next.tools) &&
-  prev.streaming === next.streaming &&
-  prev.subagents === next.subagents &&
-  prev.runtimeId === next.runtimeId &&
-  prev.startedAt === next.startedAt &&
-  prev.endedAt === next.endedAt &&
-  prev.clockKey === next.clockKey,
-);
-
-/* ── Agent-run clustering (card / terminal variants) ──
+/* ── Agent-run clustering ──
    Consecutive thinking runs and tool-only answer runs merge into ONE agent
-   block: a single thought header whose body interleaves thought prose and
-   tool groups in stream order. Answer runs with visible text break clusters.
-   The plain variant keeps the historical one-block-per-run rendering. */
+   block: a single thought line whose body interleaves thought prose and
+   tool groups in stream order. Answer runs with visible text break clusters. */
 
 type RenderCluster =
   | { kind: 'agent'; id: string; runs: AssistantRun[] }
@@ -1543,14 +906,13 @@ interface AgentClusterViewProps {
   phase: StreamPhase;
   subagents?: readonly SubagentInfo[];
   runtimeId?: string | null;
-  /** Durable activity window and clock key, forwarded to TermThoughtBlock. */
+  /** Durable activity window, forwarded to TermThoughtBlock. */
   startedAt?: number;
   endedAt?: number;
-  clockKey?: string;
 }
 
 function AgentClusterViewInner({
-  runs, tools, streaming, phase, subagents, runtimeId, startedAt, endedAt, clockKey,
+  runs, tools, streaming, phase, subagents, runtimeId, startedAt, endedAt,
 }: AgentClusterViewProps) {
   const toolsById = useMemo(() => toolMap(tools), [tools]);
   const segments = useMemo(() => {
@@ -1560,8 +922,8 @@ function AgentClusterViewInner({
         if (block.kind === 'thinking') {
           if (!block.rawText) continue;
           const last = out[out.length - 1];
-          // Adjacent thinking blocks are stream fragments of one thought —
-          // concatenate raw (mirrors thinkingRunRawText's '' join).
+          // Adjacent thinking blocks are stream fragments of one thought:
+          // concatenate raw.
           if (last?.kind === 'text') last.text += block.rawText;
           else out.push({ key: block.id, kind: 'text', text: block.rawText });
         } else if (block.kind === 'tool') {
@@ -1575,32 +937,18 @@ function AgentClusterViewInner({
     }
     return out;
   }, [runs, toolsById]);
-  const text = useMemo(
-    () => segments.filter((s) => s.kind === 'text').map((s) => (s as { text: string }).text).join('\n\n'),
-    [segments],
-  );
   const spanMs = useMemo(() => toolSpanMs(tools), [tools]);
-  const segmentTools = useMemo(
-    () => segments.flatMap((s) => (s.kind === 'tools' ? s.tools : [])),
-    [segments],
-  );
   return (
-    <>
-      <TermThoughtBlock
-        text={text}
-        segments={segments}
-        streaming={streaming}
-        phase={phase}
-        toolCount={ownGroupTools(tools, subagents).length}
-        runtimeId={runtimeId}
-        durationMs={spanMs}
-        startedAt={startedAt}
-        endedAt={endedAt}
-        clockKey={clockKey}
-        subagents={subagents}
-      />
-      {/* Outside the block: it collapses once the turn ends. */}
-    </>
+    <TermThoughtBlock
+      segments={segments}
+      streaming={streaming}
+      phase={phase}
+      runtimeId={runtimeId}
+      durationMs={spanMs}
+      startedAt={startedAt}
+      endedAt={endedAt}
+      subagents={subagents}
+    />
   );
 }
 
@@ -1621,8 +969,7 @@ const AgentClusterView = React.memo(AgentClusterViewInner, (prev, next) =>
   prev.subagents === next.subagents &&
   prev.runtimeId === next.runtimeId &&
   prev.startedAt === next.startedAt &&
-  prev.endedAt === next.endedAt &&
-  prev.clockKey === next.clockKey,
+  prev.endedAt === next.endedAt,
 );
 
 function LegacyAssistantBody({
@@ -1660,7 +1007,7 @@ interface BlockAssistantRunsProps {
 }
 
 /**
- * The assistant body. In the line chrome a finished turn folds its work into
+ * The assistant body. A finished turn folds its work into
  * one LineWorkFold row above the final answer (workFold.splitFinishedTurn):
  * once the turn is over, not just its visible answer (`turnActive`), the answer
  * has finished revealing and no background agent it started still runs.
@@ -1671,13 +1018,12 @@ function BlockAssistantBody({ turnActive, turnDurationMs, ...props }: BlockAssis
   turnDurationMs?: number;
 }) {
   const { m, showThoughts, subagents, onSmoothingChange } = props;
-  const variant = useAgentBlockStyle();
   const [smoothing, setSmoothing] = useState(false);
   const reportSmoothing = useCallback((isSmoothing: boolean) => {
     setSmoothing(isSmoothing);
     onSmoothingChange?.(isSmoothing);
   }, [onSmoothingChange]);
-  const settled = variant === 'line' && !turnActive && !smoothing && !subagents?.some(isSubagentActive);
+  const settled = !turnActive && !smoothing && !subagents?.some(isSubagentActive);
   const split = useMemo(
     () => (settled ? splitFinishedTurn(m.blocks, m.toolCalls, showThoughts) : null),
     [settled, m.blocks, m.toolCalls, showThoughts],
@@ -1715,15 +1061,11 @@ function BlockAssistantRuns({
 }: BlockAssistantRunsProps) {
   const runs = useMemo(() => splitAssistantRuns(m.blocks), [m.blocks]);
   const byId = useMemo(() => toolMap(m.toolCalls), [m.toolCalls]);
-  const variant = useAgentBlockStyle();
   const clusters = useMemo(
-    () =>
-      variant === 'plain'
-        ? runs.map((run): RenderCluster => ({ kind: 'run', run }))
-        // With thoughts hidden there is no agent block to join; keep tools
-        // under the prose that introduced them.
-        : clusterAgentRuns(showThoughts ? detachEdgeTools(runs, byId) : runs),
-    [runs, variant, showThoughts, byId],
+    // With thoughts hidden there is no agent block to join; keep tools
+    // under the prose that introduced them.
+    () => clusterAgentRuns(showThoughts ? detachEdgeTools(runs, byId) : runs),
+    [runs, showThoughts, byId],
   );
   // Backward scans (no array copy). `runs` is rebuilt every chunk as blocks
   // grow, so the old [...runs].reverse().find() copied+reversed on every
@@ -1808,7 +1150,6 @@ function BlockAssistantRuns({
               runtimeId={runtimeId}
               startedAt={activity.startedAt}
               endedAt={activity.endedAt}
-              clockKey={m.id}
             />
           );
         }
@@ -1817,22 +1158,8 @@ function BlockAssistantRuns({
         if (run.kind === 'image') {
           return <ImageBlockView key={run.id} blocks={run.blocks} />;
         }
-        if (run.kind === 'thinking') {
-          if (!showThoughts) return null;
-          const activity = activityWindow(run.blocks, byId, nextBlock);
-          return (
-            <ThinkingRunView
-              key={run.id}
-              blocks={run.blocks}
-              tools={tools}
-              streaming={run.id === liveThinkingId}
-              subagents={subagents}
-              runtimeId={runtimeId}
-              startedAt={activity.startedAt}
-              endedAt={activity.endedAt}
-              clockKey={m.id}
-            />
-          );
+        if (run.kind === 'blocks') {
+          return <ChatBlocksView key={run.id} blocks={run.blocks} messageId={m.id} />;
         }
         return (
           <AnswerRunView
@@ -1857,10 +1184,11 @@ function BlockAssistantRuns({
 // line-height so it tracks the (slider-driven) message font size.
 const USER_COLLAPSE_MAX_LINES = 8;
 
-// The user bubble's background — kept in sync with `.terminal-message-user`
-// (index.css) so the collapse gradient fades into the bubble instead of a
-// flat neutral.
-const USER_BUBBLE_BG = 'var(--term-user-bubble-bg)';
+// A collapsed message fades out at its clamp instead of cutting off. A mask
+// on the clamped content, not a gradient of the bubble's colour painted over
+// it: the bubble is a translucent lift over whatever it sits on
+// (--term-user-bubble-bg), so there is no one colour to fade into.
+const COLLAPSE_FADE = 'linear-gradient(to bottom, black calc(100% - 2.6em), transparent)';
 
 /** "Show more" under a long user message, and the plan messages' Show toggles. */
 const USER_TEXT_TOGGLE_STYLE: React.CSSProperties = {
@@ -1873,6 +1201,83 @@ const USER_TEXT_TOGGLE_STYLE: React.CSSProperties = {
   fontSize: 'var(--fs-md)',
   letterSpacing: 'var(--ls-wide)',
 };
+
+/**
+ * The long-message height tween (TR-18), shared by Show more and a review
+ * prompt's Show all: the body switches between a short form `shutHeight()`
+ * tall and its full height. Call the returned `measure` on the click, before
+ * `expanded` changes: it reads the height to start from, or returns false when
+ * nothing will tween (no short height yet, reduced motion). A tween that
+ * shuts calls `onShut` when it ends, so the short form can take over then.
+ */
+function useToggleHeightTween(
+  contentRef: React.RefObject<HTMLDivElement | null>,
+  expanded: boolean,
+  shutHeight: () => number | null,
+  onShut: () => void,
+): () => boolean {
+  const reduceMotion = useReducedMotionConfig() ?? false;
+  /** The height a toggle starts from, measured on the click. */
+  const toggleFromRef = useRef<number | null>(null);
+  const heightMotionRef = useRef<{ stop: () => void } | null>(null);
+
+  const measure = () => {
+    const el = contentRef.current;
+    heightMotionRef.current?.stop();
+    heightMotionRef.current = null;
+    const from = el && shutHeight() != null && !reduceMotion ? el.getBoundingClientRect().height : null;
+    toggleFromRef.current = from;
+    return from !== null;
+  };
+
+  // Open 260ms / shut 160ms. Hand-written (skipped under reduced motion).
+  // The first frame lands in the click's own commit, 1px past the start, so
+  // the transcript height changes there and TPane leaves follow mode, as it
+  // did when the clamp just snapped. Opening then scrolls the text into view;
+  // shutting scrolls nothing back.
+  useLayoutEffect(() => {
+    const el = contentRef.current;
+    const from = toggleFromRef.current;
+    toggleFromRef.current = null;
+    if (!el) return;
+    const smooth = !reduceMotion && !MotionGlobalConfig.skipAnimations;
+    const clampHeight = shutHeight();
+    if (from === null || clampHeight == null) {
+      if (expanded) revealOpened(el, smooth);
+      return;
+    }
+    const to = expanded ? el.scrollHeight : clampHeight;
+    const start = expanded ? from + 1 : Math.max(clampHeight, from - 1);
+    el.style.overflow = 'hidden';
+    el.style.height = `${start}px`;
+    // Written by hand, with a guard: an element animation can write its last
+    // frame after onComplete, which would leave a fixed height behind.
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      heightMotionRef.current = null;
+      el.style.height = '';
+      el.style.overflow = '';
+      if (!expanded) onShut();
+      // At the end of the transcript there was no room to scroll into until now.
+      else revealOpened(el, smooth);
+    };
+    heightMotionRef.current = animate(start, to, {
+      duration: expanded ? DUR.expand : DUR.collapse,
+      ease: EASE.drawer,
+      onUpdate: (h) => {
+        if (!done) el.style.height = `${h}px`;
+      },
+      onComplete: finish,
+    });
+    if (expanded) revealOpened(el, smooth, el.getBoundingClientRect().top + to);
+    // The short height is read, not watched: a re-measure must not restart this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded]);
+  useEffect(() => () => heightMotionRef.current?.stop(), []);
+  return measure;
+}
 
 /**
  * Clamps long user message bodies to USER_COLLAPSE_MAX_LINES with a bottom
@@ -1895,58 +1300,14 @@ function CollapsibleUserText({
   // The clamp style is on. Expanding drops it at once; collapsing keeps it
   // off until the height has come down to it.
   const [clamping, setClamping] = useState(true);
-  const reduceMotion = useReducedMotionConfig() ?? false;
-  /** The height a toggle starts from, measured on the click. */
-  const toggleFromRef = useRef<number | null>(null);
-  const heightMotionRef = useRef<{ stop: () => void } | null>(null);
+  const measure = useToggleHeightTween(contentRef, expanded, () => clampHeight, () => setClamping(true));
 
   const toggle = () => {
-    const el = contentRef.current;
-    heightMotionRef.current?.stop();
-    heightMotionRef.current = null;
-    const from = el && clampHeight != null && !reduceMotion ? el.getBoundingClientRect().height : null;
-    toggleFromRef.current = from;
+    const tweens = measure();
     const next = !expanded;
     setExpanded(next);
-    if (next || from === null) setClamping(!next);
+    if (next || !tweens) setClamping(!next);
   };
-
-  // Show more 260ms / Show less 160ms. Hand-written (skipped under reduced
-  // motion). The first frame lands in the click's own commit, 1px past the
-  // start, so the transcript height changes there and TPane leaves follow
-  // mode, as it did when the clamp just snapped.
-  useLayoutEffect(() => {
-    const el = contentRef.current;
-    const from = toggleFromRef.current;
-    toggleFromRef.current = null;
-    if (!el || from === null || clampHeight == null) return;
-    const to = expanded ? el.scrollHeight : clampHeight;
-    const start = expanded ? from + 1 : Math.max(clampHeight, from - 1);
-    el.style.overflow = 'hidden';
-    el.style.height = `${start}px`;
-    // Written by hand, with a guard: an element animation can write its last
-    // frame after onComplete, which would leave a fixed height behind.
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      heightMotionRef.current = null;
-      el.style.height = '';
-      el.style.overflow = '';
-      if (!expanded) setClamping(true);
-    };
-    heightMotionRef.current = animate(start, to, {
-      duration: expanded ? DUR.expand : DUR.collapse,
-      ease: EASE.drawer,
-      onUpdate: (h) => {
-        if (!done) el.style.height = `${h}px`;
-      },
-      onComplete: finish,
-    });
-    // clampHeight is read, not watched: a re-measure must not restart this.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded]);
-  useEffect(() => () => heightMotionRef.current?.stop(), []);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -1981,27 +1342,18 @@ function CollapsibleUserText({
       <div
         ref={contentRef}
         id={contentId}
-        style={
-          collapsed && clamping && clampHeight != null
-            ? { position: 'relative', maxHeight: clampHeight, overflow: 'hidden' }
-            : { position: 'relative' }
-        }
+        style={{
+          position: 'relative',
+          // The fade lasts as long as the message is collapsed, the clamp only
+          // while the height has come down to it (the disclosure tweens one
+          // and not the other).
+          ...(collapsed ? { maskImage: COLLAPSE_FADE, WebkitMaskImage: COLLAPSE_FADE } : null),
+          ...(collapsed && clamping && clampHeight != null
+            ? { maxHeight: clampHeight, overflow: 'hidden' }
+            : null),
+        }}
       >
         {children}
-        {collapsed && (
-          <div
-            aria-hidden
-            style={{
-              position: 'absolute',
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: '2.6em',
-              pointerEvents: 'none',
-              background: `linear-gradient(to bottom, transparent, ${USER_BUBBLE_BG})`,
-            }}
-          />
-        )}
       </div>
       {overflowing && (
         <button
@@ -2019,6 +1371,44 @@ function CollapsibleUserText({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * A plan's review prompt: its instruction paragraph, with the peers' answers
+ * behind Show all. It opens and shuts with Show more's height tween; shutting
+ * keeps the whole text until the height has come down to the paragraph's.
+ */
+function ReviewPromptText({ text, head, renderText }: {
+  text: string;
+  head: string;
+  renderText: (text: string) => React.ReactNode;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [whole, setWhole] = useState(false);
+  /** The paragraph's height, measured while it shows alone: where Show less comes down to. */
+  const headHeightRef = useRef<number | null>(null);
+  const measure = useToggleHeightTween(bodyRef, open, () => headHeightRef.current, () => setWhole(false));
+  const toggle = () => {
+    if (!whole && bodyRef.current) headHeightRef.current = bodyRef.current.getBoundingClientRect().height;
+    const tweens = measure();
+    setOpen(!open);
+    if (!open || !tweens) setWhole(!open);
+  };
+  return (
+    <>
+      <div ref={bodyRef}>{renderText(whole ? text : head)}</div>
+      <button
+        type="button"
+        className="t-hover-fg t-user-text-toggle"
+        aria-expanded={open}
+        onClick={(e) => { e.stopPropagation(); toggle(); }}
+        style={USER_TEXT_TOGGLE_STYLE}
+      >
+        {open ? 'Show less' : 'Show all'}
+      </button>
+    </>
   );
 }
 
@@ -2056,6 +1446,15 @@ function ErrorTail({
   const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [testDetail, setTestDetail] = useState<string | undefined>();
   const [confirmRerun, setConfirmRerun] = useState(false);
+  // Keep current result hands the keyboard back to Run again, in the commit
+  // that removes the confirmation (ST-10).
+  const runAgainRef = useRef<HTMLButtonElement>(null);
+  const keptRef = useRef(false);
+  useLayoutEffect(() => {
+    if (confirmRerun || !keptRef.current) return;
+    keptRef.current = false;
+    runAgainRef.current?.focus();
+  }, [confirmRerun]);
 
   const runTest = async () => {
     if (!onTestConnection || testState === 'testing') return;
@@ -2067,12 +1466,14 @@ function ErrorTail({
   };
 
   const btnStyle: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 5,
     border: '1px solid var(--term-danger)',
     color: 'var(--term-danger-text)',
     padding: '3px 10px',
     font: '600 var(--fs-sm) var(--ui-font)',
     letterSpacing: 'var(--ls-wide)',
-    cursor: 'pointer',
   };
 
   const isConnection = errorKind === 'connection';
@@ -2110,7 +1511,7 @@ function ErrorTail({
         </span>
         <span style={{ color: 'var(--term-faint)' }}>·</span>
         {planStep && (planStep.retrying ? (
-          <button type="button" data-testid="error-tail-retry" disabled style={{ ...btnStyle, cursor: 'default', opacity: 0.6 }}>
+          <button type="button" data-testid="error-tail-retry" disabled className="t-danger-outline-btn" style={btnStyle}>
             Retrying…
           </button>
         ) : planStep.retry && !isAuth ? (
@@ -2122,7 +1523,7 @@ function ErrorTail({
             className="t-danger-outline-btn"
             style={btnStyle}
           >
-            ↻ retry
+            <RetryIcon size="sm" />retry
           </button>
         ) : (
           <button
@@ -2144,11 +1545,11 @@ function ErrorTail({
             className="t-danger-outline-btn"
             style={btnStyle}
           >
-            {resumable ? '▶ Resume' : inspectOriginal ? checking ? 'Checking original turn…' : 'Check original turn' : '↻ retry'}
+            {resumable ? <><PlayIcon size="sm" />Resume</> : inspectOriginal ? checking ? 'Checking original turn…' : 'Check original turn' : <><RetryIcon size="sm" />retry</>}
           </button>
         )}
         {inspectOriginal && onRunAgain && (
-          <button type="button" disabled={checking} className="t-danger-outline-btn" style={btnStyle}
+          <button ref={runAgainRef} type="button" disabled={checking} className="t-danger-outline-btn" style={btnStyle}
             onClick={(e) => { e.stopPropagation(); setConfirmRerun(true); }}>
             Run again
           </button>
@@ -2160,9 +1561,9 @@ function ErrorTail({
             onClick={(e) => { e.stopPropagation(); void runTest(); }}
             disabled={testState === 'testing'}
             className="t-danger-outline-btn"
-            style={{ ...btnStyle, cursor: testState === 'testing' ? 'default' : 'pointer', opacity: testState === 'testing' ? 0.6 : 1 }}
+            style={btnStyle}
           >
-            {testState === 'testing' ? 'Testing…' : '⚙ Test Connection'}
+            {testState === 'testing' ? 'Testing…' : <><SettingsIcon size="sm" />Test Connection</>}
           </button>
         )}
       </div>
@@ -2185,13 +1586,15 @@ function ErrorTail({
       {inspectOriginal && confirmRerun && !checking && onRunAgain && (
         <div role="group" aria-label="Confirm running again" style={{ marginTop: 8, font: 'var(--fs-sm) var(--ui-font)', color: 'var(--term-fg)' }}>
           <p style={{ margin: '0 0 8px' }}>This sends the same request again and may repeat file changes or other actions. The previous output will stay in this conversation.</p>
-          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); onRunAgain(); }}>Run again anyway</button>
+          {/* The rerun starts a turn, which takes this whole row away: the
+              composer, already there, takes focus first. */}
+          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); focusPaneComposer(e.currentTarget); setConfirmRerun(false); onRunAgain(); }}>Run again anyway</button>
           {' '}
-          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); setConfirmRerun(false); }}>Keep current result</button>
+          <button type="button" className="t-danger-outline-btn" style={btnStyle} onClick={(e) => { e.stopPropagation(); keptRef.current = true; setConfirmRerun(false); }}>Keep current result</button>
         </div>
       )}
       {planStep?.error && (
-        <div role="status" style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-muted)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+        <div role="alert" style={{ marginTop: 6, maxWidth: 720, color: 'var(--term-danger-text)', font: 'var(--fs-sm) var(--ui-font)', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
           Retry failed: {planStep.error}
         </div>
       )}
@@ -2235,7 +1638,6 @@ interface MessageBlockProps {
   onBranch?: () => void;
   copyText: () => string;
   showThoughts: boolean;
-  fontFamily: string;
   density: TerminalDensity;
   usageInfo?: TurnUsageInfo | null;
   isErrorTail?: boolean;
@@ -2244,6 +1646,8 @@ interface MessageBlockProps {
   errorKind?: string;
   errorRecovery?: 'checking' | 'unavailable';
   onRunAgain?: () => void;
+  /** The latest answer's turn ended early or was stopped: its line under the answer offers Continue. */
+  onContinue?: () => void;
   /** Probe backend connectivity ("Test Connection"). Present only when the
    * error is connection/auth class and a cwd/workspace is resolvable. */
   onTestConnection?: () => Promise<{ ok: boolean; detail?: string }>;
@@ -2453,7 +1857,7 @@ const USER_ENTRANCE = {
 const ASSISTANT_ENTRANCE = {
   initial: { opacity: 0 },
   animate: { opacity: 1 },
-  transition: { duration: 0.12, ease: 'linear' },
+  transition: { duration: DUR.brief, ease: 'linear' },
 } as const;
 
 function MessageBlockInner({
@@ -2467,7 +1871,6 @@ function MessageBlockInner({
   onBranch,
   copyText,
   showThoughts,
-  fontFamily,
   density,
   usageInfo,
   isErrorTail,
@@ -2475,6 +1878,7 @@ function MessageBlockInner({
   errorKind,
   errorRecovery,
   onRunAgain,
+  onContinue,
   onTestConnection,
   planStep,
   freshContext,
@@ -2501,12 +1905,28 @@ function MessageBlockInner({
   fresh,
   readOnly,
 }: MessageBlockProps) {
-  const [hover, setHover] = useState(false);
-  // A plan's review prompt shows its instruction line, a synthesis or addendum wake its caption, until opened.
+  // A synthesis or addendum wake shows its caption until opened.
   const [planBodyOpen, setPlanBodyOpen] = useState(false);
+  const [answerOpen, setAnswerOpen] = useState(false);
   const [editText, setEditText] = useState(m.text);
   const editAreaRef = useRef<HTMLTextAreaElement>(null);
   const assistantRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  // Esc and Cancel hand the keyboard back to this message's Edit button, in
+  // the commit that unmounts the field (ST-10). Save starts a turn, which
+  // hides Edit, so TPane gives the composer focus instead.
+  const editCancelledRef = useRef(false);
+  const cancelEdit = () => {
+    editCancelledRef.current = true;
+    onEditCancel?.();
+  };
+  useLayoutEffect(() => {
+    if (editing || !editCancelledRef.current) return;
+    editCancelledRef.current = false;
+    if (editButtonRef.current) editButtonRef.current.focus();
+    else focusPaneComposer(rootRef.current);
+  }, [editing]);
   const isUser = m.role === 'user';
   const decorations = useMetaChatDecorations();
   const reduceMotion = useReducedMotionConfig() ?? false;
@@ -2517,7 +1937,9 @@ function MessageBlockInner({
   // settled. Every new user bubble fades in where it lands, whether it was
   // typed, drained from the queue, steered or picked from the follow-ups.
   const [entrance] = useState(() => (fresh ? (isUser ? USER_ENTRANCE : ASSISTANT_ENTRANCE) : null));
-  const [motionScope] = useState<MessageMotionScope>(() => ({ mounted: { current: false }, pendingHeight: { current: null } }));
+  // Sections that arrive later under it grow in only then (TR-36).
+  const lateEnter = entrance !== null;
+  const [motionScope] = useState<MessageMotionScope>(() => ({ mounted: { current: false } }));
   useLayoutEffect(() => {
     motionScope.mounted.current = true;
   }, [motionScope]);
@@ -2531,6 +1953,7 @@ function MessageBlockInner({
       });
     }
   }, [editing, m.text]);
+  const mentionFeatures = onMentionClick ? USER_MENTION_FEATURES : undefined;
   const userMarkdown = (text: string) => userTextToMarkdown(
     highlightMentions(
       text,
@@ -2575,37 +1998,65 @@ function MessageBlockInner({
               <textarea
                 ref={editAreaRef}
                 className="user-edit-area"
+                aria-label="Edit message"
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
                 onKeyDown={(e) => {
                   if (isImeComposing(e)) return;
-                  if (e.key === 'Escape') { e.preventDefault(); onEditCancel?.(); }
+                  if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); }
                   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                     e.preventDefault();
                     const trimmed = editText.trim();
                     if (trimmed && trimmed !== m.text) onEditSave?.(trimmed);
-                    else onEditCancel?.();
+                    else cancelEdit();
                   }
                 }}
                 spellCheck={false}
               />
               <div className="user-edit-footer">
-                <button className="user-edit-action" onClick={() => onEditCancel?.()}>
+                <button className="user-edit-action" onClick={cancelEdit}>
                   Cancel <kbd>Esc</kbd>
                 </button>
-                <span style={{ flex: 1 }} />
+                <span className="user-edit-hint">Replaces this message and everything after it</span>
                 <button
                   className="user-edit-action"
                   onClick={() => {
                     const trimmed = editText.trim();
                     if (trimmed && trimmed !== m.text) onEditSave?.(trimmed);
-                    else onEditCancel?.();
+                    else cancelEdit();
                   }}
                 >
-                  Save <kbd>{kbd('mod', 'enter')}</kbd>
+                  Resend <kbd>{kbd('mod', 'enter')}</kbd>
                 </button>
               </div>
             </div>
+          </div>
+        ) : m.blockAnswer ? (
+          // An answer to a block a reply showed (show_blocks): the block itself
+          // shows what was picked, so the message is one line, its text a click away.
+          <div className="t-block-answer">
+            <div className="t-block-answer__line">
+              <span className="t-block-answer__mark" aria-hidden>↳</span>
+              <span>{m.blockAnswer.title ? `Answered “${m.blockAnswer.title}”` : 'Answered a block'}</span>
+              <button
+                type="button"
+                className="t-hover-fg t-user-text-toggle"
+                aria-expanded={answerOpen}
+                onClick={() => setAnswerOpen((open) => !open)}
+                style={{ ...USER_TEXT_TOGGLE_STYLE, marginTop: 0 }}
+              >
+                {answerOpen ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {answerOpen && (
+              <div
+                className="terminal-message terminal-message-user"
+                data-density={density}
+                style={{ fontFamily: 'var(--ui-font)', lineHeight: 'var(--message-body-leading)', letterSpacing: 0, color: 'var(--term-fg)', wordBreak: 'break-word' }}
+              >
+                <MarkdownContent text={userMarkdown(m.text)} size="sm" className={isDark ? 'prose-invert' : ''} style={proseVars} />
+              </div>
+            )}
           </div>
         ) : planResult ? (
           <div className="mm-plan-result" title={PLAN_SOURCE_TITLE}>
@@ -2622,15 +2073,15 @@ function MessageBlockInner({
                 {planBodyOpen ? 'Hide' : 'Show'}
               </button>
             </div>
-            {planBodyOpen && (
+            <Reveal show={planBodyOpen}>
               <div
-                className="terminal-message terminal-message-user"
+                className="terminal-message terminal-message-user mm-plan-result__body"
                 data-density={density}
                 style={{ fontFamily: 'var(--ui-font)', lineHeight: 'var(--message-body-leading)', letterSpacing: 0, color: 'var(--term-fg)', wordBreak: 'break-word' }}
               >
                 <MarkdownContent text={userMarkdown(m.text)} size="sm" className={isDark ? 'prose-invert' : ''} style={proseVars} />
               </div>
-            )}
+            </Reveal>
           </div>
         ) : (
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
@@ -2669,25 +2120,22 @@ function MessageBlockInner({
                 size="sm"
                 className={isDark ? 'prose-invert' : ''}
                 style={proseVars}
+                features={mentionFeatures}
               />
             ) : reviewHead !== undefined ? (
-              <>
-                <MarkdownContent
-                  text={userMarkdown(planBodyOpen ? m.text : reviewHead)}
-                  size="sm"
-                  className={isDark ? 'prose-invert' : ''}
-                  style={proseVars}
-                />
-                <button
-                  type="button"
-                  className="t-hover-fg t-user-text-toggle"
-                  aria-expanded={planBodyOpen}
-                  onClick={(e) => { e.stopPropagation(); setPlanBodyOpen((open) => !open); }}
-                  style={USER_TEXT_TOGGLE_STYLE}
-                >
-                  {planBodyOpen ? 'Show less' : 'Show all'}
-                </button>
-              </>
+              <ReviewPromptText
+                text={m.text}
+                head={reviewHead}
+                renderText={(text) => (
+                  <MarkdownContent
+                    text={userMarkdown(text)}
+                    size="sm"
+                    className={isDark ? 'prose-invert' : ''}
+                    style={proseVars}
+                    features={mentionFeatures}
+                  />
+                )}
+              />
             ) : (
               <CollapsibleUserText contentKey={m.text}>
                 <MarkdownContent
@@ -2695,21 +2143,9 @@ function MessageBlockInner({
                   size="sm"
                   className={isDark ? 'prose-invert' : ''}
                   style={proseVars}
+                  features={mentionFeatures}
                 />
               </CollapsibleUserText>
-            )}
-            {m.streaming && (
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: 7,
-                  height: 12,
-                  background: 'var(--term-select)',
-                  marginLeft: 2,
-                  verticalAlign: 'middle',
-                  animation: 'tblink var(--t-loop-fast) infinite',
-                }}
-              />
             )}
           </div>
         </div>
@@ -2731,7 +2167,7 @@ function MessageBlockInner({
             borderRadius: 'var(--term-message-radius, 0px)',
             background: 'transparent',
             color: 'var(--term-fg)',
-            fontFamily,
+            fontFamily: 'var(--ui-font)',
           }}
         >
           <AgentTurnContext.Provider value={agentTurn}>
@@ -2772,12 +2208,15 @@ function MessageBlockInner({
         </div>
       )}
       {!isUser && <SteeringReports reports={m.steeringReports} />}
-      {!isUser && <TurnReceipts tools={m.toolCalls} workspaceId={workspaceId} backendConnectionId={backendConnectionId} />}
+      {!isUser && <TurnReceipts tools={m.toolCalls} workspaceId={workspaceId} backendConnectionId={backendConnectionId} enter={lateEnter} />}
       {!isUser && <MultiModelReceipt tools={m.toolCalls} backendConnectionId={backendConnectionId} readOnly={readOnly} />}
       {/* What the reply was based on: it reads its own store (only where PaneMessageList offers it), so this block's props stay as they are. */}
-      {!isUser && !(m.streaming || hideActions) && <ReplyMemorySources messageId={m.id} settled />}
+      {!isUser && !(m.streaming || hideActions) && <ReplyMemorySources messageId={m.id} settled enter={lateEnter} />}
       {!isUser && workflowRuns && workflowRuns.length > 0 && (
-        <MessageWorkflowRuns runs={workflowRuns} onOpen={onOpenWorkflowRun} />
+        <MessageWorkflowRuns runs={workflowRuns} onOpen={onOpenWorkflowRun} enter={lateEnter} />
+      )}
+      {!isUser && m.turnEnd && !(m.streaming || hideActions || isErrorTail) && (
+        <TurnEndNote mark={m.turnEnd} onContinue={onContinue} />
       )}
       {!isUser && !m.streaming && isErrorTail && (
         <ErrorTail
@@ -2801,16 +2240,13 @@ function MessageBlockInner({
           // next line, instead of holding space (.t-user-msg-actions in
           // index.css). It takes pointers only while its buttons show, so its
           // box never swallows a click or tap meant for that line.
-          <div
-            className="t-user-msg-actions"
-            style={{ display: 'flex', justifyContent: 'flex-end', pointerEvents: hover ? undefined : 'none' }}
-          >
+          <div className="t-user-msg-actions" style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <MessageActions
-              visible={hover}
               time={formatMessageTime(m.createdAt)}
               copyText={copyText}
               onRetry={onRetry}
               onEdit={onEdit}
+              editRef={editButtonRef}
               onBranch={onBranch}
               usageInfo={usageInfo}
             />
@@ -2819,7 +2255,7 @@ function MessageBlockInner({
           // The answer's meta line. Edit belongs to the user's message.
           <MessageActions
             answer
-            visible={hover || (!!pinned && !decorations)}
+            pinned={!!pinned && !decorations}
             restVisible={actionsAtRest}
             time={formatMessageTime(m.createdAt)}
             copyText={copyText}
@@ -2829,18 +2265,9 @@ function MessageBlockInner({
           />
         )
       )}
-      {decorations?.afterMessage ? decorations.afterMessage(m) : <CarriedTaintNote message={m} />}
+      {decorations?.afterMessage ? decorations.afterMessage(m) : <CarriedTaintNote message={m} enter={lateEnter} />}
     </>
   );
-  // mouseover rather than mouseenter: after a tap on a control, a tap on the
-  // text lands inside the message already, where no mouseenter fires.
-  const onMouseOver = (e: React.MouseEvent<HTMLElement>) => {
-    if (hover) return;
-    const control = e.target instanceof Element ? e.target.closest(TAP_CONTROL) : null;
-    if (control && lastInputWasTouch() && e.currentTarget.contains(control)) return;
-    setHover(true);
-  };
-  const onMouseLeave = () => setHover(false);
   // A user message is the containing block of its floating action row.
   const rootStyle: React.CSSProperties = isUser
     ? { marginBottom: 'var(--msg-gap)', position: 'relative' }
@@ -2859,16 +2286,11 @@ function MessageBlockInner({
     <PresenceContext.Provider value={null}>
     <MessageMotionContext.Provider value={motionScope}>
       {entrance ? (
-        <motion.div
-          onMouseOver={onMouseOver}
-          onMouseLeave={onMouseLeave}
-          {...entrance}
-          style={rootStyle}
-        >
+        <motion.div ref={rootRef} {...entrance} style={rootStyle}>
           {body}
         </motion.div>
       ) : (
-        <div onMouseOver={onMouseOver} onMouseLeave={onMouseLeave} style={rootStyle}>
+        <div ref={rootRef} style={rootStyle}>
           {body}
         </div>
       )}
@@ -2934,7 +2356,6 @@ const MessageBlock = React.memo(MessageBlockInner, (prev, next) =>
   prev.index === next.index &&
   prev.isDark === next.isDark &&
   prev.showThoughts === next.showThoughts &&
-  prev.fontFamily === next.fontFamily &&
   prev.density === next.density &&
   !!prev.onRetry === !!next.onRetry &&
   !!prev.onEdit === !!next.onEdit &&
@@ -2945,6 +2366,7 @@ const MessageBlock = React.memo(MessageBlockInner, (prev, next) =>
   prev.errorKind === next.errorKind &&
   prev.errorRecovery === next.errorRecovery &&
   prev.onRunAgain === next.onRunAgain &&
+  !!prev.onContinue === !!next.onContinue &&
   prev.onTestConnection === next.onTestConnection &&
   prev.planStep === next.planStep &&
   !!prev.freshContext === !!next.freshContext &&

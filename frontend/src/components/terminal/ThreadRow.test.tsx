@@ -15,8 +15,9 @@ function makeNode(): ChatNodeState {
 const mockStoreState = {
   treeSelection: new Set<string>(),
   focusedNodeId: null as string | null,
+  /** The thread's root, which the row reads through useStructuralSelector. */
   node: makeNode(),
-  /** What useStructuralSelector reads: the tree's nodes, branches included. */
+  /** What else useStructuralSelector reads: the tree's other nodes, branches included. */
   nodes: {} as Record<string, ChatNodeState>,
   projects: [] as Array<{ id: string; edges: ProjectEdge[] }>,
 };
@@ -32,7 +33,6 @@ vi.mock('../../state/prefs', () => ({
 // select vs. activate. These mocks only need to cover what ThreadRow reads for
 // display (treeSelection / focusedNodeId / projects).
 vi.mock('../../state/chatStore', () => ({
-  useChatNode: () => mockStoreState.node,
   useChatActions: () => ({
     clearTreeSelection: vi.fn(),
   }),
@@ -45,7 +45,7 @@ vi.mock('../../state/chatStore', () => ({
   }),
   useStructuralSelector: (selector: (nodes: Record<string, unknown>) => unknown) => {
     structuralSelectors.push(selector);
-    return selector(mockStoreState.nodes);
+    return selector({ n1: mockStoreState.node, ...mockStoreState.nodes });
   },
 }));
 
@@ -171,6 +171,18 @@ describe('ThreadRow', () => {
       expect(props.onActivate).not.toHaveBeenCalled();
     });
 
+    it('leaves the ⋯ unpressed for a right-click menu and presses it for its own', () => {
+      renderThreadRow();
+      const more = screen.getByRole('button', { name: 'Actions for Root title' });
+      fireEvent.contextMenu(row());
+      expect(screen.getByRole('menu')).toBeTruthy();
+      expect(more.hasAttribute('aria-expanded')).toBe(false);
+      fireEvent.keyDown(window, { key: 'Escape' });
+      fireEvent.click(more);
+      expect(screen.getByRole('menu')).toBeTruthy();
+      expect(more.getAttribute('aria-expanded')).toBe('true');
+    });
+
     it('keeps the current Activity row clear of its ⋯ in card rows', () => {
       mockPrefs.sidebarRowStyle = 'square-full';
       const { rerender } = renderThreadRow({ subtitle: 'Michi', isActive: false });
@@ -179,17 +191,26 @@ describe('ThreadRow', () => {
       expect(row().style.paddingRight).toBe('calc(32px)');
     });
 
-    it('keeps a pinned Activity row\'s star in its column when the row is chosen', () => {
+    it('hangs a pinned card row\'s star in the gutter before the title, where choosing the row leaves it', () => {
       mockPrefs.sidebarRowStyle = 'square-full';
       const tree = { id: 't1', rootNodeId: 'n1', createdAt: 0, lastActiveAt: Date.now(), pinnedAt: 1 };
       const { rerender } = renderThreadRow({ tree, subtitle: 'Michi', isActive: false });
       const star = () => row().querySelector('svg[aria-label="pinned"]') as SVGElement;
-      expect(row().style.paddingRight).toBe('16px');
-      expect(star().style.marginRight).toBe('calc(var(--sb-caret-w, 9px) + 21px)');
-      // The padding takes the ⋯'s 16px, so the star gives the same 16px back.
+      expect(star().style.position).toBe('absolute');
+      expect(star().style.left).toBe('-12px');
+      expect(star().nextElementSibling?.textContent).toBe('Root title');
       rerender({ isActive: true });
-      expect(row().style.paddingRight).toBe('calc(32px)');
-      expect(star().style.marginRight).toBe('calc(var(--sb-caret-w, 9px) + 5px)');
+      expect(star().style.left).toBe('-12px');
+      expect(star().nextElementSibling?.textContent).toBe('Root title');
+    });
+
+    it('keeps a classic row\'s star after the title, in the flow', () => {
+      mockPrefs.sidebarRowStyle = 'classic';
+      const tree = { id: 't1', rootNodeId: 'n1', createdAt: 0, lastActiveAt: Date.now(), pinnedAt: 1 };
+      renderThreadRow({ tree });
+      const star = row().querySelector('svg[aria-label="pinned"]') as SVGElement;
+      expect(star.style.position).toBe('');
+      expect(star.previousElementSibling?.textContent).toBe('Root title');
     });
   });
 
@@ -255,6 +276,61 @@ describe('ThreadRow', () => {
     it('stays mounted at "none" on a read row, so a reply arriving later animates in', () => {
       renderThreadRow();
       expect(dot().dataset.unread).toBe('none');
+    });
+  });
+
+  describe('unread rail (card rows)', () => {
+    const row = () => document.querySelector('[data-sidebar-row="n1"]') as HTMLElement;
+    const rail = () => row().querySelector('[data-rail]') as HTMLElement | null;
+    const unreadRoot = (): ChatNodeState => ({ ...makeNode(), lastAssistantAt: 5, viewedAt: 1 });
+    beforeEach(() => { mockPrefs.sidebarRowStyle = 'square-full'; });
+
+    it('paints the rail green for an unread root, in place of the dot', () => {
+      mockStoreState.node = unreadRoot();
+      renderThreadRow({ isActive: false });
+      expect(rail()!.dataset.rail).toBe('unread');
+      expect(rail()!.style.background).toBe('var(--term-digest)');
+      expect(row().querySelector('.sb-unread-dot')).toBeNull();
+      expect(row().style.fontWeight).toBe('520');
+    });
+
+    it('paints the same green rail for a collapsed thread hiding an unread branch, until it is expanded', () => {
+      mockStoreState.nodes = { b1: { ...makeNode(), nodeId: 'b1', title: 'Branch', lastAssistantAt: 5, viewedAt: 1 } };
+      mockStoreState.projects = [{ id: 'p1', edges: [{ source: 'n1', target: 'b1', kind: 'branch' } as ProjectEdge] }];
+      const { rerender } = renderThreadRow({ isActive: false, hasBranches: true, expanded: false });
+      expect(rail()!.dataset.rail).toBe('unread');
+      expect(rail()!.style.top).toBe('5px');
+      expect(rail()!.style.bottom).toBe('5px');
+      rerender({ isActive: false, hasBranches: true, expanded: true });
+      expect(rail()).toBeNull();
+    });
+
+    it('shows an unread reply over an open pane, and a run over both', () => {
+      mockStoreState.node = unreadRoot();
+      const { rerender } = renderThreadRow({ isActive: false, openState: 'idle' });
+      expect(rail()!.dataset.rail).toBe('unread');
+      rerender({ isActive: false, openState: 'streaming' });
+      expect(rail()!.dataset.rail).toBe('streaming');
+      expect(rail()!.style.background).toBe('var(--term-run)');
+    });
+
+    it('turns the running rail green where it stands when the run ends unread, with no afterglow', () => {
+      const { rerender } = renderThreadRow({ isActive: false, openState: 'streaming' });
+      const running = rail();
+      mockStoreState.node = unreadRoot();
+      rerender({ isActive: false, openState: 'none' });
+      expect(rail()).toBe(running);
+      expect(rail()!.style.background).toBe('var(--term-digest)');
+      expect(rail()!.style.transition).toBe('background-color var(--t-decay) var(--t-ease)');
+      expect(screen.queryByTestId('rail-afterglow')).toBeNull();
+    });
+
+    it('leaves Classic rows to the dot, with no green rail', () => {
+      mockPrefs.sidebarRowStyle = 'classic';
+      mockStoreState.node = unreadRoot();
+      renderThreadRow({ isActive: false });
+      expect(rail()).toBeNull();
+      expect((row().querySelector('.sb-unread-dot') as HTMLElement).dataset.unread).toBe('self');
     });
   });
 
@@ -350,6 +426,86 @@ describe('ThreadRow', () => {
 
     expect(actions.renameTree).not.toHaveBeenCalled();
     expect(screen.getByText('Root title')).toBeTruthy();
+  });
+  describe('state chips (R2: needs you / failed)', () => {
+    const row = () => document.querySelector('[data-sidebar-row="n1"]') as HTMLElement;
+    const chip = () => row().querySelector('.sb-attn') as HTMLElement | null;
+    const rail = () => row().querySelector('[data-rail]') as HTMLElement | null;
+    const waitingRoot = (): ChatNodeState => ({
+      ...makeNode(),
+      status: 'streaming',
+      pendingPermission: { requestId: 'r1', title: 'Run rg', options: [] } as unknown as ChatNodeState['pendingPermission'],
+    });
+    const failedRoot = (): ChatNodeState => ({
+      ...makeNode(), status: 'error', error: 'Agent exited', errorCompletedAt: Date.now() - 1000, viewedAt: 10,
+    });
+
+    it('says a waiting turn needs you, in the waiting hue, and holds its rail still', () => {
+      mockStoreState.node = waitingRoot();
+      renderThreadRow({ isActive: false, openState: 'streaming' });
+      expect(chip()!.textContent).toBe('Needs you');
+      expect(chip()!.dataset.attn).toBe('waiting');
+      expect(chip()!.style.getPropertyValue('--sb-attn-fg')).toBe('var(--term-waiting-text)');
+      // Waiting takes the rail off the run colour and off its pulse.
+      expect(rail()!.dataset.rail).toBe('waiting');
+      expect(rail()!.style.background).toBe('var(--term-waiting)');
+      expect(rail()!.className).toBe('');
+      expect(row().getAttribute('aria-label')).toBe('Root title, needs you');
+    });
+
+    it('says a failed last turn, in danger words, and leaves the rail alone', () => {
+      mockStoreState.node = failedRoot();
+      renderThreadRow({ isActive: false });
+      expect(chip()!.textContent).toBe('Failed');
+      expect(chip()!.style.getPropertyValue('--sb-attn-fg')).toBe('var(--term-danger-text)');
+      expect(rail()).toBeNull();
+      expect(row().getAttribute('aria-label')).toBe('Root title, last turn failed');
+    });
+
+    it('says nothing of a failure the user has already looked at, or an old one', () => {
+      mockStoreState.node = { ...failedRoot(), viewedAt: Date.now() };
+      const { rerender } = renderThreadRow({ isActive: false });
+      expect(chip()).toBeNull();
+      mockStoreState.node = { ...failedRoot(), errorCompletedAt: Date.now() - 30 * 24 * 60 * 60 * 1000 };
+      rerender({});
+      expect(chip()).toBeNull();
+    });
+
+    it('says nothing of the row the user is looking at', () => {
+      mockStoreState.node = failedRoot();
+      mockStoreState.focusedNodeId = 'n1';
+      renderThreadRow();
+      expect(chip()).toBeNull();
+      mockStoreState.focusedNodeId = null;
+    });
+
+    it('carries a collapsed branch\'s state, and hands it back when expanded', () => {
+      mockStoreState.nodes = { b1: { ...makeNode(), nodeId: 'b1', title: 'Branch', status: 'error', error: 'x', errorCompletedAt: Date.now() - 1000, viewedAt: 10 } };
+      mockStoreState.projects = [{ id: 'p1', edges: [{ source: 'n1', target: 'b1', kind: 'branch' } as ProjectEdge] }];
+      const { rerender } = renderThreadRow({ isActive: false, hasBranches: true, expanded: false });
+      expect(chip()!.textContent).toBe('Failed');
+      rerender({ isActive: false, hasBranches: true, expanded: true });
+      expect(chip()).toBeNull();
+    });
+
+    it('shows the stronger of two states below it: one waiting outranks one failed', () => {
+      mockStoreState.nodes = {
+        b1: { ...makeNode(), nodeId: 'b1', status: 'error', error: 'x', errorCompletedAt: Date.now() - 1000, viewedAt: 10 },
+        b2: { ...makeNode(), nodeId: 'b2', status: 'streaming', pendingUserInput: { questions: [{ question: 'which one?' }] } as unknown as ChatNodeState['pendingUserInput'] },
+      };
+      mockStoreState.projects = [{ id: 'p1', edges: [
+        { source: 'n1', target: 'b1', kind: 'branch' } as ProjectEdge,
+        { source: 'n1', target: 'b2', kind: 'branch' } as ProjectEdge,
+      ] }];
+      renderThreadRow({ isActive: false, hasBranches: true, expanded: false });
+      expect(chip()!.textContent).toBe('Needs you');
+    });
+
+    it('leaves a page or job conversation to its own surface', () => {
+      mockStoreState.node = { ...failedRoot(), pageId: 'page-1' };
+      renderThreadRow({ isActive: false });
+      expect(chip()).toBeNull();
+    });
   });
   it.each([{ isComposing: true }, { keyCode: 229 }])('leaves Enter and Esc that end an IME composition to it (%o)', async (ime) => {
     const { actions } = renderThreadRow();

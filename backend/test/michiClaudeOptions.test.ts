@@ -24,6 +24,7 @@ import * as assistantPolicy from '../src/assistant/policy';
 import { closeDb, getDb, initDb } from '../src/services/db';
 import { saveWorkspace } from '../src/services/dbRepository';
 import * as turnTrust from '../src/services/turnTrust';
+import { noteMichiStartedTurn } from '../src/services/turnGuard';
 import * as permissionPolicy from '../src/agents/permissionPolicy';
 import { michiTestHost } from './helpers/michiTestHost';
 import { claudeTestOptions } from './helpers/claudeTestOptions';
@@ -37,7 +38,7 @@ const KEYS = [
   'MICHI_CLAUDE_WAIT_FOR_WARM', 'MICHI_CLAUDE_INIT_TIMEOUT_MS', 'MICHI_APPROVE_TIMEOUT_MS',
   'MICHI_CLAUDE_DISPOSE_TERM_TIMEOUT_MS', 'MICHI_CLAUDE_DISPOSE_KILL_TIMEOUT_MS', 'MICHI_CLAUDE_BARE',
   'MICHI_CLAUDE_STRICT_MCP', 'MICHI_CLAUDE_SUBAGENT_TEXT', 'MICHI_CLAUDE_HUMAN_ORIGIN',
-  'CLAUDE_CLI_BIN',
+  'MICHI_CLAUDE_SESSION_IDLE_TTL_MS', 'CLAUDE_CLI_BIN',
 ] as const;
 type Key = typeof KEYS[number];
 
@@ -63,9 +64,10 @@ const options = () => michiClaudeAdapterOptions(michiTestHost());
 test('limits default to the adapter\'s old constants', () => {
   withEnv();
   assert.deepEqual(options().limits, {
-    maxConcurrent: 15,
+    maxConcurrent: 50,
     pool: { disabled: false, sessionsPerCwd: 2, waitForWarm: true },
     initTimeoutMs: 60_000, approveTimeoutMs: 300_000, disposeTermTimeoutMs: 2000, disposeKillTimeoutMs: 1000,
+    sessionIdleTtlMs: 900_000,
   });
 });
 
@@ -121,6 +123,16 @@ test('the native restore deadline accepts a positive integer up to 2^31 - 1, els
   for (const [value, initTimeoutMs] of rows) {
     withEnv({ MICHI_CLAUDE_INIT_TIMEOUT_MS: value });
     assert.equal(options().limits.initTimeoutMs, initTimeoutMs, JSON.stringify(value));
+  }
+});
+
+test('the idle release TTL takes a non-negative number, 0 keeping every session; anything else is 15 minutes', () => {
+  const rows: Array<[string | undefined, number]> = [
+    [undefined, 900_000], ['60000', 60_000], ['0', 0], ['', 900_000], [' ', 900_000], ['-1', 900_000], ['soon', 900_000],
+  ];
+  for (const [value, sessionIdleTtlMs] of rows) {
+    withEnv({ MICHI_CLAUDE_SESSION_IDLE_TTL_MS: value });
+    assert.equal(options().limits.sessionIdleTtlMs, sessionIdleTtlMs, JSON.stringify(value));
   }
 });
 
@@ -227,7 +239,7 @@ test('the skill library is the folder michi at its one mount in the data dir; cl
   } finally { delete process.env.MICHI_CLOUD; }
 });
 
-// ── D19, D4: in a guarded turn what leaves the machine asks Michi, whatever the user's Claude settings allow ──
+// ── D19, D4: in Michi's work a dangerous egress asks Michi, whatever the user's Claude settings allow ──
 
 const michi = (name: string) => `mcp____michi_internal____${name}`;
 
@@ -340,24 +352,25 @@ describe("a guarded Claude turn, through the session's real PreToolUse hook (E-r
     { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, tool_use_id: `t-${tool}` },
     `t-${tool}`, { signal: new AbortController().signal });
 
-  test('what leaves the machine asks Michi even though the user\'s settings allow it, in Trust and in YOLO; local work keeps the CLI\'s flow', async (t) => {
+  test('a dangerous egress in Michi\'s work asks Michi even though the user\'s settings allow it, in Trust and in YOLO; the rest keeps the CLI\'s flow', async (t) => {
     const v = chatNode('n-v');
-    activeTurnRow(v, 'turn-tainted', 'a-tainted');
-    turnTrust.recordCompanionTaint({ nodeId: v, turnId: 'turn-tainted' }, 'companion_read', 'checkin');
+    activeTurnRow(v, 'turn-work', 'a-work');
+    noteMichiStartedTurn(v, 'turn-work');
     for (const mode of ['trust', 'yolo'] as const) {
       modes[v] = mode;
       const { sdk } = await sdkOptionsFor(t, v);
       assert.deepEqual(sdk.settingSources, ['user', 'project', 'local'], 'V loads the user\'s settings, allow rules included');
       assert.equal(sdk.env.CLAUDE_CONFIG_DIR, configDir);
-      for (const [tool, input] of [['Bash', EXFIL], ['Bash', { command: 'git push origin HEAD' }], ['mcp__github__create_issue', {}],
-        [michi('open_url'), { url: 'https://x' }]] as const) {
+      for (const [tool, input] of [['Bash', { command: 'git push origin HEAD' }], ['Bash', { command: 'gh pr create --base main' }],
+        ['mcp__github__create_pull_request', {}], ['mcp__slack__post_message', {}]] as const) {
         const output = await preToolUse(sdk, tool, input);
         // The pinned CLI answers a hook's ask by skipping its allow rules and the mode and asking canUseTool.
         assert.equal(output.hookSpecificOutput?.permissionDecision, 'ask', `${mode}: ${tool}`);
         // And canUseTool, Michi's policy, asks in such a turn whatever the mode.
         assert.equal(michiTestHost().permissions.decide({ owner: chatOwner(v), ownerUserId: null, toolName: tool, nativeRequest: true, mode, call: { input } }), 'ask', `${mode}: ${tool} policy`);
       }
-      for (const [tool, input] of [['Bash', { command: 'npm test' }], ['WebFetch', { url: 'https://x' }], ['Write', { file_path: 'a.ts' }], ['Read', {}],
+      for (const [tool, input] of [['Bash', { command: 'npm test' }], ['Bash', EXFIL], ['mcp__github__create_issue', {}], [michi('open_url'), { url: 'https://x' }],
+        ['WebFetch', { url: 'https://x' }], ['Write', { file_path: 'a.ts' }], ['Read', {}],
         ['Grep', {}], [michi('read_page'), {}], [michi('edit_page'), {}], [michi('companion_items'), {}], [michi('send_to_thread'), {}]] as const) {
         assert.deepEqual(await preToolUse(sdk, tool, input), {}, `${mode}: ${tool} keeps the CLI's own flow`);
       }
@@ -365,11 +378,12 @@ describe("a guarded Claude turn, through the session's real PreToolUse hook (E-r
     }
   });
 
-  test('an unguarded turn\'s hook is as before: the CLI\'s own flow decides every call', async (t) => {
+  test('a turn the user sent keeps the CLI\'s own flow for every call, whatever it read', async (t) => {
     const v = chatNode('n-v-clean');
     activeTurnRow(v, 'turn-clean', 'a-clean');
-    // Its own command output is not outside content (services/turnGuard.ts).
     turnTrust.recordUntrustedSource({ nodeId: v, turnId: 'turn-clean' }, { tool: 'Bash', runtimeId: 'claude' });
+    turnTrust.recordUntrustedSource({ nodeId: v, turnId: 'turn-clean' }, { tool: 'WebFetch', runtimeId: 'claude' });
+    turnTrust.recordCompanionTaint({ nodeId: v, turnId: 'turn-clean' }, 'companion_read', 'checkin');
     for (const mode of ['ask', 'trust', 'yolo'] as const) {
       modes[v] = mode;
       const { sdk, transport } = await sdkOptionsFor(t, v);
@@ -381,41 +395,36 @@ describe("a guarded Claude turn, through the session's real PreToolUse hook (E-r
     }
   });
 
-  test('w3-fix D15 / D17: a worker chat\'s turn a check-in sent into, and its next turn on the same session, ask Michi through the hook too', async (t) => {
+  test('w3-fix D15: a worker chat\'s turn a check-in sent into asks Michi through the hook for a dangerous egress; the user\'s next turn is the CLI\'s own', async (t) => {
     const worker = chatNode('n-worker');
     // The worker's live session, which the send opened first (sessionSend.ts ensureSession).
     registerLiveSession(worker);
     t.after(() => clearAllSessions());
-    // A check-in's direct follow-up: its cms- turn holds check-in material before it starts (D15).
+    // A check-in's direct follow-up: its cms- turn holds check-in material before it starts (D15), and its message says Michi sent it.
     activeTurnRow(worker, 'cms-run-1', 'a-cms');
+    getDb().prepare("INSERT INTO messages (id, node_id, role, content, seq, metadata) VALUES ('m-cms', ?, 'user', 'x', 1, ?)")
+      .run(worker, JSON.stringify({ companionSend: { runId: 'run-1', via: 'checkin' } }));
+    getDb().prepare("UPDATE turns SET user_message_id = 'm-cms' WHERE turn_id = 'cms-run-1'").run();
     turnTrust.recordCompanionTaint({ nodeId: worker, turnId: 'cms-run-1' }, 'companion_session_send', 'checkin');
-    const gated = ['Bash', 'mcp__github__create_issue', michi('open_url')];
-    const check = async (label: string) => {
-      for (const mode of ['ask', 'trust', 'yolo'] as const) {
-        modes[worker] = mode;
-        const { sdk } = await sdkOptionsFor(t, worker, true);
-        assert.equal(sdk.settingSources.includes('user'), true, 'a worker loads the user\'s settings too');
-        for (const tool of gated) {
-          assert.equal((await preToolUse(sdk, tool)).hookSpecificOutput?.permissionDecision, 'ask', `${label} ${mode}: ${tool}`);
-          assert.equal(michiTestHost().permissions.decide({ owner: chatOwner(worker), ownerUserId: null, toolName: tool, nativeRequest: true, mode, call: { input: EXFIL } }), 'ask', `${label} ${mode}: ${tool} policy`);
-        }
-        for (const tool of ['Read', 'Grep', michi('read_page'), michi('send_to_thread'), michi('start_conversation')]) {
-          assert.deepEqual(await preToolUse(sdk, tool), {}, `${label} ${mode}: ${tool}`);
-        }
-        t.mock.restoreAll();
+    const push = { command: 'git push origin HEAD' };
+    for (const mode of ['ask', 'trust', 'yolo'] as const) {
+      modes[worker] = mode;
+      const { sdk } = await sdkOptionsFor(t, worker, true);
+      assert.equal(sdk.settingSources.includes('user'), true, 'a worker loads the user\'s settings too');
+      for (const tool of ['Bash', 'mcp__slack__post_message']) {
+        assert.equal((await preToolUse(sdk, tool, push)).hookSpecificOutput?.permissionDecision, 'ask', `${mode}: ${tool}`);
+        assert.equal(michiTestHost().permissions.decide({ owner: chatOwner(worker), ownerUserId: null, toolName: tool, nativeRequest: true, mode, call: { input: push } }), 'ask', `${mode}: ${tool} policy`);
       }
-    };
-    await check('the sent turn');
-    // The next turn on the same live session read nothing itself, but its session holds the material (D17).
+      for (const tool of ['Read', 'Grep', 'mcp__github__create_issue', michi('read_page'), michi('send_to_thread'), michi('start_conversation')]) {
+        assert.deepEqual(await preToolUse(sdk, tool), {}, `${mode}: ${tool}`);
+      }
+      t.mock.restoreAll();
+    }
+    // The user's next turn on the same live session is theirs, whatever the session took in (D17 no longer guards it).
     getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(worker);
     activeTurnRow(worker, 'turn-next', 'a-next');
-    await check('the next turn');
-    // A /clear between turns drops it: the turn after it is the CLI's own again.
-    getDb().prepare("UPDATE turns SET status = 'completed' WHERE node_id = ?").run(worker);
-    turnTrust.clearCarriedCompanionTaint(worker);
-    activeTurnRow(worker, 'turn-cleared', 'a-cleared');
     modes[worker] = 'yolo';
     const { sdk } = await sdkOptionsFor(t, worker, true);
-    assert.deepEqual(await preToolUse(sdk, 'Bash'), {}, 'cleared: the CLI\'s own flow again');
+    assert.deepEqual(await preToolUse(sdk, 'Bash', push), {}, 'the user\'s turn: the CLI\'s own flow');
   });
 });

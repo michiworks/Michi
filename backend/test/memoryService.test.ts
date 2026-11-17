@@ -239,12 +239,12 @@ describe('keywords, event and observed times', () => {
 describe('topic', () => {
   test('stored on one line within 40 characters, one spelling per owner, kept by a correction unless a new one is given, edited and cleared', () => {
     assert.equal(save(alice, 'no topic').topic, null);
-    const job = save(alice, 'Works on the FMH frontend.', { topic: '  Work \n stuff ' });
+    const job = save(alice, 'Works on the Aurora frontend.', { topic: '  Work \n stuff ' });
     assert.equal(job.topic, 'Work stuff');
     assert.equal(save(alice, 'Long topic', { topic: 'x'.repeat(60) }).topic, 'x'.repeat(40), 'a label is cut, not refused');
-    assert.equal(save(alice, 'Reviews go through Anders.', { topic: 'work STUFF' }).topic, 'Work stuff', 'the owner\'s spelling');
+    assert.equal(save(alice, 'Reviews go through Alex.', { topic: 'work STUFF' }).topic, 'Work stuff', 'the owner\'s spelling');
     assert.equal(save(bob, 'Bob works too.', { topic: 'work STUFF' }).topic, 'work STUFF', 'another owner\'s spelling is not read');
-    const corrected = supersedeMemory(alice, job.id, { body: 'Works on the FMH frontend and Michi.', status: 'active', origin: 'explicit' });
+    const corrected = supersedeMemory(alice, job.id, { body: 'Works on the Aurora frontend and Michi.', status: 'active', origin: 'explicit' });
     assert.equal(corrected.topic, 'Work stuff', 'a correction stays in its topic');
     assert.equal(supersedeMemory(alice, corrected.id, { body: 'Builds Michi.', status: 'active', origin: 'explicit', topic: 'Michi' }).topic, 'Michi');
     const edited = updateMemory(alice, save(alice, 'Lives in Tokyo.').id, { topic: 'Home' });
@@ -648,12 +648,12 @@ describe('settings, pack rows and validation', () => {
     save(alice, 'bbbbbbbbbb', { kind: 'convention', origin: 'extracted', ...inWorkspace('ws-alice-1'), ...at(5) });
     save(alice, 'other workspace', { kind: 'convention', ...inWorkspace('ws-alice-2'), ...at(6) });
     save(alice, 'dddddddd', { kind: 'preference', ...at(7) });
-    const rows = (workspaceId: string | null, limit = 50, owner = 'alice') => packMemoryRows(owner, workspaceId, limit).map((row) => row.record.body);
+    const rows = (workspaceId: string | null, limit = 50, owner = 'alice') => packMemoryRows(owner, workspaceId, limit, Date.now()).map((row) => row.record.body);
     assert.deepEqual(rows('ws-alice-1'), ['dddddddd', 'bbbbbbbbbb', 'a saved fact is', 'aaaa']);
     assert.deepEqual(rows(null), ['dddddddd', 'a saved fact is', 'aaaa']);
     assert.deepEqual(rows('ws-alice-1', 2), ['dddddddd', 'bbbbbbbbbb']);
     assert.deepEqual(rows('ws-alice-1', 50, 'bob'), []);
-    assert.ok(packMemoryRows('alice', null, 1)[0].rowId > 0);
+    assert.ok(packMemoryRows('alice', null, 1, Date.now())[0].rowId > 0);
   });
 
   test('rejects malformed input', () => {

@@ -11,6 +11,8 @@ import {
   type CompanionTurnMetadata,
 } from './companionMessageMetadata';
 import type { ThreadMessageSource } from './threadMessage';
+import { isFormFieldValue, parseFormField, type FormField, type FormFieldValue } from './formField';
+import type { AutoContinueSource, TurnEndMark } from './turnEnd';
 import type { SkillMessageMetadata } from './skills';
 import {
   parseSubagentActivityPayload,
@@ -21,7 +23,16 @@ import {
 
 export type { SubagentInfo, SubagentPatch, SubagentActivityPayload } from './subagents';
 
+/** The blocks a reply showed (show_blocks) that a user message answered: which reply, which block, and its title or question. */
+export interface BlockAnswerSource {
+  messageId: string;
+  blockId: string;
+  title: string;
+}
+
 export interface DurableMessageMetadata {
+  /** This user message answers a block a reply showed; the transcript draws it as one line under that reply, its text a click away. */
+  blockAnswer?: BlockAnswerSource;
   /** Server-generated scheduled input; excluded from ordinary conversation increments. */
   scheduledJobId?: string;
   usageSummary?: ChatStreamPayloads['usage_summary'];
@@ -58,6 +69,19 @@ export interface DurableMessageMetadata {
    * W2-F1a. See CompanionTurnMetadata.
    */
   companionTurn?: CompanionTurnMetadata;
+  /**
+   * On an assistant message: its turn ended before it finished its answer
+   * (the user stopped it, or it hit a limit). Written by the turn projection
+   * from the `done` frame, so the live line and a reloaded one agree.
+   */
+  turnEnd?: TurnEndMark;
+  /**
+   * On a user message: Michi sent it to continue the turn before it
+   * (services/autoContinue.ts). It is not the user's own message: the count
+   * of continuations in a row reads it, and so do the rules that tell the
+   * user's messages from Michi's.
+   */
+  autoContinue?: AutoContinueSource;
 }
 
 /**
@@ -122,8 +146,15 @@ export interface UserInputQuestion {
   id?: string;
   question: string;
   header?: string;
+  /** Empty when the question has a field. */
   options: UserInputOption[];
   multiSelect: boolean;
+  /**
+   * One control in place of the options: the card draws it, and the answer
+   * carries its typed value. A card that does not know fields shows only its
+   * free-text box for a question with no options, so it stays answerable.
+   */
+  field?: FormField;
 }
 
 export interface UserInputRequestPayload {
@@ -136,7 +167,10 @@ export interface UserInputRequestPayload {
 export interface UserInputAnswer {
   id?: string;
   question: string;
+  /** What the user answered, as text (a field's value as a person reads it: `3 kg`, `Yes`). */
   answer: string;
+  /** A field question's typed value (FormFieldValue). */
+  value?: FormFieldValue;
 }
 
 export interface UsageCharge {
@@ -184,6 +218,7 @@ export const CHAT_STREAM_EVENTS = {
   error: "error",
   turnStart: "turn_start",
   image: "image",
+  blocks: "blocks",
   cancelPhase: "cancel_phase",
   queueUpdate: "queue_update",
   steerAccepted: "steer_accepted",
@@ -302,6 +337,12 @@ export interface ChatStreamPayloads {
     assistantMetadata?: TurnStartAssistantMetadata;
   };
   image: { path: string; caption?: string; mimeType: string; size: number };
+  /**
+   * Rich blocks an agent showed in its reply (show_blocks), each with the id
+   * Michi gave it. `fallbackText` is their plain text, built by the backend
+   * for readers that do not draw them.
+   */
+  blocks: { blocks: unknown[]; title?: string; fallbackText: string };
 }
 
 export interface ChatStreamEnvelope {
@@ -507,12 +548,15 @@ const parsers = {
                 description: optionalString(o.description),
               }))
             : [];
+          // A field that does not parse is dropped: the question is then answered as text.
+          const field = q.field === undefined ? undefined : parseFormField(q.field);
           return {
             ...(typeof q.id === 'string' ? { id: q.id } : {}),
             question: stringOrEmpty(q.question),
             header: optionalString(q.header),
             options,
             multiSelect: q.multiSelect === true,
+            ...(field && typeof field === 'object' ? { field } : {}),
           };
         })
       : [];
@@ -528,6 +572,7 @@ const parsers = {
           ...(typeof a.id === 'string' ? { id: a.id } : {}),
           question: stringOrEmpty(a.question),
           answer: stringOrEmpty(a.answer),
+          ...(a.value !== undefined && isFormFieldValue(a.value) ? { value: a.value } : {}),
         }))
       : [];
     return {
@@ -596,6 +641,11 @@ const parsers = {
     caption: optionalString(d.caption),
     mimeType: stringOrEmpty(d.mimeType),
     size: optionalFiniteNumber(d.size) ?? 0,
+  }),
+  blocks: (d) => ({
+    blocks: Array.isArray(d.blocks) ? d.blocks.filter((block) => !!block && typeof block === "object" && !Array.isArray(block)) : [],
+    title: optionalString(d.title),
+    fallbackText: stringOrEmpty(d.fallbackText),
   }),
   cancel_phase: (data) => {
     const raw = typeof data.phase === "string" ? data.phase : "";

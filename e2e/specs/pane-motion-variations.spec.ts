@@ -3,21 +3,18 @@ import { installMockApi } from '../fixtures/mockApi';
 import { leaveSettings, openSettings } from '../fixtures/shell';
 
 const variants = [
-  // The default drifts the content in from the side the pane arrives on: the
-  // third pane opens right of the focused root, so it comes from the right.
-  ['soft-fade', 'Soft Fade', 180, 8, 0],
-  ['gentle-glide', 'Gentle Glide', 180, 0, 8],
-  ['frozen-retract', 'Frozen Retract', 220, 0, -6],
+  // The content rises 4px over the track's 220ms.
+  ['phosphor', 'Phosphor', 220, 0, 4],
 ] as const;
 
-async function boot(page: Page, motion: string) {
+async function boot(page: Page) {
   await installMockApi(page, { custom: async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/agent-runs') { await route.fulfill({json:{runs:[]}}); return true; }
     if (path === '/api/agent-runs/subscribe') { await route.fulfill({contentType:'text/event-stream',body:': keepalive\n\n'}); return true; }
     return false;
   } });
-  await page.addInitScript(motion => {
+  await page.addInitScript(() => {
     localStorage.clear(); sessionStorage.clear();
     const ids = ['root', 'second', 'third'];
     const paragraph = 'A quiet workspace preserves the reading position and the shape of every paragraph. Closing a branch should retire the conversation as one object, without squeezing words into a narrower column.';
@@ -33,10 +30,10 @@ async function boot(page: Page, motion: string) {
       id:'motion-ws',name:'Pane motion review',chatIds:ids,edges:ids.slice(1).map(target => ({source:'root',target,kind:'branch'})),
       trees:[{id:'tree',rootNodeId:'root',name:'root conversation',createdAt:1,lastActiveAt:1}],activeTreeId:'tree',contexts:[],createdAt:1,
     }]}));
-    localStorage.setItem('michi:v1:prefs',JSON.stringify({paneSpawnAnimation:motion,paneWidthMode:'adaptive',defaultPaneWidth:800,singlePaneContentWidth:480}));
+    localStorage.setItem('michi:v1:prefs',JSON.stringify({paneWidthMode:'adaptive',defaultPaneWidth:800,singlePaneContentWidth:480}));
     sessionStorage.setItem('michi:panes:open',JSON.stringify({'motion-ws::tree':['root','second']}));
     sessionStorage.setItem('michi:panes:focus',JSON.stringify({'motion-ws::tree':'root'}));
-  },motion);
+  });
   await page.goto('/');
   await page.getByText('root conversation',{exact:true}).first().click();
   await expect(page.locator('.terminal-dashboard > [data-node-id]')).toHaveCount(2);
@@ -55,7 +52,7 @@ for (const [motion,label,duration,entryX,entryY] of variants) {
   test(`${label}: frozen message layout, coordinated reveal and settings`,async ({page},info) => {
     const errors: string[] = [];
     page.on('pageerror',error => errors.push(error.message));
-    await boot(page,motion);
+    await boot(page);
     const openFrames = await page.getByRole('complementary').getByText('third conversation',{exact:true}).first().evaluate(async element => {
       const strip = document.querySelector<HTMLElement>('.terminal-dashboard')!;
       (element as HTMLElement).click();
@@ -91,7 +88,6 @@ for (const [motion,label,duration,entryX,entryY] of variants) {
     expect(openFrames.frames.some(frame => frame.progress !== null && frame.progress > 0 && frame.progress < 1
       && frame.scroll > 20 && frame.visible > 0 && frame.visible < lastOpen.visible - 10)).toBe(true);
     expect(openFrames.frames.every(frame => Math.abs(frame.w - lastOpen.w) < 1)).toBe(true);
-    if (motion === 'gentle-glide') expect(openFrames.frames.every(frame => frame.x === 0)).toBe(true);
     await settled(page,3);
 
     for (const id of ['third','second']) {
@@ -158,7 +154,7 @@ for (const [motion,label,duration,entryX,entryY] of variants) {
       }
       expect(captured.duration).toBe(id === 'third' ? 160 : 110);
       expect(captured.frames.every(frame => Math.abs(frame.slot - captured.before.width) < 1)).toBe(true);
-      // All entry variants share fixed-width cover exits, then a staged 2→1 fade.
+      // Entrances share fixed-width cover exits, then a staged 2→1 fade.
       if (id === 'third') {
         expect(captured.exitFrames.some(frame => frame.clipPath !== undefined)).toBe(true);
         expect(captured.frames.some(frame => frame.visible > 0 && frame.visible < captured.before.width - 20 && frame.opacity === 1)).toBe(true);
@@ -171,10 +167,7 @@ for (const [motion,label,duration,entryX,entryY] of variants) {
 
     const settings = await openSettings(page, 'Appearance');
     await settings.getByRole('button', { name: /Advanced/i }).click();
-    const select = page.getByRole('combobox',{name:'Pane animation',exact:true});
-    await expect(select).toHaveValue(motion);
-    await select.selectOption(motion);
-    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('michi:v1:prefs')!).paneSpawnAnimation)).toBe(motion);
+    await expect(page.getByRole('combobox',{name:'Pane animation',exact:true})).toHaveCount(0);
     await expect.poll(async () => {
       const box = (await settings.boundingBox())!;
       return box.x + box.width;
@@ -189,7 +182,7 @@ for (const [motion,label,duration,entryX,entryY] of variants) {
 }
 
 test('quiet exits support reopen, last pane, reduced motion and narrow windows',async ({page}) => {
-  await boot(page,'soft-fade');
+  await boot(page);
   await page.locator('[data-pane-caption-id="second"]').click();
   await page.evaluate(() => window.dispatchEvent(new KeyboardEvent('keydown',{key:'w',ctrlKey:true,bubbles:true,cancelable:true})));
   await page.getByRole('complementary').getByText('second conversation',{exact:true}).first().click();

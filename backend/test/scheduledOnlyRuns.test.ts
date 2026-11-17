@@ -66,11 +66,11 @@ describe('Scheduled-only threads and reads', () => {
     seedChat('n-run', 'Heron check', 'heron nightly check', 'job-hidden');
   });
 
-  test('search and list_threads leave them out unless asked; the current thread is always listed', () => {
+  test('search and list_threads leave them out unless asked; the current thread is always listed', async () => {
     assert.deepEqual(keywordSearch('heron', 'ws-a').map((row) => row.node_id), ['n-user']);
     assert.deepEqual(keywordSearch('heron', 'ws-a', 20, undefined, { includeScheduledRuns: true }).map((row) => row.node_id).sort(), ['n-run', 'n-user']);
-    assert.doesNotMatch(searchMessages('ws-a', null, 'heron').text, /n-run/);
-    assert.match(searchMessages('ws-a', null, 'heron', 'current', 10, { includeScheduledRuns: true }).text, /n-run/);
+    assert.doesNotMatch((await searchMessages('ws-a', null, 'heron')).text, /n-run/);
+    assert.match((await searchMessages('ws-a', null, 'heron', 'current', 10, { includeScheduledRuns: true })).text, /n-run/);
 
     const threads = (text: string) => (JSON.parse(text) as { threads: Array<{ id: string; scheduled_run?: true }> }).threads;
     assert.deepEqual(threads(listThreads('ws-a', null).text).map((thread) => thread.id), ['t-n-user']);

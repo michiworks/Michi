@@ -1,6 +1,6 @@
 import React from 'react';
-import { Ellipsis } from 'lucide-react';
 import { HoverTip } from '../ui/Popover';
+import { MoreIcon } from './icons';
 
 /** Small filled circle; breathes as the running dot (index.css .term-dot-i--run) when `pulse` is set. */
 export function Dot({ color, size = 6, pulse = false, extraStyle }: { color: string; size?: number; pulse?: boolean; extraStyle?: React.CSSProperties }) {
@@ -20,6 +20,11 @@ export function Dot({ color, size = 6, pulse = false, extraStyle }: { color: str
       }}
     />
   );
+}
+
+/** A disclosure's one ›, turned a quarter while `open`, in place of a ▸ / ▾ swap (index.css .t-chevron). */
+export function DisclosureChevron({ open, style }: { open: boolean; style?: React.CSSProperties }) {
+  return <span aria-hidden className="t-chevron" data-open={open || undefined} style={style}>›</span>;
 }
 
 /** Clickable list row. Hover lifts background to --term-alt unless `active`.
@@ -46,19 +51,14 @@ export function BorderBtn({
   return <button type="button" className={cls} {...rest}>{children}</button>;
 }
 
-/** Inline icon-button (×, +, stop, retry text). Hover brightens text to
- *  --term-fg, or to --term-danger when `danger`. No background change. */
+/** Inline icon button (×, +): a `.t-icon-btn`. Name it with `aria-label`. */
 export function IconBtn({
-  danger = false,
   className,
   children,
   ...rest
-}: { danger?: boolean } & React.HTMLAttributes<HTMLSpanElement>) {
-  const cls = [
-    danger ? 't-icon-danger-hover' : 't-icon-hover',
-    className,
-  ].filter(Boolean).join(' ');
-  return <span className={cls} {...rest}>{children}</span>;
+}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  const cls = ['t-icon-btn', className].filter(Boolean).join(' ');
+  return <button type="button" className={cls} {...rest}>{children}</button>;
 }
 
 /** Hover-revealed ⋯ kebab for sidebar rows. Self-anchors to the right edge
@@ -69,7 +69,8 @@ export function IconBtn({
  *  seamlessly; consumers force that bg when the menu is open. A row with a
  *  hover of its own (`.t-reveal-host`, not `.t-row-hover`) takes it without
  *  the gradient (`fader={false}`). A touch screen hides it and opens the menu
- *  on a long press instead (index.css). */
+ *  on a long press instead (index.css). The button shows its open state only
+ *  for a menu it opened: a right-click or ⇧F10 menu leaves it unlit. */
 export function RowKebab({
   open = false,
   onOpen,
@@ -82,6 +83,8 @@ export function RowKebab({
   fader?: boolean;
 }) {
   const cls = ['row-kebab', open && 'is-open'].filter(Boolean).join(' ');
+  const [openedHere, setOpenedHere] = React.useState(false);
+  if (openedHere && !open) setOpenedHere(false);
   return (
     <span
       className={cls}
@@ -106,7 +109,7 @@ export function RowKebab({
         type="button"
         aria-label={ariaLabel}
         aria-haspopup="menu"
-        aria-expanded={open || undefined}
+        aria-expanded={(open && openedHere) || undefined}
         onMouseDown={(e) => {
           // Block the row's onMouseDown/onClick.
           e.stopPropagation();
@@ -114,6 +117,7 @@ export function RowKebab({
         onClick={(e) => {
           e.stopPropagation();
           e.preventDefault();
+          setOpenedHere(!open);
           const r = e.currentTarget.getBoundingClientRect();
           // Anchor menu just below the button's left edge so it reads as
           // attached to the kebab. ContextMenu flips on viewport overflow.
@@ -125,7 +129,7 @@ export function RowKebab({
         className="ws-action-btn"
         style={{ margin: -3 }}
       >
-        <Ellipsis size={16} aria-hidden="true" />
+        <MoreIcon size="lg" />
       </button>
       </HoverTip>
     </span>

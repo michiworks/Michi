@@ -1,0 +1,35 @@
+/* New workspace's folder controls. Their hovers are CSS, not React state, so a
+   pointer moving over the dialog renders nothing (ST-27). */
+
+/* With no folder yet: one wide dashed target. */
+.new-workspace-add-folders {
+  border: 1.5px dashed var(--term-line);
+  background: transparent;
+  color: var(--term-mid);
+  transition: border-color var(--t-soft), color var(--t-soft);
+}
+@media (hover: hover) {
+  .new-workspace-add-folders:hover {
+    border-color: var(--term-accent);
+    color: var(--term-fg);
+  }
+}
+.new-workspace-add-folders:active {
+  border-color: var(--term-accent);
+  color: var(--term-fg);
+}
+
+/* A chosen folder lights under a pointer or for keyboard focus in it, when its
+   Make primary and × show (.t-reveal). */
+.new-workspace-folder {
+  background: transparent;
+  transition: background var(--t-soft);
+}
+@media (hover: hover) {
+  .new-workspace-folder:hover {
+    background: var(--term-hover-bg, var(--term-alt));
+  }
+}
+.new-workspace-folder:has(:focus-visible) {
+  background: var(--term-hover-bg, var(--term-alt));
+}

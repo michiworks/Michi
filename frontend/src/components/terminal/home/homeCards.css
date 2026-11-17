@@ -54,8 +54,7 @@
   margin: 0;
   color: var(--term-fg);
   font-family: var(--ui-font);
-  /* No --fs token sits between 22 and 28; the Michi page title uses 26px too. */
-  font-size: 26px;
+  font-size: var(--fs-5xl);
   font-weight: 600;
   line-height: 1.35;
   letter-spacing: var(--ls-tight);
@@ -65,8 +64,7 @@
   display: block;
   margin-top: 4px;
   color: var(--term-mid);
-  /* The Michi page's next-step text size: between --fs-xl and --fs-2xl. */
-  font-size: 15px;
+  font-size: var(--fs-xl);
   font-weight: 400;
   letter-spacing: 0;
 }
@@ -92,6 +90,12 @@
 /* The workspace chip never shortens in the toolbar, where the model name
    gives way first. */
 .home-workspace-chip { flex-shrink: 0; }
+/* It names its workspace in --term-fg, and reads a muted, italic "no
+   workspace" without one (data-empty), here rather than inline so a hover or
+   its open menu still lights it --term-fg (ST-05). */
+.home-workspace-chip > .t-toolbar-chip { color: var(--term-fg); }
+.home-workspace-chip > .t-toolbar-chip[data-empty] { color: var(--term-muted); font-style: italic; }
+.home-workspace-chip > .t-toolbar-chip[data-empty][aria-expanded='true'] { color: var(--term-fg); }
 
 /* Below HOME_TRAY_BELOW (Home.tsx) one toolbar row cannot hold the
    workspace, +, permission, model and send controls. The toolbar keeps +,
@@ -162,7 +166,7 @@
   min-height: 150px;
   padding: 14px 16px 12px;
   border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius);
   background: var(--term-surface);
   color: var(--term-fg);
   font-family: var(--ui-font);
@@ -196,12 +200,12 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.home-card[data-tone='accent'] .home-card__kind { color: var(--term-accent); }
+.home-card[data-tone='accent'] .home-card__kind { color: var(--term-accent-text); }
 .home-card[data-tone='mauve'] .home-card__kind { color: var(--term-mauve); }
-.home-card[data-tone='select'] .home-card__kind { color: var(--term-select); }
+.home-card[data-tone='select'] .home-card__kind { color: var(--term-waiting-text); }
 .home-card[data-tone='digest'] .home-card__kind { color: var(--term-digest); }
 .home-card__title {
-  font-size: 15px;
+  font-size: var(--fs-xl);
   font-weight: 600;
   line-height: 1.4;
 }
@@ -216,7 +220,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font-size: var(--fs-md);
   font-weight: 500;
   line-height: 1.45;
@@ -235,7 +239,7 @@
   min-width: 0;
   padding: 9px 14px;
   border: 1px solid var(--term-line);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius);
   background: var(--term-surface);
   color: var(--term-mid);
   font-size: var(--fs-md);
@@ -258,7 +262,7 @@
 .home-work__count i {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-run);
 }
 .home-work__count[data-kind='waiting'] i { background: var(--term-waiting); }
@@ -271,13 +275,13 @@
   padding: 0;
   border: 0;
   background: none;
-  color: var(--term-accent);
+  color: var(--term-accent-text);
   font: inherit;
   white-space: nowrap;
   cursor: pointer;
 }
 .home-work__open:hover { text-decoration: underline; }
-.home-work__open:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.home-work__open:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .home-work__short { display: none; }
 /* A phone: the counts keep their numbers, the words get short and the name goes. */
 @container (max-width: 560px) {
@@ -309,7 +313,7 @@
 .home-card__dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-pill);
   background: var(--term-accent);
 }
 
@@ -353,7 +357,7 @@
   min-height: 150px;
   padding: 16px;
   border: 1px solid color-mix(in srgb, var(--term-line) 70%, transparent);
-  border-radius: var(--ui-radius-lg);
+  border-radius: var(--ui-radius);
 }
 .home-card-skeleton span:nth-child(1) { width: 38%; height: 8px; }
 .home-card-skeleton span:nth-child(2) { width: 72%; height: 12px; margin-top: 2px; }
@@ -361,17 +365,18 @@
 
 /* Content that replaces the placeholders comes into focus in place: the
    greeting first, then the cards one after another. The date and the
-   composer were already there and stay still. */
+   composer were already there and stay still, and so does the leaving
+   skeleton's own head: it only fades out (home-leave). */
 @keyframes home-arrive {
   from { opacity: 0; transform: translateY(6px); }
 }
 @keyframes home-leave {
   to { opacity: 0; }
 }
-.home-page[data-arriving] :is(.home-greeting__text, .home-default-headline, .home-cards__head, .chat-home-document, .home-below > [role='status']) {
+.home-page[data-arriving] :is(.home-greeting__text, .home-default-headline, .home-cards:not(.home-cards--skeleton) > .home-cards__head, .chat-home-document, .home-below > [role='status']) {
   animation: home-arrive var(--t-decay) var(--t-ease) both;
 }
-.home-page[data-arriving] .home-cards__head { animation-delay: 60ms; }
+.home-page[data-arriving] .home-cards:not(.home-cards--skeleton) > .home-cards__head { animation-delay: 60ms; }
 .home-page[data-arriving] .home-card {
   animation: home-arrive var(--t-decay) var(--t-ease) both;
   animation-delay: calc(90ms + var(--home-card-index, 0) * 35ms);
@@ -427,8 +432,8 @@
 }
 .home-workspace-chip__clear {
   position: absolute;
-  /* Centred on the 12px folder icon, which starts after the chip's padding. */
-  left: calc(var(--composer-chip-h-pad, 12px) - 3px);
+  /* Centred on the 14px folder icon, which starts after the chip's padding. */
+  left: calc(var(--composer-chip-h-pad, 12px) - 2px);
   top: 50%;
   width: 18px;
   height: 18px;
@@ -438,13 +443,19 @@
   justify-content: center;
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  border-radius: var(--ui-radius-sm);
   background: transparent;
   color: var(--term-muted);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--t-quick) var(--t-ease), color var(--t-quick) var(--t-ease);
+}
+/* It overlaps the chip's own button, so it needs a 24px hit area of its own. */
+.home-workspace-chip__clear::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
 }
 .home-workspace-chip__clear:focus-visible {
   opacity: 1;

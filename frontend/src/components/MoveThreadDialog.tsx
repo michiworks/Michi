@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ModalShell } from './ui/ModalShell';
+import { BranchIcon } from './terminal/icons';
 import { isImeComposing } from '../lib/ime';
 import type { MoveTargetWorkspace } from '../state/moveTargets';
 
@@ -44,6 +45,7 @@ export default function MoveThreadDialog({ open, threadLabel, targets, onClose, 
   const [filter, setFilter] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -63,6 +65,11 @@ export default function MoveThreadDialog({ open, threadLabel, targets, onClose, 
     if (activeIndex >= filtered.length) setActiveIndex(Math.max(0, filtered.length - 1));
   }, [filtered.length, activeIndex]);
 
+  // ↑/↓ keep the highlighted row in view; the list jumps, it never glides.
+  useLayoutEffect(() => {
+    listRef.current?.children[activeIndex]?.scrollIntoView?.({ block: 'nearest' });
+  }, [activeIndex]);
+
   const commit = (idx: number) => {
     const t = filtered[idx];
     if (!t) return;
@@ -78,7 +85,7 @@ export default function MoveThreadDialog({ open, threadLabel, targets, onClose, 
       open={open}
       onClose={onClose}
       title="Move thread"
-      titleGlyph="⎇"
+      titleGlyph={<BranchIcon size="sm" />}
       accent={mauve}
       width={480}
       headerTrailing={
@@ -148,7 +155,7 @@ export default function MoveThreadDialog({ open, threadLabel, targets, onClose, 
             No matching workspaces
           </div>
         ) : (
-          <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          <ul ref={listRef} style={{ listStyle: 'none', margin: 0, padding: 0 }}>
             {filtered.map((t, idx) => {
               const active = idx === activeIndex;
               return (

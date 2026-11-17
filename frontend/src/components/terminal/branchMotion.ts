@@ -2,6 +2,8 @@ import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import type { ProjectEdge } from '../../state/chatTypes';
 import { PANE_EASE } from './paneMotion';
 import { isBranchEdge } from '../../state/tree';
+import { FRESH_MS } from '../../motion/useFresh';
+import { EASE } from '../../motion/tokens';
 
 /**
  * How a new branch arrives on a phone, which shows one pane at a time.
@@ -17,14 +19,13 @@ const REDUCED_PUSH_MS = 150;
 const PARENT_DRIFT = '24%';
 const PARENT_DIM = 0.72;
 const FLIGHT_MS = 360;
-const FLIGHT_EASE = 'cubic-bezier(0.77, 0, 0.175, 1)';
+const FLIGHT_EASE = `cubic-bezier(${EASE.inOut.join(', ')})`;
 const PULSE_MS = 420;
 const RING_MS = 520;
-/** Long enough for the commit that adds the edge; hydrated edges are older. */
-const FRESH_MS = 1000;
 
 export interface BranchFlightOrigin { x: number; y: number }
 
+/** An edge made within FRESH_MS: long enough for the commit that adds it; hydrated edges are older. */
 export function isFreshBranch(edges: readonly ProjectEdge[] | undefined, nodeId: string, now = Date.now()): boolean {
   return !!edges?.some(edge => edge.target === nodeId && isBranchEdge(edge)
     && edge.createdAt !== undefined && now - edge.createdAt < FRESH_MS);

@@ -6,7 +6,7 @@ import MentionEditor, { type MentionEditorHandle } from './MentionEditor';
 
 async function editorWith(text: string) {
   const ref = createRef<MentionEditorHandle>();
-  render(<MentionEditor ref={ref} value="" mentions={[]} onChange={vi.fn()} currentNodeId="current" sameTreeNodes={[]}
+  render(<MentionEditor ref={ref} value="" mentions={[]} onChange={vi.fn()} currentNodeId="current"
     onSubmit={vi.fn()} artifacts={[{ id: 'notes', name: 'Design notes', filePath: 'notes.md', source: 'user', createdAt: 1, updatedAt: 1 }]} />);
   await waitFor(() => expect(ref.current?.editor).toBeTruthy());
   const editor = ref.current!.editor!;

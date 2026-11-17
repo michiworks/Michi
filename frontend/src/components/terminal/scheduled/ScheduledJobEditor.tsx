@@ -10,6 +10,7 @@ import type {
 import { SCHEDULED_JOB_DEFAULTS, SCHEDULED_JOB_LIMITS, SCHEDULED_ONLY_KEPT_DAYS, SCHEDULED_ONLY_RETENTION } from 'michi-shared';
 import { ModalShell } from '../../ui/ModalShell';
 import { Button, Switch } from '../../ui/controls';
+import { Radio } from '../pages/settings/controls';
 import { createScheduledJob, previewScheduledJobSchedule, updateScheduledJob } from '../../../services/api/scheduledJobs';
 import { applyWorkspaceCommands } from '../../../services/api/persistence';
 import { serializeWorkspaceRow } from '../../../state/workspacePersistence';
@@ -118,6 +119,12 @@ export function validateJobForm(value: JobFormValue): { input?: ScheduledJobInpu
 
 const MODES: ScheduleMode[] = ['interval', 'daily', 'weekdays', 'weekly', 'once', 'cron'];
 
+const errorId = (fieldId: string) => `${fieldId}-error`;
+
+/** aria-invalid and aria-describedby for a control while its field's error line, errorId(fieldId), shows `error`. */
+const invalidProps = (fieldId: string, error: string | undefined) =>
+  error ? { 'aria-invalid': true, 'aria-describedby': errorId(fieldId) } as const : {};
+
 function Field({ label, htmlFor, error, hint, children }: {
   label: string;
   htmlFor?: string;
@@ -129,7 +136,9 @@ function Field({ label, htmlFor, error, hint, children }: {
     <div className="sched-field">
       <label className="sched-field-label" htmlFor={htmlFor}>{label}</label>
       {children}
-      {error ? <p className="sched-field-error" role="alert">{error}</p> : hint ? <p className="sched-field-hint">{hint}</p> : null}
+      {error
+        ? <p className="sched-field-error" id={htmlFor && errorId(htmlFor)} role="alert">{error}</p>
+        : hint ? <p className="sched-field-hint">{hint}</p> : null}
     </div>
   );
 }
@@ -164,22 +173,22 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
   const set = <K extends keyof ScheduleDraft>(key: K, next: ScheduleDraft[K]) => onChange({ ...draft, [key]: next });
   const zones = React.useMemo(() => timeZoneOptions(draft.timezone), [draft.timezone]);
   const usesZone = draft.mode !== 'interval' && draft.mode !== 'once';
+  // A weekly job with a time but no day fails on its days (draftToSchedule
+  // checks the time first); any other error is about the mode's own input.
+  const daysError = draft.mode === 'weekly' && draft.time !== '' && draft.weekdays.length === 0 ? error : undefined;
+  const inputError = invalidProps('sched-schedule', daysError ? undefined : error);
   return (
     <div className="sched-field">
-      <span className="sched-field-label" id="sched-schedule-label">Schedule</span>
-      <div className="sched-segmented" role="radiogroup" aria-labelledby="sched-schedule-label">
-        {MODES.map((mode) => (
-          <button key={mode} type="button" role="radio" aria-checked={draft.mode === mode}
-            className="sched-segment" onClick={() => set('mode', mode)}>
-            {SCHEDULE_MODE_LABELS[mode]}
-          </button>
-        ))}
-      </div>
+      <label className="sched-field-label" htmlFor="sched-mode">Schedule</label>
+      <select id="sched-mode" className="ui-select" value={draft.mode}
+        onChange={(event) => set('mode', event.target.value as ScheduleMode)}>
+        {MODES.map((mode) => <option key={mode} value={mode}>{SCHEDULE_MODE_LABELS[mode]}</option>)}
+      </select>
       <div className="sched-schedule-body">
         {draft.mode === 'interval' && (
           <div className="sched-inline">
             <span>Every</span>
-            <input className="ui-input sched-number" type="number" min={1} aria-label="Interval"
+            <input className="ui-input sched-number" type="number" min={1} aria-label="Interval" {...inputError}
               value={draft.intervalValue} onChange={(event) => set('intervalValue', Number(event.target.value))} />
             <select className="ui-select sched-auto" aria-label="Interval unit" value={draft.intervalUnit}
               onChange={(event) => set('intervalUnit', event.target.value as ScheduleDraft['intervalUnit'])}>
@@ -191,7 +200,8 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
           </div>
         )}
         {draft.mode === 'weekly' && (
-          <div className="sched-days" role="group" aria-label="Days of the week">
+          <div className="sched-days" role="group" aria-label="Days of the week"
+            aria-describedby={daysError && errorId('sched-schedule')}>
             {WEEKDAY_LABELS.map((label, day) => {
               const on = draft.weekdays.includes(day);
               return (
@@ -206,16 +216,16 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
         {(draft.mode === 'daily' || draft.mode === 'weekdays' || draft.mode === 'weekly') && (
           <div className="sched-inline">
             <span>at</span>
-            <input className="ui-input sched-auto" type="time" aria-label="Time of day" value={draft.time}
+            <input className="ui-input sched-auto" type="time" aria-label="Time of day" {...inputError} value={draft.time}
               onChange={(event) => set('time', event.target.value)} />
           </div>
         )}
         {draft.mode === 'once' && (
-          <input className="ui-input" type="datetime-local" aria-label="Run at" value={draft.onceAt}
+          <input className="ui-input" type="datetime-local" aria-label="Run at" {...inputError} value={draft.onceAt}
             onChange={(event) => set('onceAt', event.target.value)} />
         )}
         {draft.mode === 'cron' && (
-          <input className="ui-input sched-mono" aria-label="Cron expression" placeholder="0 9 * * 1-5" spellCheck={false}
+          <input className="ui-input sched-mono" aria-label="Cron expression" placeholder="0 9 * * 1-5" spellCheck={false} {...inputError}
             value={draft.cron} onChange={(event) => set('cron', event.target.value)} />
         )}
         {usesZone && (
@@ -225,7 +235,7 @@ function ScheduleFields({ draft, onChange, error }: { draft: ScheduleDraft; onCh
           </select>
         )}
       </div>
-      {error ? <p className="sched-field-error" role="alert">{error}</p> : <SchedulePreview draft={draft} />}
+      {error ? <p className="sched-field-error" id={errorId('sched-schedule')} role="alert">{error}</p> : <SchedulePreview draft={draft} />}
       {draft.mode === 'cron' && (
         <p className="sched-field-hint">minute hour day-of-month month day-of-week</p>
       )}
@@ -287,22 +297,10 @@ function ChoiceList<T extends string>({ label, value, options, onChange }: {
   options: ReadonlyArray<{ value: T; label: string; description: string }>;
   onChange: (next: T) => void;
 }) {
-  const id = React.useId();
   return (
     <div className="sched-field">
-      <span className="sched-field-label" id={id}>{label}</span>
-      <div className="sched-choices" role="radiogroup" aria-labelledby={id}>
-        {options.map((option) => (
-          <button key={option.value} type="button" role="radio" aria-checked={value === option.value}
-            className="sched-choice" onClick={() => onChange(option.value)}>
-            <span className="sched-choice-dot" aria-hidden="true" />
-            <span>
-              <span className="sched-choice-label">{option.label}</span>
-              <span className="sched-choice-desc">{option.description}</span>
-            </span>
-          </button>
-        ))}
-      </div>
+      <span className="sched-field-label">{label}</span>
+      <Radio label={label} opts={options} value={value} onChange={onChange} />
     </div>
   );
 }
@@ -377,19 +375,19 @@ export function ScheduledJobEditor({ job, initial, projects, defaultWorkspaceId,
       <form className="sched-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
         <div className="sched-editor-scroll term-scrollbar">
           <Field label="Name" htmlFor="sched-name" error={errors.name}>
-            <input id="sched-name" className="ui-input" autoFocus maxLength={SCHEDULED_JOB_LIMITS.name}
+            <input id="sched-name" className="ui-input" autoFocus maxLength={SCHEDULED_JOB_LIMITS.name} {...invalidProps('sched-name', errors.name)}
               placeholder="Morning briefing" value={value.name} onChange={(event) => setValue({ ...value, name: event.target.value })} />
           </Field>
           <Field label="Workspace" htmlFor="sched-workspace" error={errors.workspaceId}
             hint="The agent works in this workspace's folder. Results appear as threads here.">
-            <select id="sched-workspace" className="ui-select" value={value.workspaceId}
+            <select id="sched-workspace" className="ui-select" value={value.workspaceId} {...invalidProps('sched-workspace', errors.workspaceId)}
               onChange={(event) => setValue({ ...value, workspaceId: event.target.value })}>
               {!value.workspaceId && <option value="">Choose a workspace…</option>}
               {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
             </select>
           </Field>
           <Field label="Prompt" htmlFor="sched-prompt" error={errors.prompt}>
-            <textarea id="sched-prompt" className="ui-input sched-textarea" rows={6} maxLength={SCHEDULED_JOB_LIMITS.prompt}
+            <textarea id="sched-prompt" className="ui-input sched-textarea" rows={6} maxLength={SCHEDULED_JOB_LIMITS.prompt} {...invalidProps('sched-prompt', errors.prompt)}
               placeholder="Summarize what changed in this repository since yesterday and flag anything risky."
               value={value.prompt} onChange={(event) => setValue({ ...value, prompt: event.target.value })} />
           </Field>
@@ -406,6 +404,7 @@ export function ScheduledJobEditor({ job, initial, projects, defaultWorkspaceId,
           <div className="sched-grid">
             <Field label="Time limit (minutes)" htmlFor="sched-timeout" error={errors.timeout}>
               <input id="sched-timeout" className="ui-input" type="number" min={MIN_TIMEOUT_MINUTES} max={MAX_TIMEOUT_MINUTES} value={value.timeoutMinutes}
+                {...invalidProps('sched-timeout', errors.timeout)}
                 onChange={(event) => setValue({ ...value, timeoutMinutes: Number(event.target.value) })} />
             </Field>
             <div className="sched-field">

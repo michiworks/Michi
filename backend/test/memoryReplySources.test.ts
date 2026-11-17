@@ -2,8 +2,8 @@
 import './isolatedConfigDir';
 // Reply sources (services/memory/replySources.ts, spec round 10 §T): the
 // ledger of what a session was given, the "used" rule at turn end (recall's
-// own gate, then the reply adds what matched), the guards, the rows' triggers,
-// the API and Don't recall.
+// own gate, then the reply adds what matched), the guards, the rows' triggers
+// and the API.
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -25,10 +25,9 @@ import {
   createMemory, deleteMemory, forgetMemory, mergeMemoryInto, resetMemories, setConversationMemoryMode, setMemorySettings,
   supersedeMemory, type CreateMemoryInput,
 } from '../src/services/memory/memoryService';
-import { indexTurn, recallTurnMatch, recallTurnsMatching, setTurnKeys } from '../src/services/memory/recallIndex';
+import { hideConversationTurns, indexTurn, recallTurnMatch, recallTurnsMatching } from '../src/services/memory/recallIndex';
 import {
-  attributeTurn, forgetRecalledTurn, noteDelivered, noteSearched, recalledTurnScope, replySourceGateCalls, replySourcesView, resetReplySources,
-  type AttributionTurn,
+  attributeTurn, noteDelivered, noteSearched, replySourceGateCalls, replySourcesView, resetReplySources, type AttributionTurn,
 } from '../src/services/memory/replySources';
 
 const ME = LOCAL_AGENT_OWNER_ID;
@@ -71,8 +70,8 @@ function memoryItem(record: MemoryRecord, section: MemoryPackItem['section']): M
   return { ref: memoryRef(row, version), section, kind: 'memory', id: record.id, nodeId: record.source?.nodeId ?? null, turnId: record.source?.turnId ?? null, at: 0 };
 }
 
-function excerptItem(turnId: string, shown: string, section: MemoryPackItem['section'] = 'related'): MemoryPackItem {
-  return { ref: conversationRef(docOf(turnId)), section, kind: 'conversation', id: turnId, nodeId: null, turnId, at: 0, shown };
+function excerptItem(turnId: string, section: MemoryPackItem['section'] = 'related'): MemoryPackItem {
+  return { ref: conversationRef(docOf(turnId)), section, kind: 'conversation', id: turnId, nodeId: null, turnId, at: 0 };
 }
 
 function deliver(nodeId: string, turnId: string, items: MemoryPackItem[], options: { framed?: boolean; pinned?: boolean } = {}): void {
@@ -164,28 +163,25 @@ describe('the ledger', () => {
     assert.deepEqual(finish('n-chat', 't-7', 'Sleep?', 'Night owl, after 2 a.m.')!.used, []);
   });
 
-  test('memory_search hits, its excerpts and ref lookups are recorded for the running turn; an Off conversation drops the ledger', () => {
+  test('memory_search hits and ref lookups of memories are recorded for the running turn, its excerpts never; an Off conversation drops the ledger', () => {
     chat('n-chat');
     getDb().prepare(`INSERT INTO turns (turn_id, node_id, user_message_id, assistant_message_id, status, last_seq, started_at, updated_at)
       VALUES ('t-live', 'n-chat', NULL, 'a-t-live', 'active', 0, ?, ?)`).run(now, now);
-    const tPast = past('n-old', 'The Falcon launch is on March 3', 'Noted: Falcon launches March 3.');
+    past('n-old', 'The Falcon launch is on March 3', 'Noted: Falcon launches March 3.');
     const plant = memory('The user\'s fern needs water every Thursday.', { keywords: ['fern', 'Thursday'] });
     const caller = { ownerUserId: null, workspaceId: 'ws', nodeId: 'n-chat', isAgentRun: false };
     assert.notEqual(memoryTool('memory_search', caller, { query: 'Falcon launch' }).isError, true);
     assert.notEqual(memoryTool('memory_search', caller, { query: 'fern' }).isError, true);
     getDb().prepare("UPDATE turns SET status = 'completed' WHERE turn_id = 't-live'").run();
     const result = finish('n-chat', 't-live', 'when is the launch, and when do I water the plant?', 'Falcon launches March 3; water the fern on Thursday.')!;
-    assert.deepEqual(new Set(result.used.map((entry) => entry.id)), new Set([plant.id, String(docOf(tPast))]));
-    assert.ok(result.used.every((entry) => entry.section === 'search'));
+    assert.deepEqual(result.used, [{ id: plant.id, section: 'search' }]);
     // Off: the retraction drops what the conversation held.
     noteDelivered({ ownerUserId: ME, nodeId: 'n-chat', turnId: null, pack: { off: true, framed: false, signature: null, items: [] } });
     assert.deepEqual(finish('n-chat', 't-after', 'water day?', 'Thursday, for the fern.')!.used, []);
   });
 
-  test('the bounds hold: 30 items a turn, the excerpt text a turn holds', () => {
-    const long = 'x'.repeat(20_000);
-    noteSearched({ ownerUserId: ME, nodeId: 'n-chat', turnId: 't-1', items: Array.from({ length: 40 }, (_, i) => ({ kind: 'memory' as const, id: `mem-${i}` })) });
-    noteSearched({ ownerUserId: ME, nodeId: 'n-chat', turnId: 't-1', items: [{ kind: 'conversation', docId: 1, text: long }, { kind: 'conversation', docId: 2, text: long }] });
+  test('the bounds hold: 30 items a turn', () => {
+    noteSearched({ ownerUserId: ME, nodeId: 'n-chat', turnId: 't-1', memoryIds: Array.from({ length: 40 }, (_, i) => `mem-${i}`) });
     const result = finish('n-chat', 't-1', 'hello', 'hi');
     assert.ok(result, 'attributed (nothing used)');
     assert.ok(result.candidates.length <= 30);
@@ -201,14 +197,28 @@ describe('the "used" rule', () => {
     assert.deepEqual(finish('n-chat', 't-2', 'What is my dog called?', 'Your dog is called Biscuit.')!.used.map((entry) => entry.id), [dog.id]);
   });
 
-  test('an excerpt is used through its shown text plus its keys; one whose turn a used memory came from is dropped', () => {
-    const tPast = past('n-old', 'We picked the codename Falcon for the March launch', 'Falcon it is.');
-    setTurnKeys(ME, tPast, ['codename', 'launch', '代号']);
-    deliver('n-chat', 't-1', [excerptItem(tPast, 'We picked the codename Falcon for the March launch → Falcon it is.')], { framed: true });
-    assert.deepEqual(finish('n-chat', 't-1', '代号是什么？', 'The codename is Falcon.')!.used.map((entry) => entry.kind), ['conversation']);
-    const fromPast = memory('The launch codename is Falcon.', { keywords: ['codename', 'Falcon'], source: { nodeId: 'n-old', turnId: tPast } });
-    deliver('n-chat', 't-2', [memoryItem(fromPast, 'related'), excerptItem(tPast, 'We picked the codename Falcon for the March launch → Falcon it is.')]);
-    assert.deepEqual(finish('n-chat', 't-2', 'remind me of the codename', 'Falcon.')!.used.map((entry) => entry.id), [fromPast.id]);
+  test('a used memory\'s last_used_at moves to the turn\'s end, with no new version or updated_at; an unused one stays unset', () => {
+    const dog = memory('用户的狗叫 Biscuit', { keywords: ['dog', 'Biscuit', '狗'] });
+    const cat = memory('The user\'s cat is called Miso.', { keywords: ['cat', 'Miso'] });
+    const before = getDb().prepare('SELECT version, updated_at FROM memories WHERE id = ?').get(dog.id) as { version: number; updated_at: number };
+    deliver('n-chat', 't-1', [memoryItem(dog, 'preferences'), memoryItem(cat, 'preferences')], { framed: true });
+    const started = Date.now();
+    assert.deepEqual(finish('n-chat', 't-1', 'What is my dog called?', 'Your dog is called Biscuit.')!.used.map((entry) => entry.id), [dog.id]);
+    const row = (id: string) => getDb().prepare('SELECT last_used_at, version, updated_at FROM memories WHERE id = ?').get(id) as
+      { last_used_at: number | null; version: number; updated_at: number };
+    assert.ok((row(dog.id).last_used_at ?? 0) >= started);
+    assert.deepEqual({ version: row(dog.id).version, updated_at: row(dog.id).updated_at }, { ...before });
+    assert.equal(row(cat.id).last_used_at, null);
+  });
+
+  test('a past-conversation excerpt is never a source, even one the reply repeats; a memory from that turn is', () => {
+    const tPast = past('n-old', 'My flight to Osaka is JL123, leaving Narita at 09:40.', 'Noted.');
+    deliver('n-chat', 't-1', [excerptItem(tPast), excerptItem(tPast, 'recent')], { framed: true });
+    const excerptOnly = finish('n-chat', 't-1', 'which flight again?', 'Your flight is JL123 from Narita at 09:40.')!;
+    assert.deepEqual([excerptOnly.candidates, excerptOnly.used], [[], []]);
+    const flight = memory('The user flies to Osaka on JL123 from Narita at 09:40.', { keywords: ['flight', 'JL123'], source: { nodeId: 'n-old', turnId: tPast } });
+    deliver('n-chat', 't-2', [memoryItem(flight, 'related'), excerptItem(tPast)]);
+    assert.deepEqual(finish('n-chat', 't-2', 'remind me of the flight', 'JL123 from Narita.')!.used.map((entry) => entry.id), [flight.id]);
   });
 
   test('the digit clause: a number in the item and the reply that the user did not write', () => {
@@ -270,7 +280,7 @@ describe('the "used" rule', () => {
     deliver('n-chat', 't-1', [], { framed: true });
     chat('n-chat');
     const saved = memory('The user\'s locker is 4471.', { source: { nodeId: 'n-chat', turnId: 't-1' } });
-    noteSearched({ ownerUserId: ME, nodeId: 'n-chat', turnId: 't-1', items: [{ kind: 'memory', id: saved.id }] });
+    noteSearched({ ownerUserId: ME, nodeId: 'n-chat', turnId: 't-1', memoryIds: [saved.id] });
     assert.deepEqual(finish('n-chat', 't-1', 'remember my locker', 'Saved: locker 4471.')!.used, []);
   });
 });
@@ -299,7 +309,7 @@ describe('guards', () => {
     assert.equal(finish('n-use', 't-use', 'What is my dog called?', 'Your dog is Biscuit.'), null, 'Use only indexes nothing');
     setup();
     past('n-chat', 'What is my dog called?', 'Your dog is Biscuit.', 't-hidden');
-    forgetRecalledTurn(recalledTurnScope(ME, docOf('t-hidden')));
+    hideConversationTurns(ME, 'n-chat');
     assert.equal(attributeTurn({ ownerUserId: null, nodeId: 'n-chat', turnId: 't-hidden', humanOrigin: true, userText: 'x', assistantText: 'Biscuit' }), null);
     setup();
     setMemorySettings(ME, { mode: 'off' });
@@ -322,29 +332,26 @@ describe('guards', () => {
 });
 
 describe('triggers', () => {
-  const NAMES = ['Falcon', 'Kestrel', 'Osprey', 'Merlin', 'Harrier'];
   let call = 0;
-  /** A reply (its own turn) that used a memory and an excerpt, each with words of its own. */
-  function used(): { dog: MemoryRecord; tPast: string; turnId: string } {
+  /** A reply (its own turn) that used a memory with words of its own. */
+  function used(): { dog: MemoryRecord; turnId: string } {
     call += 1;
     const pet = `Biscuit${call}`;
-    const name = NAMES[call % NAMES.length]!;
     const dog = memory(`The user's dog is called ${pet}.`, { keywords: ['dog', pet] });
-    const tPast = past('n-old', `The ${name} launch is on March ${call}`, 'Noted.');
     const turnId = `t-used-${call}`;
-    deliver('n-chat', turnId, [memoryItem(dog, 'preferences'), excerptItem(tPast, `The ${name} launch is on March ${call} → Noted.`)], { framed: true });
-    finish('n-chat', turnId, 'dog and launch?', `${pet}, and ${name} launches March ${call}.`);
-    assert.equal(sources(turnId).length, 2);
-    return { dog, tPast, turnId };
+    deliver('n-chat', turnId, [memoryItem(dog, 'preferences')], { framed: true });
+    finish('n-chat', turnId, 'dog?', `${pet}.`);
+    assert.equal(sources(turnId).length, 1);
+    return { dog, turnId };
   }
 
   test('forget, delete, reset and owner purges take memory rows', () => {
     const first = used();
     forgetMemory({ ownerUserId: ME }, first.dog.id);
-    assert.deepEqual(sources(first.turnId).map((row) => row.kind), ['conversation']);
+    assert.deepEqual(sources(first.turnId), []);
     const second = used();
     deleteMemory({ ownerUserId: ME }, second.dog.id);
-    assert.deepEqual(sources(second.turnId).map((row) => row.kind), ['conversation']);
+    assert.deepEqual(sources(second.turnId), []);
     const third = used();
     resetMemories({ ownerUserId: ME });
     assert.deepEqual(sources(third.turnId), []);
@@ -354,31 +361,7 @@ describe('triggers', () => {
     assert.deepEqual(sources(fourth.turnId), []);
   });
 
-  test('Don\'t recall, Use only and deleting the conversation take conversation rows; purging or deleting the node takes its own', () => {
-    const first = used();
-    forgetRecalledTurn(recalledTurnScope(ME, docOf(first.tPast)));
-    assert.deepEqual(sources(first.turnId).map((row) => row.kind), ['memory']);
-    const second = used();
-    setConversationMemoryMode({ ownerUserId: ME }, 'n-old', 'use_only');
-    assert.deepEqual(sources(second.turnId).map((row) => row.kind), ['memory']);
-    setConversationMemoryMode({ ownerUserId: ME }, 'n-old', 'learn');
-    const tWords = past('n-old2', 'Peregrine kestrel launch notes', 'ok');
-    // One word alone names an excerpt only as one of its keys.
-    setTurnKeys(ME, tWords, ['Peregrine', 'launch notes']);
-    deliver('n-chat', 't-words', [excerptItem(tWords, 'Peregrine kestrel launch notes → ok')], { framed: true });
-    finish('n-chat', 't-words', 'launch notes?', 'The Peregrine notes.');
-    assert.deepEqual(sources('t-words').map((row) => row.kind), ['conversation']);
-    // Forgetting a memory leaves chat history and its rows as they are.
-    const tPlain = past('n-old2', 'nothing to see', 'ok');
-    assert.ok(tPlain);
-    forgetMemory({ ownerUserId: ME }, memory('The Peregrine launch notes live in the wiki.').id);
-    assert.deepEqual(sources('t-words').map((row) => row.kind), ['conversation']);
-    const tGone = past('n-gone', 'The Saturn review is Friday', 'ok');
-    deliver('n-chat', 't-gone', [excerptItem(tGone, 'The Saturn review is Friday → ok')], { pinned: false });
-    finish('n-chat', 't-gone', 'when is the review?', 'The Saturn review is on Friday.');
-    assert.equal(sources('t-gone').length, 1);
-    getDb().prepare("DELETE FROM nodes WHERE id = 'n-gone'").run();
-    assert.deepEqual(sources('t-gone'), [], 'the conversation it came from was deleted');
+  test('purging or deleting the node takes its rows', () => {
     used();
     getDb().prepare("UPDATE nodes SET purged_at = 1 WHERE id = 'n-chat'").run();
     assert.equal((getDb().prepare("SELECT COUNT(*) AS n FROM memory_turn_sources WHERE node_id = 'n-chat'").get() as { n: number }).n, 0, 'purged');
@@ -392,20 +375,22 @@ describe('triggers', () => {
 });
 
 describe('the view', () => {
-  test('a merged memory shows the note it went into; a corrected one and a hidden, trashed or Use only excerpt show nothing', () => {
+  test('a merged memory shows the note it went into; a corrected one and an older past-conversation row show nothing', () => {
     const tA = past('n-a', 'My dog is Biscuit', 'Cute.');
     const dog = memory('The user\'s dog is called Biscuit.', { keywords: ['dog', 'Biscuit'], source: { nodeId: 'n-a', turnId: tA } });
     const pup = memory('用户的狗叫 Biscuit', { keywords: ['dog', 'Biscuit', '狗'] });
     const cat = memory('The user\'s cat is called Mochi.', { keywords: ['cat', 'Mochi'] });
+    deliver('n-chat', 't-1', [memoryItem(dog, 'preferences'), memoryItem(pup, 'preferences'), memoryItem(cat, 'preferences')], { framed: true });
+    finish('n-chat', 't-1', 'pets?', 'Biscuit the dog, Mochi the cat.');
+    // A row an earlier version wrote for a past-conversation turn.
     const tB = past('n-b', 'The Falcon launch is on March 3', 'Noted.');
-    deliver('n-chat', 't-1', [memoryItem(dog, 'preferences'), memoryItem(pup, 'preferences'), memoryItem(cat, 'preferences'),
-      excerptItem(tB, 'The Falcon launch is on March 3 → Noted.')], { framed: true });
-    finish('n-chat', 't-1', 'pets and launch?', 'Biscuit the dog, Mochi the cat; Falcon launches March 3.');
+    getDb().prepare(`INSERT INTO memory_turn_sources (turn_id, item_kind, item_id, owner_user_id, node_id, rank, created_at)
+      VALUES ('t-1', 'conversation', ?, ?, 'n-chat', 9, 1)`).run(String(docOf(tB)), ME);
     const view = () => replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1', 'a-unknown'])
-      .messages.flatMap((message) => message.sources.map((source) => (source.kind === 'memory' ? source.memoryId : `c:${source.docId}`)));
-    assert.deepEqual(new Set(view()), new Set([dog.id, pup.id, cat.id, `c:${docOf(tB)}`]));
-    const first = replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1']).messages[0]!.sources.find((source) => source.kind === 'memory' && source.memoryId === dog.id)!;
-    assert.deepEqual(first.kind === 'memory' && first.from, { nodeId: 'n-a', messageId: `u-${tA}`, title: 'Chat n-a' });
+      .messages.flatMap((message) => message.sources.map((source) => source.memoryId));
+    assert.deepEqual(new Set(view()), new Set([dog.id, pup.id, cat.id]));
+    const first = replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1']).messages[0]!.sources.find((source) => source.memoryId === dog.id)!;
+    assert.deepEqual(first.from, { nodeId: 'n-a', messageId: `u-${tA}`, title: 'Chat n-a' });
     // Merged: the head shows, once.
     mergeMemoryInto(ME, pup, dog.id, now);
     assert.deepEqual(view().filter((id) => id === dog.id || id === pup.id), [dog.id]);
@@ -414,19 +399,8 @@ describe('the view', () => {
     assert.ok(!view().includes(cat.id));
     // The source conversation's title follows a rename.
     getDb().prepare("UPDATE nodes SET title = 'Biscuit vet visit' WHERE id = 'n-a'").run();
-    const after = replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1']).messages[0]?.sources.find((source) => source.kind === 'memory' && source.memoryId === dog.id);
-    assert.equal(after?.kind === 'memory' ? after.from?.title : 'gone', 'Biscuit vet visit');
-    // A hidden excerpt (Don't recall).
-    const tC = past('n-c', 'The Osprey review is in room Kestrel at 15:30', 'Noted.');
-    deliver('n-chat', 't-2', [excerptItem(tC, 'The Osprey review is in room Kestrel at 15:30 → Noted.')]);
-    finish('n-chat', 't-2', 'where is the review?', 'The Osprey review is in room Kestrel at 15:30.');
-    const shownC = () => replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-2']).messages.flatMap((message) => message.sources.map((source) => source.kind));
-    assert.deepEqual(shownC(), ['conversation']);
-    forgetRecalledTurn(recalledTurnScope(ME, docOf(tC)));
-    assert.deepEqual(shownC(), []);
-    // A trashed excerpt conversation.
-    getDb().prepare("UPDATE nodes SET deleted_at = 1 WHERE id = 'n-b'").run();
-    assert.ok(!view().includes(`c:${docOf(tB)}`));
+    const after = replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1']).messages[0]?.sources.find((source) => source.memoryId === dog.id);
+    assert.equal(after?.from?.title, 'Biscuit vet visit');
     // Off, or memory off: nothing.
     setConversationMemoryMode({ ownerUserId: ME }, 'n-chat', 'off');
     assert.deepEqual(replySourcesView({ ownerUserId: ME }, 'n-chat', ['a-t-1']), { messages: [] });
@@ -471,16 +445,13 @@ describe('the API (cloud: two owners)', () => {
     delete process.env.MICHI_CLOUD;
   });
 
-  function aliceTurn(): { dog: MemoryRecord; tPast: string } {
+  function aliceTurn(): { dog: MemoryRecord } {
     const dog = createMemory({ ownerUserId: 'alice' }, { scope: { kind: 'user' }, kind: 'fact', body: 'The user\'s dog is called Biscuit.', status: 'active',
       origin: 'explicit', keywords: ['dog', 'Biscuit'] });
-    const tPast = past('n-old', 'The Falcon launch is on March 3', 'Noted.');
-    noteDelivered({ ownerUserId: 'alice', nodeId: 'n-chat', turnId: 't-1', pack: { off: false, framed: true, signature: 's', items: [
-      memoryItem(dog, 'saved'), excerptItem(tPast, 'The Falcon launch is on March 3 → Noted.')] } });
-    past('n-chat', 'dog and launch?', 'Biscuit, and Falcon launches March 3.', 't-1');
-    attributeTurn({ ownerUserId: 'alice', nodeId: 'n-chat', turnId: 't-1', humanOrigin: true, userText: 'dog and launch?',
-      assistantText: 'Biscuit, and Falcon launches March 3.' });
-    return { dog, tPast };
+    noteDelivered({ ownerUserId: 'alice', nodeId: 'n-chat', turnId: 't-1', pack: { off: false, framed: true, signature: 's', items: [memoryItem(dog, 'saved')] } });
+    past('n-chat', 'dog?', 'Biscuit.', 't-1');
+    attributeTurn({ ownerUserId: 'alice', nodeId: 'n-chat', turnId: 't-1', humanOrigin: true, userText: 'dog?', assistantText: 'Biscuit.' });
+    return { dog };
   }
 
   test('the owner reads what a reply was based on; another owner gets 404; ids of another node are ignored; ids are validated', async () => {
@@ -489,7 +460,7 @@ describe('the API (cloud: two owners)', () => {
     assert.equal(read.status, 200);
     assert.deepEqual(read.json.messages.map((message: { messageId: string }) => message.messageId), ['a-t-1']);
     const kinds = read.json.messages[0].sources.map((source: { kind: string }) => source.kind);
-    assert.deepEqual(kinds, ['memory', 'conversation']);
+    assert.deepEqual(kinds, ['memory']);
     assert.equal(read.json.messages[0].sources[0].memoryId, dog.id);
     assert.equal(read.json.messages[0].sources[0].savedBy, 'user');
     assert.equal((await call('GET', '/nodes/n-chat/memory-sources?messages=a-t-1', 'bob')).status, 404, 'another owner\'s conversation');
@@ -501,55 +472,9 @@ describe('the API (cloud: two owners)', () => {
     }
     assert.equal((await call('GET', '/nodes/n-chat/memory-sources?messages=a-t-1', null)).status, 401, 'no access');
   });
-
-  test('Don\'t recall hides that turn alone and bars extraction from it; it is idempotent; another owner gets 404; memory_delete with a c: ref only bars extraction', async () => {
-    const { tPast } = aliceTurn();
-    const docId = docOf(tPast);
-    assert.equal((await call('POST', '/memory-recall/hide', 'bob', { docId })).status, 404);
-    assert.equal((await call('POST', '/memory-recall/hide', 'alice', { docId: 'x' })).status, 400);
-    assert.equal((await call('POST', '/memory-recall/hide', 'alice', { docId, extra: 1 })).status, 400);
-    const hidden = await call('POST', '/memory-recall/hide', 'alice', { docId });
-    assert.deepEqual(hidden, { status: 200, json: { hidden: true } });
-    const isHidden = (turnId: string) => !!getDb().prepare("SELECT 1 FROM memory_recall_docs WHERE doc_kind = 'turn' AND ref_id = ? AND hidden = 1").get(turnId);
-    assert.ok(isHidden(tPast));
-    assert.equal(isHidden('t-1'), false, 'the reply that repeated it is chat history of its own conversation');
-    assert.ok(getDb().prepare('SELECT 1 FROM memory_extraction_tombstones WHERE source_turn_id = ?').get(tPast), 'barred from extraction');
-    assert.deepEqual((await call('POST', '/memory-recall/hide', 'alice', { docId })).json, { hidden: true }, 'again: done');
-    assert.equal((await call('POST', '/memory-recall/hide', 'alice', { docId: 999_999 })).status, 404);
-    // The agent's forget of a past conversation's turn leaves it chat history (nothing hidden) and keeps it out of automatic memory.
-    const tOther = past('n-old', 'The Saturn review is Friday', 'ok');
-    getDb().prepare(`INSERT INTO turns (turn_id, node_id, user_message_id, assistant_message_id, status, last_seq, started_at, updated_at)
-      VALUES ('t-forget', 'n-chat', NULL, 'a-t-forget', 'active', 0, ?, ?)`).run(now, now);
-    const kept = memoryTool('memory_delete', { ownerUserId: 'alice', workspaceId: 'ws', nodeId: 'n-chat', isAgentRun: false }, { ref: conversationRef(docOf(tOther)) });
-    assert.equal(kept.isError, undefined, kept.content[0]!.text);
-    assert.equal(JSON.parse(kept.content[0]!.text).status, 'kept_out');
-    assert.equal(isHidden(tOther), false);
-    assert.ok(getDb().prepare('SELECT 1 FROM memory_extraction_tombstones WHERE source_turn_id = ?').get(tOther), 'barred from extraction');
-  });
 });
 
 describe('review fixes: what counts, cost', () => {
-  test('one past turn under Recent (a long message\'s start and end) and under Related (around a match): what the user said in either counts', () => {
-    const filler = 'We still need to sort out the catering, the projector and the shuttle times. ';
-    const tPast = past('n-old', `Notes for the offsite. ${filler.repeat(4)}The venue is Hall Lark at 14 Kestrel Road. ${filler.repeat(4)}Thanks.`, 'Got it.');
-    deliver('n-chat', 't-1', [
-      excerptItem(tPast, `Notes for the offsite. ${filler} … ${filler}Thanks.`, 'recent'),
-      excerptItem(tPast, `… shuttle times. The venue is Hall Lark at 14 Kestrel Road. We still need … → Got it.`),
-    ], { framed: true });
-    assert.deepEqual(finish('n-chat', 't-1', 'Which venue did we pick?', 'You picked Hall Lark at 14 Kestrel Road.')!.used.map((entry) => entry.kind),
-      ['conversation'], 'the venue only Related showed');
-  });
-
-  test('a past chat is a source by what the user typed there, not by what Michi replied there', () => {
-    const tPast = past('n-old', 'Where is the offsite?', 'At the Hilton Garden Inn, Seattle.');
-    deliver('n-chat', 't-1', [excerptItem(tPast, 'Where is the offsite? → At the Hilton Garden Inn, Seattle.')], { framed: true });
-    assert.deepEqual(finish('n-chat', 't-1', 'Book me a taxi to the offsite', 'Booked a taxi to the Hilton Garden Inn.')!.used, [],
-      'the reply repeats what Michi said there; the user told nothing of it');
-    const tTold = past('n-old', 'My flight to Osaka is JL123, leaving Narita at 09:40.', 'Noted.');
-    deliver('n-chat', 't-2', [excerptItem(tTold, 'My flight to Osaka is JL123, leaving Narita at 09:40. → Noted.')]);
-    assert.deepEqual(finish('n-chat', 't-2', 'which flight again?', 'Your flight is JL123 from Narita.')!.used.map((entry) => entry.kind), ['conversation']);
-  });
-
   test('a candidate whose words the reply cannot add is never searched; a large workspace checks fewer', () => {
     const notes = Array.from({ length: 4 }, (_, i) => memory(`Quillfeather note ${i}: the quillfeather valve ${i} is calibrated.`, { keywords: ['quillfeather'] }));
     deliver('n-chat', 't-1', notes.map((record) => memoryItem(record, 'related')), { framed: true });

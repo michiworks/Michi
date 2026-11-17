@@ -3,12 +3,13 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
-// The 2px keyboard focus ring is var(--focus-ring) (index.css); a rule may
-// set its own outline-offset, but a literal accent ring drifts from it. Rings
-// in a contrast colour on a filled background (--term-fg, --sel-bar-fg) and
-// the thinner 1px rings are not this ring.
+// The 2px keyboard focus ring is var(--focus-ring) (cssVarsFor in
+// components/terminal/tokens.ts, with its fallback in index.css); a rule may
+// set its own outline-offset, but a literal accent ring drifts from it, and a
+// 1px one is thinner than it (ST-07). Rings in a contrast colour on a filled
+// background (--term-fg, --sel-bar-fg) are not this ring.
 const root = dirname(fileURLToPath(import.meta.url));
-const ACCENT_RING = /outline:\s*2px\s+solid\s+(?:var\(--term-accent\)|color-mix\(in srgb,\s*var\(--term-accent\))/;
+const ACCENT_RING = /outline:\s*[12]px\s+solid\s+(?:var\(--term-accent\)|color-mix\(in srgb,\s*var\(--term-accent\))/;
 
 function cssFiles(dir) {
   return readdirSync(dir).flatMap((name) => {
@@ -41,12 +42,12 @@ const read = (file) => readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '
 
 it('defines the focus ring once and the baseline rule uses it', () => {
   const index = read(join(root, 'index.css'));
-  expect(index).toMatch(/--focus-ring:\s*2px solid color-mix\(in srgb, var\(--term-accent\) 62%, transparent\);/);
+  expect(index).toMatch(/--focus-ring:\s*2px solid var\(--term-accent\);/);
   const base = rulesOf(index).find(({ head }) => head.startsWith(":where(button, [role='button'], a[href], input, select, textarea):focus-visible"));
   expect(base?.body).toMatch(/outline:\s*var\(--focus-ring\);/);
 });
 
-it('uses var(--focus-ring) for every 2px accent focus ring', () => {
+it('uses var(--focus-ring) for every accent focus ring', () => {
   const literal = [];
   for (const file of cssFiles(root)) {
     for (const { head, body } of rulesOf(read(file))) {

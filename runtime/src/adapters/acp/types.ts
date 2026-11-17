@@ -1,3 +1,5 @@
+import type { FormFieldValue } from "michi-shared";
+
 export type AcpUpdate = Record<string, any>;
 
 /**
@@ -90,6 +92,8 @@ export function acpShouldAttachMcp(
 export interface AcpUserAnswer {
     question: string;
     answer: string;
+    /** The typed value of a question with a field (UserInputAnswer.value). */
+    value?: FormFieldValue;
 }
 
 /** An MCP server entry of session/new and session/load. */

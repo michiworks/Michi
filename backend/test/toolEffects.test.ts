@@ -143,7 +143,7 @@ describe('the tool effects register (DESIGN-v2 §2.9)', () => {
       'create_scheduled_job', 'spawn_branches', 'spawn_agent', 'open_url', 'save_artifact', 'web_search', 'fetch_content', 'bash', 'write']) {
       assert.ok(!(CHECKIN_TOOL_NAMES as readonly string[]).includes(absent), absent);
     }
-    assert.equal(CHECKIN_TOOL_NAMES.length, 30);
+    assert.equal(CHECKIN_TOOL_NAMES.length, 29);
     assert.equal(new Set(CHECKIN_TOOL_NAMES).size, CHECKIN_TOOL_NAMES.length);
   });
 

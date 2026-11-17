@@ -15,7 +15,8 @@ export function ClocksBlock({block}:BlockProps<'clocks'>){
         <span className="desk-clock-label">{z.label}</span>
         {face?<>
           <span className="desk-clock-time">{face.time}</span>
-          <span className="desk-clock-date">{face.date}{face.offset&&` · ${face.offset}`}</span>
+          <span className="desk-clock-date">{face.date}</span>
+          {face.offset&&<span className="desk-clock-date desk-clock-offset">{face.offset}</span>}
         </>:<>
           <span className="desk-clock-bad">{L('时区无效','Invalid time zone')}</span>
           <span className="desk-clock-date">{z.tz}</span>

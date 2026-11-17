@@ -388,7 +388,9 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
       if (!canCollapse) return;
       if (collapsed) engage();
       const target = e.target as Element;
-      if (target.closest(TOOLBAR_CONTROL) || target.closest('.composer-pre-blocks-scroll') || fieldHasFocus()) return;
+      // A pre-block owns its own clicks, also where it floats out of the
+      // composer in a portal (data-composer-pre-block: the tray's card).
+      if (target.closest(TOOLBAR_CONTROL) || target.closest('.composer-pre-blocks-scroll, [data-composer-pre-block]') || fieldHasFocus()) return;
       const el = field();
       if (!el) return;
       el.focus({ preventScroll: true });
@@ -480,11 +482,11 @@ export const ComposerShell = forwardRef<ComposerShellHandle, ComposerShellProps>
         style={{
           ...positionStyle,
           background: 'var(--term-composer-bg, var(--term-bg))',
-          border: 'var(--term-composer-border, 1px solid var(--term-line-s))',
+          border: 'var(--term-composer-border)',
           borderRadius: 'var(--term-composer-radius, 0px)',
           boxShadow: isFocused
-            ? 'var(--term-composer-shadow, 0 1px 0 rgba(0,0,0,0.04), 0 2px 6px rgba(0,0,0,0.10))'
-            : 'var(--term-composer-shadow-muted, 0 1px 0 rgba(0,0,0,0.03), 0 1px 3px rgba(0,0,0,0.06))',
+            ? 'var(--term-composer-shadow)'
+            : 'var(--term-composer-shadow-muted)',
           transition: 'background var(--t-soft) ease-out, border-color var(--t-soft) ease-out, box-shadow var(--t-soft) ease-out',
           // Shell chrome inherits this font size. Defaults to --fs-md; Home
           // overrides via --composer-chrome-size to scale the whole shell up

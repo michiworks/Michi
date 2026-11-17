@@ -1,8 +1,9 @@
 import './mobile.css';
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { prefersReducedMotion } from '../../hooks/useReducedMotion';
+import { MoreIcon } from './icons';
 
-/** Backstop for a skipped animationend: mobile-leave runs 110ms (mobile.css). */
+/** Backstop for a skipped transitionend: the panel's exit runs 110ms (mobile.css). */
 const LEAVE_FALLBACK_MS = 160;
 
 function reducedMotion() {
@@ -13,8 +14,9 @@ function reducedMotion() {
  * state and behavior. On narrow windows they open as a labelled toolbar. */
 export function ResponsiveToolbar({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
-  // On narrow windows a closing panel plays mobile-leave before it hides.
-  // While it leaves it is inert: no taps, no focus, out of the a11y tree.
+  // On narrow windows a closing panel fades out before it hides, reversing
+  // its entrance from wherever that got to. While it leaves it is inert: no
+  // taps, no focus, out of the a11y tree.
   // Set together with the close, so no frame shows the panel already gone.
   const [leaving, setLeaving] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -68,14 +70,12 @@ export function ResponsiveToolbar({ children }: { children: React.ReactNode }) {
       <button ref={trigger} type="button" className="workspace-toolbar__trigger t-icon-btn"
         aria-label="Workspace views" aria-expanded={open} aria-controls={id}
         onClick={() => (open ? close() : openPanel())}>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-          <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
-        </svg>
+        <MoreIcon size="lg" />
       </button>
       <div id={id} className="workspace-toolbar__actions" role="group" aria-label="Workspace view controls"
         aria-hidden={leavingNow || undefined} inert={leavingNow}
-        onAnimationEnd={event => {
-          if (event.target === event.currentTarget && event.animationName === 'mobile-leave') setLeaving(false);
+        onTransitionEnd={event => {
+          if (event.target === event.currentTarget && event.propertyName === 'opacity') setLeaving(false);
         }}
         onClick={event => {
           if (!open || !(event.target as HTMLElement).closest('button')) return;

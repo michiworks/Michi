@@ -25,7 +25,7 @@ function dto(badge) {
     displayName: 'Michi', enabled: true, paused: false, welcomeWanted: false, conversationWaiting: false,
     statusLine: { text: 'Watching · checked 2m ago', tone: 'ok' }, badge,
     needsYou: badge > 0 ? [{ id: 'cmi-1', title: 'CR-1 & 2 comments', isNew: true, target: { kind: 'companion', tab: 'today', itemId: 'cmi-1' } }] : [],
-    needsYouTotal: badge, briefReady: true, revision: 1,
+    needsYouTotal: badge, revision: 1,
   };
 }
 

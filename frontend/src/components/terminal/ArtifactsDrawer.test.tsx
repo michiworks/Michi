@@ -1,3 +1,4 @@
+import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import ArtifactsDrawer from './ArtifactsDrawer';
@@ -119,16 +120,19 @@ describe('ArtifactsDrawer + button', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('closes a row menu on a second press of its ⋯', async () => {
+  it('shows a row’s ⋯ expanded while its menu is open, and closes the menu on a second press', async () => {
     mockContexts.push({ id: 'notes', name: 'Menu notes', filePath: 'notes.md', type: 'doc', source: 'user', createdAt: 1, updatedAt: 1 });
     render(<ArtifactsDrawer open onClose={vi.fn()} />);
     openMenu('Menu notes');
     const more = screen.getByRole('button', { name: 'More actions for Menu notes' });
+    expect(more.getAttribute('aria-haspopup')).toBe('menu');
+    expect(more.getAttribute('aria-expanded')).toBe('true');
     // The menu listens for outside presses from its next frame.
     await act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     fireEvent.mouseDown(more);
     fireEvent.click(more);
     expect(screen.queryByRole('menu', { name: 'Actions' })).toBeNull();
+    expect(more.getAttribute('aria-expanded')).toBe('false');
   });
 
   it('saves a pasted URL as a link artifact', () => {
@@ -235,14 +239,16 @@ describe('ArtifactsDrawer list', () => {
     expect(mockActions.deleteContext).toHaveBeenCalledWith('bubble');
   });
 
-  it('goes to the conversation an artifact came from', async () => {
+  it('goes to the conversation an artifact came from, closing the drawer at once', async () => {
     mockNodes['n-1'] = { nodeId: 'n-1', title: 'Bubble redesign', messages: [] };
     mockContexts.push(htmlMock({ origin: { nodeId: 'n-1' } }));
     const onClose = vi.fn();
-    render(<ArtifactsDrawer open onClose={onClose} />);
+    const closeAtOnce = vi.fn();
+    render(<ArtifactsDrawer open onClose={onClose} closeAtOnce={closeAtOnce} />);
     fireEvent.click(within(openMenu('user-bubble-mock')).getByRole('menuitem', { name: 'Go to conversation' }));
     await waitFor(() => expect(mockNavigate).toHaveBeenCalledWith('n-1', { workspaceId: 'p1' }));
-    expect(onClose).toHaveBeenCalled();
+    expect(closeAtOnce).toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('offers no way to a deleted conversation', () => {
@@ -275,6 +281,24 @@ describe('ArtifactsDrawer HTML preview', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.queryByTestId('artifact-preview')).toBeNull();
     expect(screen.getByText('user-bubble-mock')).toBeTruthy();
+  });
+
+  it("keeps the page on screen while an agent's rewrite loads, then shows the new one in the same frame", async () => {
+    mockContexts.push(htmlMock());
+    mockFetchContent.mockResolvedValueOnce({ content: '<p>first</p>' });
+    const view = render(<ArtifactsDrawer open onClose={() => {}} />);
+    fireEvent.click(screen.getByText('user-bubble-mock'));
+    const frame = await screen.findByTitle('user-bubble-mock');
+    let finish!: (file: { content: string }) => void;
+    mockFetchContent.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    mockContexts[0] = { ...mockContexts[0], updatedAt: now + 5_000 };
+    view.rerender(<ArtifactsDrawer open onClose={() => {}} />);
+    expect(mockFetchContent).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText('Loading…')).toBeNull();
+    expect(screen.getByTitle('user-bubble-mock')).toBe(frame);
+    await act(async () => { finish({ content: '<p>second</p>' }); });
+    expect(screen.getByTitle('user-bubble-mock')).toBe(frame);
+    expect(frame.getAttribute('srcdoc')?.endsWith('<p>second</p>')).toBe(true);
   });
 
   it('says what went wrong and offers a download when a page cannot be read', async () => {
@@ -384,6 +408,28 @@ describe('ArtifactsDrawer open routing', () => {
     fireEvent.click(screen.getByText('brief.md'));
     await waitFor(() => expect(mockActions.openArtifactPane).toHaveBeenCalledWith('.artifacts/brief.md'));
     expect(mockOpenPath).not.toHaveBeenCalled();
+  });
+
+  it('leaves no drawer once a doc opens in its pane, while Escape still slides it out', async () => {
+    // TerminalShell's wiring: a close for a destination is instant, any other slides.
+    function Shell() {
+      const [open, setOpen] = React.useState(true);
+      const [cut, setCut] = React.useState(false);
+      return <ArtifactsDrawer open={open} motion={cut ? 'instant' : 'standard'} onClose={() => setOpen(false)}
+        closeAtOnce={() => { setCut(true); setOpen(false); }} />;
+    }
+    mockContexts.push({
+      id: 'emb-doc', name: 'brief.md', filePath: '.artifacts/brief.md', type: 'doc', kind: 'embedded', source: 'user', createdAt: now, updatedAt: now,
+    });
+    const view = render(<Shell />);
+    await act(async () => { fireEvent.click(screen.getByText('brief.md')); });
+    expect(mockActions.openArtifactPane).toHaveBeenCalledWith('.artifacts/brief.md');
+    expect(document.querySelector('.drawer-shell-panel')).toBeNull();
+    view.unmount();
+
+    render(<Shell />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(document.querySelector(".drawer-shell-panel[data-state='closed']")).not.toBeNull();
   });
 
   it('opens a symlink doc artifact via the in-app pane (falls back to OS on failure)', async () => {

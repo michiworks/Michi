@@ -6,7 +6,8 @@
       "event: artifact_saved\ndata: {\"contextId\":\"claude-fresh-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n"
+      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
+      "event: blocks\ndata: {\"blocks\":[{\"type\":\"poll\",\"question\":\"Which day?\",\"options\":[\"Monday\",\"Tuesday\"],\"id\":\"cb-<id>\"},{\"type\":\"stat\",\"label\":\"Open tasks\",\"value\":\"12\",\"delta\":\"+3\",\"id\":\"cb-<id>\"}],\"title\":\"Pick a date\",\"fallbackText\":\"Pick a date\\n\\nWhich day?\\n- Monday\\n- Tuesday\\n\\nOpen tasks: 12 (+3)\"}\n\n"
     ],
     "run": {
       "events": [
@@ -24,7 +25,8 @@
       "event: artifact_saved\ndata: {\"contextId\":\"claude-resume-ctx-1\",\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":10}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n"
+      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
+      "event: blocks\ndata: {\"blocks\":[{\"type\":\"poll\",\"question\":\"Which day?\",\"options\":[\"Monday\",\"Tuesday\"],\"id\":\"cb-<id>\"},{\"type\":\"stat\",\"label\":\"Open tasks\",\"value\":\"12\",\"delta\":\"+3\",\"id\":\"cb-<id>\"}],\"title\":\"Pick a date\",\"fallbackText\":\"Pick a date\\n\\nWhich day?\\n- Monday\\n- Tuesday\\n\\nOpen tasks: 12 (+3)\"}\n\n"
     ],
     "run": {
       "events": [
@@ -43,6 +45,7 @@
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
+      "event: blocks\ndata: {\"blocks\":[{\"type\":\"poll\",\"question\":\"Which day?\",\"options\":[\"Monday\",\"Tuesday\"],\"id\":\"cb-<id>\"},{\"type\":\"stat\",\"label\":\"Open tasks\",\"value\":\"12\",\"delta\":\"+3\",\"id\":\"cb-<id>\"}],\"title\":\"Pick a date\",\"fallbackText\":\"Pick a date\\n\\nWhich day?\\n- Monday\\n- Tuesday\\n\\nOpen tasks: 12 (+3)\"}\n\n",
       "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n"
     ],
     "run": {
@@ -62,6 +65,7 @@
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
+      "event: blocks\ndata: {\"blocks\":[{\"type\":\"poll\",\"question\":\"Which day?\",\"options\":[\"Monday\",\"Tuesday\"],\"id\":\"cb-<id>\"},{\"type\":\"stat\",\"label\":\"Open tasks\",\"value\":\"12\",\"delta\":\"+3\",\"id\":\"cb-<id>\"}],\"title\":\"Pick a date\",\"fallbackText\":\"Pick a date\\n\\nWhich day?\\n- Monday\\n- Tuesday\\n\\nOpen tasks: 12 (+3)\"}\n\n",
       "event: branch_overview\ndata: {\"overview\":\"Explored alpha and beta.\"}\n\n",
       "event: follow_ups\ndata: {\"followUps\":[\"First?\",\"Second?\",\"Third?\"]}\n\n"
     ],
@@ -82,7 +86,8 @@
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\",\"size\":12}\n\n",
       "event: artifact_updated\ndata: {\"name\":\"notes\",\"filePath\":\".contexts/notes.md\"}\n\n",
       "event: image\ndata: {\"path\":\"chart.png\",\"caption\":\"Quarterly chart\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
-      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n"
+      "event: image\ndata: {\"path\":\"chart.png\",\"mimeType\":\"image/png\",\"size\":16}\n\n",
+      "event: blocks\ndata: {\"blocks\":[{\"type\":\"poll\",\"question\":\"Which day?\",\"options\":[\"Monday\",\"Tuesday\"],\"id\":\"cb-<id>\"},{\"type\":\"stat\",\"label\":\"Open tasks\",\"value\":\"12\",\"delta\":\"+3\",\"id\":\"cb-<id>\"}],\"title\":\"Pick a date\",\"fallbackText\":\"Pick a date\\n\\nWhich day?\\n- Monday\\n- Tuesday\\n\\nOpen tasks: 12 (+3)\"}\n\n"
     ],
     "run": {
       "events": [

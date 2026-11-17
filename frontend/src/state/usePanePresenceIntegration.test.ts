@@ -10,7 +10,8 @@
  */
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { PRESENCE_ON_SCREEN_SETTLE_MS, usePanePresenceIntegration } from './usePanePresenceIntegration';
+import { usePanePresenceIntegration } from './usePanePresenceIntegration';
+import { PANE_STRIP_SETTLE_MS } from './attention/targetVisibility';
 import type { Project } from './chatTypes';
 import type { PaneItem } from './paneItems';
 import * as persistenceApi from '../services/api/persistence';
@@ -1170,7 +1171,7 @@ describe('usePanePresenceIntegration: visible means on screen', () => {
     const scrollTo = paintStrip({ 'root-1': 0, 'n-2': 400, 'n-3': 800 });
     const { hook, submit, visible } = mount(project, { [`${project.id}::tree-1`]: ids }, ids);
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
-    await act(async () => { await vi.advanceTimersByTimeAsync(PRESENCE_ON_SCREEN_SETTLE_MS); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PANE_STRIP_SETTLE_MS); });
     expect(visible()).toEqual({ 'root-1': true, 'n-2': true, 'n-3': false });
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     const settled = submit.mock.calls.length;
@@ -1182,7 +1183,7 @@ describe('usePanePresenceIntegration: visible means on screen', () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(50); });
     }
     expect(submit).toHaveBeenCalledTimes(settled);
-    await act(async () => { await vi.advanceTimersByTimeAsync(PRESENCE_ON_SCREEN_SETTLE_MS); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(PANE_STRIP_SETTLE_MS); });
     expect(submit).toHaveBeenCalledTimes(settled + 1);
     expect(visible()).toEqual({ 'root-1': false, 'n-2': true, 'n-3': true });
     hook.unmount();

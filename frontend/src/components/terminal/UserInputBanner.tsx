@@ -1,5 +1,6 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useReducer, useRef } from 'react';
+import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useReducer, useRef } from 'react';
 import { animate, motion, type AnimationPlaybackControls } from 'motion/react';
+import { formFieldValueText } from 'michi-shared';
 import type { UserInputRequest } from '../../state/chatTypes';
 import type { UserInputAnswer } from '../../services/chatStreamEvents';
 import { usePrefs } from '../../state/prefs';
@@ -7,7 +8,12 @@ import { prefersReducedMotion } from '../../hooks/useReducedMotion';
 import { DUR, EASE } from '../../motion/tokens';
 import { useFresh } from '../../motion/useFresh';
 import { isImeComposing } from '../../lib/ime';
+import { CheckIcon } from './icons';
+import { answerOf, blankValue, isMissing, type FieldRaw } from './content/page/vendor-blocks/src/desk/blocks/catalog/interactive/fieldValues';
 import './UserInputBanner.css';
+
+/** A question's form field (a number, a slider, a time...): Mantine, loaded the first time a card has one. */
+const AskFieldControl = lazy(() => import('./AskFieldControl'));
 
 /**
  * What sending an answer returns. A promise that rejects or resolves `false`
@@ -277,8 +283,8 @@ const TRACK_GAP = 28;
 // is drawn as generated content (UserInputBanner.css), so text lookups (find
 // in page, Testing Library, Playwright getByText) see the receipt alone.
 
-/** The live card's entrance curve (was `ask-card-in`; also the track's slide). */
-const ASK_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
+/** The live card's entrance curve (was `ask-card-in`). */
+const ASK_EASE = EASE.out;
 /** Strength of the chosen option's accent fill (the alert bar's 12% tint). */
 const FILL_OPACITY = 0.12;
 /** The chosen option fills over 120ms while the others fade over 100ms. */
@@ -393,12 +399,25 @@ function takeHandoff(key: string): HandoffClaim | null {
   return { entry: { ...entry, ghost }, delay: Math.max(0, MARK_S - (now - entry.sentAt) / 1000) };
 }
 
-/** The hand-off itself, on the receipt's settled DOM. Returns its cleanup. */
+/**
+ * The hand-off itself, on the receipt's settled DOM. Returns its cleanup.
+ * Under reduced motion the card takes the receipt's height at once and the
+ * copy leaves with the live card: only the receipt's fade remains.
+ */
 function playHandoff(card: HTMLElement, { entry, delay }: HandoffClaim): () => void {
   const { ghost } = entry;
   const body = card.querySelector<HTMLElement>('.ask-card-body');
+  if (prefersReducedMotion()) {
+    if (!body) return () => {};
+    body.style.opacity = '0';
+    const reveal = animate(body, { opacity: [0, 1] }, { duration: RECEIPT_IN_S, ease: EASE.out });
+    void reveal.then(() => { body.style.opacity = ''; });
+    return () => {
+      reveal.stop();
+      body.style.opacity = '';
+    };
+  }
   const settledHeight = card.offsetHeight;
-  const reduce = prefersReducedMotion();
   Object.assign(card.style, { position: 'relative', isolation: 'isolate', height: `${entry.height}px` });
   if (body) body.style.opacity = '0';
   card.appendChild(ghost);
@@ -414,7 +433,7 @@ function playHandoff(card: HTMLElement, { entry, delay }: HandoffClaim): () => v
   void collapse.then(() => { card.style.height = ''; });
   runs.push(out, collapse);
   if (body) {
-    const reveal = animate(body, reduce ? { opacity: [0, 1] } : { opacity: [0, 1], y: [3, 0] },
+    const reveal = animate(body, { opacity: [0, 1], y: [3, 0] },
       { duration: RECEIPT_IN_S, delay: delay + GHOST_OUT_S, ease: EASE.out });
     void reveal.then(() => { body.style.opacity = ''; body.style.transform = ''; });
     runs.push(reveal);
@@ -495,6 +514,8 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   /** Single-select questions whose Other text is kept but not chosen (an option was picked after it). */
   const [otherOff, setOtherOff] = useState<Set<number>>(() => new Set());
   const [answered, setAnswered] = useState<Set<number>>(() => new Set());
+  /** What each field question's control holds; a question not yet touched holds its field's start value. */
+  const [fieldRaws, setFieldRaws] = useState<Map<number, FieldRaw>>(() => new Map());
 
   // --- sliding-track measurements (horizontal slide, viewport height follows) ---
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -580,7 +601,19 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
       // initial layout doesn't animate from empty.
       if (!reduce) setSlideAnim(true);
     }
-  }, [safeIdx, qWidth, questions, selections, otherTexts, contentTick]);
+  }, [safeIdx, qWidth, questions, selections, otherTexts, fieldRaws, contentTick]);
+
+  // A field's control grows after it loads, when its error or a multiselect's
+  // pills show, and as a textarea sizes itself: follow its question's height.
+  // The question's height is its content's; the viewport's own does not feed back.
+  const activeHasField = !!questions[safeIdx]?.field;
+  useLayoutEffect(() => {
+    const item = questionRefs.current[safeIdx];
+    if (!activeHasField || !item || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setViewH(item.offsetHeight + 2));
+    ro.observe(item);
+    return () => ro.disconnect();
+  }, [safeIdx, activeHasField]);
 
   useEffect(() => () => {
     if (advanceTimer.current) clearTimeout(advanceTimer.current);
@@ -673,7 +706,26 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   /** Other's text, when it is part of question `idx`'s answer. */
   const otherAnswer = (idx: number): string => (otherOff.has(idx) ? '' : (otherTexts.get(idx) ?? '').trim());
 
+  const fieldRaw = (idx: number): FieldRaw => {
+    const field = questions[idx]?.field;
+    return fieldRaws.has(idx) ? fieldRaws.get(idx)! : field ? blankValue(field) : null;
+  };
+
+  const setFieldRaw = (idx: number, value: FieldRaw) => {
+    if (readOnly || answeringRef.current) return;
+    setFieldRaws(prev => new Map(prev).set(idx, value));
+    markAnswered(idx);
+  };
+
+  /** A field question that cannot be sent yet: required, and empty. */
+  const fieldMissing = (idx: number): boolean => {
+    const field = questions[idx]?.field;
+    return !!field && isMissing(field, answerOf(field, fieldRaw(idx)));
+  };
+
   const buildAnswer = (idx: number): string => {
+    const field = questions[idx]?.field;
+    if (field) return formFieldValueText(field, answerOf(field, fieldRaw(idx)));
     const sel = selections.get(idx) ?? new Set<string>();
     const other = otherAnswer(idx);
     const parts = [...sel];
@@ -732,6 +784,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
       ...(question.id !== undefined ? { id: question.id } : {}),
       question: question.question,
       answer: buildAnswer(idx),
+      ...(question.field ? { value: answerOf(question.field, fieldRaw(idx)) } : {}),
     }));
     sendAnswer(() => onSubmit(answers));
   };
@@ -747,7 +800,9 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
   if (!q) return null;
 
   const isLastQuestion = safeIdx === questions.length - 1;
-  const hasSelection = currentSelections.size > 0 || otherAnswer(safeIdx).length > 0;
+  // A field question is ready once nothing required is missing: an optional one may go empty.
+  const hasSelection = q.field ? !fieldMissing(safeIdx) : currentSelections.size > 0 || otherAnswer(safeIdx).length > 0;
+  const requiredFieldMissing = questions.some((_, idx) => fieldMissing(idx));
   /** While the answer is on its way, the controls say so to AT (they ignore input). */
   const busy = answering ? true : undefined;
 
@@ -794,6 +849,23 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                   focusable={active}
                   onResize={bumpContent}
                 />
+                {question.field ? (
+                  // Sending tints the field as it tints a chosen option.
+                  <div className="ask-card-field" style={answering ? { ...FILL_HOST, pointerEvents: 'none' } : undefined}>
+                    {answering && <AnswerFill />}
+                    <Suspense fallback={<div className="ask-card-field-pending" aria-hidden />}>
+                      <AskFieldControl
+                        field={question.field}
+                        value={fieldRaw(qi)}
+                        onChange={(value) => { if (active) setFieldRaw(qi, value); }}
+                        disabled={readOnly || !active}
+                        onEnter={() => {
+                          if (!isLastQuestion) { if (!fieldMissing(qi)) goToStep(safeIdx + 1); } else if (!requiredFieldMissing) handleSubmit();
+                        }}
+                      />
+                    </Suspense>
+                  </div>
+                ) : (
                 <div
                   className="ask-card-options"
                   role={question.multiSelect ? 'group' : 'radiogroup'}
@@ -861,6 +933,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                     />
                   </motion.div>
                 </div>
+                )}
               </div>
             );
           })}
@@ -869,7 +942,7 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
 
       {!readOnly && (
         <div className="ask-card-footer">
-          <button type="button" className="ask-card-skip" onClick={handleSkip} aria-disabled={busy}>
+          <button type="button" className="ask-card-skip" onClick={handleSkip} aria-disabled={busy} aria-busy={busy}>
             {isMultiQuestion ? 'Skip all' : 'Skip'}
           </button>
           <div className="ask-card-footer-right">
@@ -887,13 +960,14 @@ export default function UserInputBanner({ userInput, onSubmit, onSkip, readOnly 
                 type="button"
                 className="ui-btn ui-btn--primary ask-card-submit"
                 aria-disabled={busy}
+                aria-busy={busy}
                 onClick={handleSubmit}
-                disabled={!hasSelection && !answered.size}
+                disabled={(!hasSelection && !answered.size) || requiredFieldMissing}
               >
-                {isMultiQuestion ? 'Submit all ✓' : q.multiSelect && currentSelections.size > 0 ? `Submit (${currentSelections.size})` : 'Submit'}
+                {isMultiQuestion ? <>Submit all <CheckIcon size="sm" /></> : q.multiSelect && currentSelections.size > 0 ? `Submit (${currentSelections.size})` : 'Submit'}
               </button>
             ) : (
-              <button type="button" className="ui-btn ui-btn--primary ask-card-submit" aria-disabled={busy} onClick={() => goToStep(safeIdx + 1)} disabled={!hasSelection}>
+              <button type="button" className="ui-btn ui-btn--primary ask-card-submit" aria-disabled={busy} aria-busy={busy} onClick={() => goToStep(safeIdx + 1)} disabled={!hasSelection}>
                 Next →
               </button>
             )}

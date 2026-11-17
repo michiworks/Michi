@@ -13,8 +13,8 @@
  *   [Kind] label and wake.preamble, [CURRENT RUN TIME], the user's rules
  *   first, the goals, the notes, [CARD RESULTS], the cards still waiting,
  *   the sources off in settings, [RECENT CONVERSATION], the collector data
- *   fenced as untrusted (for the brief, with the last brief and the user's
- *   ratings), and the kind's own body;
+ *   fenced as untrusted (for a heartbeat, with the user's ratings), and the
+ *   kind's own body;
  * - companionContextText: the [COMPANION CONTEXT] ahead of the user's own
  *   message (turnContext.ts), which carries only the user's own words and
  *   Michi's facts, never text a check-in wrote (§2.8 T1);
@@ -33,7 +33,7 @@ import {
   COMPANION_LIMITS,
   DEFAULT_COMPANION_NAME,
   MICHI_ASSISTANT_MARKER,
-  type CompanionBriefDto,
+  companionItemRaise,
   type CompanionBucket,
   type CompanionCardDto,
   type CompanionCheckinKind,
@@ -331,6 +331,9 @@ export function itemLine(item: CompanionItemDto, now: number): string {
   if (facts) parts.push(`facts: ${facts}`);
   if (item.feedback === 'down') parts.push(`the user marked it not useful${item.feedbackReason ? ` (${item.feedbackReason})` : ''}`);
   if (item.feedback === 'up') parts.push('the user marked it useful');
+  // What a check-in raised today, so the next one sees it and lowers it, or leaves it, instead of raising it again.
+  const raise = companionItemRaise(item, now);
+  if (raise) parts.push(`you raised it today ${whenText(now, raise.at)}: "${materialLine(raise.reason, 200)}"`);
   return `- ${parts.join(' · ')}`;
 }
 
@@ -436,7 +439,7 @@ function standingBlocks(input: StandingInput): string[] {
 
 /**
  * How the user rated the items of one kind (thumbs on items in Today). Only
- * the thumbs up reach the brief, as "keep giving these" (conv-1): a thumbs
+ * the thumbs up reach a check-in, as "keep giving these" (conv-1): a thumbs
  * down is about one item or one version (R2.7: already_handled dismisses it,
  * not_relevant mutes it), and the one kind-wide signal is the deterministic
  * demotion (demotedSubtypes), so `down` and `reasons` are not shown.
@@ -453,15 +456,13 @@ export interface CompanionItemFeedback {
 export interface CompanionTurnView {
   kind: CompanionTurnKind;
   material: CompanionMaterial;
-  /** Items the changes or past brief cards name that are not in material.open any more (resolved, dismissed, muted), by id. */
+  /** Items the changes name that are not in material.open any more (resolved, dismissed, muted), by id. */
   otherItems?: ReadonlyMap<string, CompanionItemDto>;
-  /** Subtypes the user's feedback demoted to digest (the brief leaves their kind out). */
+  /** Subtypes the user's feedback demoted to digest (a check-in gives their kind one line, never a raise). */
   demotedSubtypes?: readonly CompanionItemSubtype[];
   /** Delegated conversations' workspace names, by workspace id (worker reports). */
   workspaceNames?: ReadonlyMap<string, string>;
-  /** The brief: the briefs of the days before, newest first, with the user's thumbs on their cards; the first is YOUR LAST BRIEF. */
-  pastBriefs?: readonly CompanionBriefDto[];
-  /** The brief: the user's thumbs on items, by kind. */
+  /** A heartbeat: the user's thumbs on items, by kind. */
   itemFeedback?: readonly CompanionItemFeedback[];
   /** The Companion's cards still waiting for the user, so it does not propose them again. */
   waitingCards?: readonly CompanionCardDto[];
@@ -539,62 +540,18 @@ function stillOpenSection(open: readonly CompanionItemDto[], now: number, max: n
 }
 
 const MAX_FEEDBACK_LINES = 20;
-const OPEN_STATUSES: ReadonlySet<CompanionItemDto['status']> = new Set(['new', 'seen', 'snoozed']);
-
-/** A brief card's items as the note knows them (open, or gone since). */
-function briefCardItems(itemIds: readonly string[], items: ReadonlyMap<string, CompanionItemDto>): CompanionItemDto[] {
-  return itemIds.map((id) => items.get(id)).filter((item): item is CompanionItemDto => item !== undefined);
-}
-
-/** What became of a past brief card's items: they left the feed, changed, or stayed as they were. */
-function sinceBrief(brief: CompanionBriefDto, known: readonly CompanionItemDto[]): string | null {
-  if (known.length === 0) return null;
-  if (known.every((item) => !OPEN_STATUSES.has(item.status))) return 'no longer open';
-  return known.some((item) => item.changedAt > brief.createdAt) ? 'changed since' : 'unchanged since';
-}
-
-const RATINGS = { up: 'rated up', down: 'rated down' } as const;
 
 /**
- * [YOUR LAST BRIEF]: the brief before this one, card by card: the user's
- * thumb on it, the ids of the items it was about and what became of them
- * since, so the agent does not repeat a card nothing changed for. A thumb is
- * about the card, never about its items' kinds (conv-1), so no kind is named.
- */
-function lastBriefSection(view: CompanionTurnView, items: ReadonlyMap<string, CompanionItemDto>): string[] {
-  const brief = view.pastBriefs?.[0];
-  if (!brief) return [];
-  const lines = [`- headline: "${materialLine(brief.headline, 200)}"`, ...brief.cards.map((card, index) => {
-    const known = briefCardItems(card.itemIds, items);
-    const rating = brief.cardFeedback[index];
-    const parts: string[] = [rating ? RATINGS[rating] : 'not rated', `"${materialLine(card.title, 120)}"`];
-    if (known.length > 0) parts.push(`items ${known.map((item) => item.id).join(', ')}`);
-    const since = sinceBrief(brief, known);
-    if (since) parts.push(since);
-    return `- ${parts.join(' · ')}`;
-  })];
-  return [fill('section.lastBrief', { date: brief.date, origin: brief.origin === 'fallback' ? ', which Michi wrote when you could not' : '' }), ...lines];
-}
-
-/**
- * [FEEDBACK]: what tunes the brief (conv-1): the kinds the user's feedback
- * demoted, the one kind-wide signal (they get one short line, not a card);
- * the kinds they rated useful; their thumbs on the cards of earlier briefs
- * (the last one has its own section), each about that card alone; and the
- * open items they rated down, each by its id.
+ * [FEEDBACK]: what tunes what a check-in raises (conv-1): the kinds the
+ * user's feedback demoted, the one kind-wide signal (they get one short line
+ * together, never a raise of their own); the kinds they rated useful; and
+ * the open items they rated down, each by its id.
  */
 function feedbackSection(view: CompanionTurnView): string[] {
   const lines: string[] = [];
   for (const subtype of view.demotedSubtypes ?? []) lines.push(fill('section.feedbackDemoted', { subtype }));
   for (const entry of view.itemFeedback ?? []) {
     if (entry.up > 0) lines.push(`- ${entry.subtype} items: ${entry.up} rated useful`);
-  }
-  for (const brief of (view.pastBriefs ?? []).slice(1)) {
-    brief.cards.forEach((card, index) => {
-      const rating = brief.cardFeedback[index];
-      if (!rating) return;
-      lines.push(`- ${brief.date} brief, card ${RATINGS[rating]}: "${materialLine(card.title, 120)}"`);
-    });
   }
   for (const item of view.material.open) {
     if (item.feedback === 'down') lines.push(`- item ${item.id} "${materialLine(item.title, 120)}": rated not useful${item.feedbackReason ? ` (${item.feedbackReason})` : ''}`);
@@ -648,23 +605,21 @@ function dataLines(view: CompanionTurnView): string[] {
       return [fill('section.justHappened'), ...(happened.length > 0 ? capped([...new Set(happened)], MAX_CHANGES) : [fill('section.nothing')]),
         ...stillOpenSection(material.open, now, 10, ids), ...sourcesSection(material.open, now)];
     }
+    // The heartbeat is the one check-in that sees Today whole (the morning brief is gone, 2026-11-17): what changed
+    // since its last look, what the user rated, and what it may raise.
     case 'heartbeat':
-      return [...openSection(material.open, now, MAX_OPEN), ...followingSection(view), ...sourcesSection(material.open, now),
-        ...remindersSection(material.reminders, now), ...focusSection(material.focus, now)];
-    case 'brief':
-      return [...openSection(material.open, now, MAX_OPEN), ...changesSection(view, items), ...sourcesSection(material.open, now),
-        ...remindersSection(material.reminders, now), ...focusSection(material.focus, now), ...lastBriefSection(view, items), ...feedbackSection(view)];
+      return [...openSection(material.open, now, MAX_OPEN), ...changesSection(view, items), ...followingSection(view),
+        ...sourcesSection(material.open, now), ...remindersSection(material.reminders, now), ...focusSection(material.focus, now),
+        ...feedbackSection(view)];
     default:
       return [];
   }
 }
 
 function body(view: CompanionTurnView): string {
-  const { material } = view;
   switch (view.kind) {
     case 'welcome': return fill('turn.welcome');
     case 'wake': return fill('turn.wake');
-    case 'brief': return fill('turn.brief', { date: localDateKey(material.now), maxCards: COMPANION_LIMITS.maxBriefCards });
     case 'worker_report': return fill('turn.worker_report');
     case 'heartbeat': return fill('turn.heartbeat');
     default: throw new Error(`no Companion note for a ${String(view.kind)} turn`);
@@ -672,7 +627,7 @@ function body(view: CompanionTurnView): string {
 }
 
 const LABELS = {
-  welcome: 'label.welcome', wake: 'label.wake', brief: 'label.brief', worker_report: 'label.worker_report', heartbeat: 'label.heartbeat',
+  welcome: 'label.welcome', wake: 'label.wake', worker_report: 'label.worker_report', heartbeat: 'label.heartbeat',
 } as const satisfies Partial<Record<CompanionTurnKind, CompanionPromptKey>>;
 
 /**
@@ -681,8 +636,7 @@ const LABELS = {
  * [CURRENT RUN TIME], the user's rules ahead of everything else, goals,
  * notes, card results, the cards still waiting for the user, the sources off
  * in settings, [RECENT CONVERSATION], the collector data fenced as
- * untrusted, and the kind's body. A catch-up has no note: it is
- * deterministic (R2.8).
+ * untrusted, and the kind's body.
  */
 export function composeCompanionTurn(view: CompanionTurnView): string {
   if (!(view.kind in LABELS)) throw new Error(`no Companion note for a ${String(view.kind)} turn`);
@@ -702,9 +656,6 @@ export function composeCompanionTurn(view: CompanionTurnView): string {
     for (const report of material.reports) blocks.push(workerReportBlock(report, view));
   } else {
     blocks.push(collectorData(dataLines(view)));
-  }
-  if (view.kind === 'brief' && material.briefCurate && materialLine(material.briefCurate, 500)) {
-    blocks.push(fill('block.curate', { curate: materialLine(material.briefCurate, 500) }));
   }
   blocks.push(body(view));
   return blocks.join('\n\n');
@@ -764,7 +715,8 @@ function offSourcesBlock(sources: readonly CompanionConfigurableSource[] | undef
 // ── What a check-in changed (DESIGN-v2 §3.4) ────────────────────────────────
 
 const CHANGE_ACTION_WORDS: Record<CompanionPostChangeAction, string> = {
-  snooze: 'snoozed', dismiss: 'dismissed', restore: 'restored', add: 'added', reword: 'reworded', remove: 'removed',
+  snooze: 'snoozed', dismiss: 'dismissed', restore: 'restored', raise: 'raised', lower: 'stopped raising',
+  add: 'added', reword: 'reworded', remove: 'removed',
 };
 
 /** `"Tasks"`, `the "Bugs" database`, or `a page` / `a database` for one whose title is not Michi's to give (it is new or a check-in named it). */
@@ -801,7 +753,7 @@ export function companionChangesText(changes: readonly Omit<CompanionPostChange,
     const title = materialLine(change.title, 80);
     parts.push(`sent a follow-up to ${title ? `"${title}"` : 'a conversation'}`);
   }
-  for (const [kind, actions] of [['item', ['snooze', 'dismiss', 'restore']], ['goal', ['add', 'reword', 'remove']]] as const) {
+  for (const [kind, actions] of [['item', ['snooze', 'dismiss', 'restore', 'raise', 'lower']], ['goal', ['add', 'reword', 'remove']]] as const) {
     const counts = new Map<CompanionPostChangeAction | null, number>();
     for (const change of changes) {
       if (change.kind !== kind || change.applied + change.proposed === 0) continue;
@@ -845,11 +797,12 @@ export interface CompanionPostFact {
   changes: readonly Omit<CompanionPostChange, 'reason'>[];
 }
 
+// 'brief' and 'catch_up' no longer run (2026-11-17); a post one of them left still reads.
 const POST_KIND_WORDS: Record<CompanionCheckinKind, string> = {
   welcome: 'first welcome', heartbeat: 'heartbeat', wake: 'wake', brief: 'morning brief', worker_report: 'worker report', catch_up: 'catch-up',
 };
 
-/** A check-in's kind in words: `wake`, `morning brief`, `worker report` (`heartbeat` for one from before P3). */
+/** A check-in's kind in words: `wake`, `worker report`, `heartbeat`. */
 export function checkinKindText(kind: CompanionCheckinKind): string {
   return POST_KIND_WORDS[kind] ?? 'check-in';
 }
@@ -942,8 +895,6 @@ export interface CompanionContextInput {
   newItems: number;
   /** The agent's cards waiting for the user. */
   pendingCards: number;
-  /** When today's brief was published; null before it is. Never its text: the brief is check-in material. */
-  briefPublishedAt: number | null;
   /** Posts the user's turns were not told about yet, newest first. */
   posts?: readonly CompanionPostFact[];
   /** The sources off in settings (conv-3). */
@@ -954,13 +905,10 @@ export interface CompanionContextInput {
 
 /** The per-turn facts of [COMPANION CONTEXT], after its opening and the run time: the feed, card results, cards waiting, posts. */
 function companionContextFacts(input: CompanionContextInput): string[] {
-  const brief = input.briefPublishedAt === null ? 'not published yet'
-    : `published at ${stampText(input.now, input.briefPublishedAt)} (read it with companion_read)`;
   const blocks = [fill('context.status', {
     needsYou: plural(input.needsYou, 'item'),
     newItems: input.newItems,
     pendingCards: plural(input.pendingCards, 'card'),
-    brief,
   })];
   if (input.cardResults.length > 0) blocks.push(fill('context.cardResults', { results: input.cardResults.map(cardResultFact).join('\n') }));
   const waiting = input.waitingCards ?? [];
@@ -995,13 +943,13 @@ export function companionContextStanding(input: Pick<CompanionContextInput, 'now
 /**
  * [COMPANION CONTEXT]: what the agent knows ahead of the user's own message
  * (DESIGN-v2 §3.5, §2.8 T1): its name and the run time; the feed in one
- * line (today's brief: only whether it is out); the card results and the
- * cards still waiting, as kinds, ids and outcomes; Michi's record of what
- * its check-ins posted since the user's last message; and, when `standing`
- * is not false, the user's rules, their goals in their own words, the notes
- * when the user wrote them last, and the sources off in settings. Never a
- * check-in's text: no post body, card summary, brief, goal reading, goal it
- * worded, notes it wrote, reason or item title. No Spaces or Scheduled
+ * line; the card results and the cards still waiting, as kinds, ids and
+ * outcomes; Michi's record of what its check-ins posted since the user's
+ * last message; and, when `standing` is not false, the user's rules, their
+ * goals in their own words, the notes when the user wrote them last, and the
+ * sources off in settings. Never a check-in's text: no post body, card
+ * summary, goal reading, goal it worded, notes it wrote, reason or item
+ * title. No Spaces or Scheduled
  * context.
  */
 export function companionContextText(input: CompanionContextInput): string {

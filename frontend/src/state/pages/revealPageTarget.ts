@@ -1,5 +1,5 @@
 import { serverEntityId } from '../../config/backendIdentity';
-import { prefersReducedMotion } from '../../hooks/useReducedMotion';
+import { smoothScrollBehavior } from '../../hooks/useReducedMotion';
 
 /** A block, or a row of a database, to show once its page has rendered it. */
 export interface PageRevealTarget {
@@ -11,10 +11,50 @@ export interface PageRevealTarget {
   pane?: { pageId: string; workspaceId: string; backendConnectionId: string };
 }
 
+export interface PageRevealOptions {
+  /**
+   * 'glide' (default) for a pick inside the page on screen (its outline);
+   * 'instant' for a jump from another surface, which lands at once (TR-27).
+   */
+  land?: 'instant' | 'glide';
+  timeoutMs?: number;
+}
+
 const REVEAL_WAIT_MS = 8_000;
 const POLL_MS = 100;
-/** Outlasts the CSS animation of data-reveal-flash (michiPage.css). */
-const FLASH_MS = 1_600;
+/** Outlasts the CSS animation of data-reveal-flash (michiPage.css); the Contents block's flash (use-peek.ts) lasts as long. */
+export const REVEAL_FLASH_MS = 1_600;
+
+/** The timer that ends each lit element's flash, one per element whoever lit it, so a new flash restarts it. */
+const flashEnds = new WeakMap<Element, { timer?: number }>();
+/**
+ * Lights `el` with data-reveal-flash for REVEAL_FLASH_MS, restarting the flash
+ * when it is already lit, whether a reveal or a Contents pick lit it, so an
+ * older timer never cuts a newer flash short. Returns what puts this flash out
+ * early; it does nothing once a newer flash owns the element.
+ */
+export function flashRevealed(el: Element): () => void {
+  window.clearTimeout(flashEnds.get(el)?.timer);
+  el.removeAttribute('data-reveal-flash');
+  void (el as HTMLElement).offsetWidth;
+  el.setAttribute('data-reveal-flash', '');
+  const own: { timer?: number } = {};
+  const end = () => {
+    if (flashEnds.get(el) !== own) return;
+    window.clearTimeout(own.timer);
+    flashEnds.delete(el);
+    el.removeAttribute('data-reveal-flash');
+  };
+  own.timer = window.setTimeout(end, REVEAL_FLASH_MS);
+  flashEnds.set(el, own);
+  return end;
+}
+/** A jump holds its target until its top keeps still this many frames (TPane jumpToMessage)… */
+const STABLE_FRAMES = 3;
+/** …or this many frames pass. */
+const HOLD_FRAMES = 60;
+/** What the user does to take the scroll back from a hold. */
+const LET_GO = ['wheel', 'touchstart', 'keydown'] as const;
 
 let cancelPending: (() => void) | null = null;
 
@@ -50,18 +90,51 @@ function find(target: PageRevealTarget): { element: HTMLElement; block: boolean 
 }
 
 /**
+ * Centres `element` at once and holds it there each frame while the page
+ * around it settles, until its top keeps still or HOLD_FRAMES pass; a wheel,
+ * touch or key lets go at once. Calls `onEnd` once, however it ends.
+ */
+function holdCentred(element: HTMLElement, onEnd: () => void): () => void {
+  let frame = 0;
+  let frames = 0;
+  let stable = 0;
+  let last = Number.NaN;
+  let holding = true;
+  const stop = () => {
+    if (!holding) return;
+    holding = false;
+    cancelAnimationFrame(frame);
+    for (const type of LET_GO) window.removeEventListener(type, stop, true);
+    onEnd();
+  };
+  const hold = () => {
+    element.scrollIntoView?.({ block: 'center', inline: 'nearest' });
+    const top = element.getBoundingClientRect().top;
+    stable = Math.abs(top - last) < 1 ? stable + 1 : 0;
+    last = top;
+    if (stable < STABLE_FRAMES && ++frames < HOLD_FRAMES) frame = requestAnimationFrame(hold);
+    else stop();
+  };
+  for (const type of LET_GO) window.addEventListener(type, stop, { capture: true, passive: true });
+  hold();
+  return stop;
+}
+
+/**
  * Scrolls to a block or row once its page has rendered it, and flashes a block
  * once. Opening a page replaces what was on screen, so it waits for the page
- * to load, up to `timeoutMs`; a newer reveal replaces one still waiting.
- * Returns a function that stops the wait.
+ * to load, up to `timeoutMs`; a newer reveal replaces one still waiting or
+ * holding. Returns a function that stops the wait and the hold.
  */
-export function revealPageTarget(target: PageRevealTarget, timeoutMs = REVEAL_WAIT_MS): () => void {
+export function revealPageTarget(target: PageRevealTarget, { land = 'glide', timeoutMs = REVEAL_WAIT_MS }: PageRevealOptions = {}): () => void {
   cancelPending?.();
   const deadline = Date.now() + timeoutMs;
   let timer: number | undefined;
+  let stopHold: (() => void) | undefined;
   const cancel = () => {
     if (timer !== undefined) window.clearTimeout(timer);
     timer = undefined;
+    stopHold?.();
     if (cancelPending === cancel) cancelPending = null;
   };
   const attempt = () => {
@@ -72,15 +145,13 @@ export function revealPageTarget(target: PageRevealTarget, timeoutMs = REVEAL_WA
       else cancel();
       return;
     }
-    cancel();
-    const still = prefersReducedMotion();
-    found.element.scrollIntoView?.({ behavior: still ? 'auto' : 'smooth', block: 'center', inline: 'nearest' });
+    if (land === 'instant') stopHold = holdCentred(found.element, cancel);
+    else {
+      cancel();
+      found.element.scrollIntoView?.({ behavior: smoothScrollBehavior(), block: 'center', inline: 'nearest' });
+    }
     if (!found.block) return;
-    const block = found.element;
-    block.removeAttribute('data-reveal-flash');
-    void block.offsetWidth;
-    block.setAttribute('data-reveal-flash', '');
-    window.setTimeout(() => block.removeAttribute('data-reveal-flash'), FLASH_MS);
+    flashRevealed(found.element);
   };
   cancelPending = cancel;
   attempt();

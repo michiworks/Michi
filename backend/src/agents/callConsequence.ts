@@ -27,10 +27,19 @@ import { michiBareToolName, michiToolEffect } from '../assistant/toolEffects';
 
 export type CallConsequence = 'read' | 'local' | 'network_read' | 'credential_read' | 'unclear' | 'egress';
 
+/**
+ * The dangerous kinds of egress (2026-11-13): the only calls that ask in a
+ * work conversation whatever its mode. Other egress, and what Michi cannot
+ * read, runs there without asking.
+ */
+export type DangerKind = 'push' | 'deploy' | 'review' | 'message';
+
 export interface CallVerdict {
   consequence: CallConsequence;
   /** Why, in a few words, for the approval card ("git push leaves this machine"). */
   why?: string;
+  /** An egress of a dangerous kind: a push or a change to a default branch, a deploy, a code review or its comments, a message or email. */
+  danger?: DangerKind;
 }
 
 /** MCP tool annotations as a runtime or Michi's MCP client reports them. */
@@ -54,13 +63,15 @@ export interface CallDescription {
 
 const RANK: Record<CallConsequence, number> = { read: 0, local: 1, network_read: 2, credential_read: 3, unclear: 4, egress: 5 };
 
-const verdict = (consequence: CallConsequence, why?: string): CallVerdict => (why ? { consequence, why } : { consequence });
+const verdict = (consequence: CallConsequence, why?: string, danger?: DangerKind): CallVerdict =>
+  ({ consequence, ...(why ? { why } : {}), ...(danger ? { danger } : {}) });
 const READ = verdict('read');
 const LOCAL = verdict('local');
 
-/** The stronger of two verdicts (egress over everything, read under everything). */
+/** The stronger of two verdicts (egress over everything, read under everything; a dangerous egress over another). */
 function worse(a: CallVerdict, b: CallVerdict): CallVerdict {
-  return RANK[b.consequence] > RANK[a.consequence] ? b : a;
+  if (RANK[b.consequence] !== RANK[a.consequence]) return RANK[b.consequence] > RANK[a.consequence] ? b : a;
+  return b.danger && !a.danger ? b : a;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +113,7 @@ export function callConsequence(call: CallDescription): CallVerdict {
   if (name === 'use_aws') return awsConsequence([String(input.service_name ?? ''), String(input.operation_name ?? '')]);
 
   const mcp = mcpToolOf(name);
-  if (mcp) return mcpConsequence(mcp.server, mcp.tool, call.annotations, call.kind);
+  if (mcp) return mcpConsequence(mcp.server, mcp.tool, call.annotations, call.kind, input);
 
   return kindConsequence(call.kind, input);
 }
@@ -190,16 +201,40 @@ function nameWords(tool: string): string[] {
     .split(/[^A-Za-z0-9]+/).filter(Boolean).map((word) => word.toLowerCase());
 }
 
+/** Words in an MCP tool's name that make its egress dangerous, by kind. */
+const MCP_DANGER_WORDS: ReadonlyArray<readonly [DangerKind, ReadonlySet<string>]> = [
+  ['push', new Set(['push', 'merge'])],
+  ['deploy', new Set(['deploy', 'release', 'publish', 'promote', 'rollback', 'rollout'])],
+  ['review', new Set(['comment', 'review', 'revision', 'approve', 'cr', 'pr', 'mr'])],
+  ['message', new Set(['send', 'post', 'reply', 'forward', 'notify', 'dm', 'share', 'broadcast', 'invite', 'meeting', 'message', 'messages'])],
+];
+
+/** The dangerous kind of an MCP tool's egress, by its name (otherwise a pull request is a review; a draft sent with `send: true` is a message). */
+function mcpDanger(tool: string, input: Record<string, unknown>): DangerKind | undefined {
+  const words = nameWords(tool);
+  const named = MCP_DANGER_WORDS.find(([, names]) => words.some((word) => names.has(word)))?.[0];
+  if (named) return named;
+  if (words.includes('pull') && words.includes('request')) return 'review';
+  return words.includes('draft') && input.send === true ? 'message' : undefined;
+}
+
 /**
  * A third-party MCP tool: its annotations when the runtime or Michi's client
  * knows them (`readOnlyHint` true and not `destructiveHint`: a read, the rule
  * Pages maintenance already uses), else the ACP kind, else its name: a write
  * verb anywhere makes it egress, a read verb a network read, and a name with
- * neither asks. Annotations are the server's own claim; a server that lies
- * about them is not one the user should have installed.
+ * neither counts as egress. Annotations are the server's own claim; a server
+ * that lies about them is not one the user should have installed. Its name
+ * says whether an egress is dangerous (mcpDanger).
  */
-function mcpConsequence(server: string, tool: string, annotations: CallAnnotations | undefined, kind: string | undefined): CallVerdict {
-  const label = `${server}/${tool}`;
+function mcpConsequence(server: string, tool: string, annotations: CallAnnotations | undefined, kind: string | undefined,
+  input: Record<string, unknown>): CallVerdict {
+  const result = mcpVerdict(`${server}/${tool}`, tool, annotations, kind);
+  const danger = result.consequence === 'egress' ? mcpDanger(tool, input) : undefined;
+  return danger ? { ...result, danger } : result;
+}
+
+function mcpVerdict(label: string, tool: string, annotations: CallAnnotations | undefined, kind: string | undefined): CallVerdict {
   if (annotations?.destructiveHint === true) return verdict('egress', `${label} changes something outside`);
   if (annotations?.readOnlyHint === true) return verdict('network_read', `${label} only reads`);
   if (annotations?.readOnlyHint === false) {
@@ -512,8 +547,34 @@ const RAW_NET = new Set(['nc', 'ncat', 'netcat', 'socat', 'telnet', 'ssh', 'scp'
   'autossh', 'sshpass', 'websocat', 'wscat', 'grpcurl']);
 const DNS_TOOLS = new Set(['dig', 'nslookup', 'host', 'ping', 'ping6', 'traceroute', 'mtr', 'whois']);
 
-/** Michi's verdict on one simple command (argv after wrappers). */
+/** Commands whose egress is a deploy: cloud and cluster changes, registries, release targets. */
+const DEPLOY_COMMANDS = new Set(['aws', 'gcloud', 'az', 'kubectl', 'oc', 'k', 'helm', 'terraform', 'tofu', 'terragrunt', 'pulumi', 'cdk', 'sam',
+  'serverless', 'sls', 'vault', 'rclone', 's3cmd', 'gsutil', 'docker', 'podman', 'nerdctl', 'finch', 'npm', 'pnpm', 'yarn', 'bun', 'npx', 'pnpx',
+  'bunx', 'uvx', 'pip', 'pip3', 'pipx', 'uv', 'poetry', 'pdm', 'conda', 'mamba', 'hatch', 'rye', 'twine', 'cargo', 'gem', 'mvn', 'mvnw', 'gradle',
+  'gradlew', 'deno', 'bazel', 'buck', 'buck2', 'make', 'gmake', 'just', 'task',
+  'rake', 'invoke', 'nx', 'turbo', 'gulp', 'grunt', 'mage']);
+
+/** The dangerous kind of a command's egress: git (a push, or send-email), code hosts' CLIs, mail, deploys. */
+function commandDanger(cmd: string, args: readonly string[]): DangerKind | undefined {
+  if (MAILERS.has(cmd)) return 'message';
+  if (cmd === 'git') return args.includes('send-email') ? 'message' : 'push';
+  if (cmd === 'gh' || cmd === 'glab') {
+    const [group = '', action = ''] = args.filter((arg) => !arg.startsWith('-'));
+    if ((group === 'pr' || group === 'mr') && action === 'merge') return 'push';
+    return ['release', 'workflow', 'run', 'secret', 'variable'].includes(group) ? 'deploy' : 'review';
+  }
+  return DEPLOY_COMMANDS.has(cmd) ? 'deploy' : undefined;
+}
+
+/** Michi's verdict on one simple command (argv after wrappers), with the danger of its egress. */
 function argvConsequence(argv: readonly string[], segment: Segment, depth: number): CallVerdict {
+  const result = argvVerdict(argv, segment, depth);
+  if (result.consequence !== 'egress' || result.danger || argv.length === 0) return result;
+  const danger = commandDanger(baseName(argv[0]), argv.slice(1));
+  return danger ? { ...result, danger } : result;
+}
+
+function argvVerdict(argv: readonly string[], segment: Segment, depth: number): CallVerdict {
   if (argv.length === 0) return segment.redirects.some(isCredentialPath) ? verdict('credential_read', 'reads a secret file') : LOCAL;
   const cmd = baseName(argv[0]);
   const args = argv.slice(1);
@@ -606,7 +667,7 @@ function argvConsequence(argv: readonly string[], segment: Segment, depth: numbe
   }
   // A script that names a release step (./deploy.sh, scripts/release).
   if (argv[0].includes('/') && EGRESS_WORD.test(baseName(argv[0]).replace(/\.(sh|bash|py|js|ts|rb)$/, ''))) {
-    return verdict('egress', `${baseName(argv[0])} looks like a release script`);
+    return verdict('egress', `${baseName(argv[0])} looks like a release script`, 'deploy');
   }
   return LOCAL;
 }
@@ -633,7 +694,7 @@ function shellInvocation(args: readonly string[], segment: Segment, depth: numbe
     }
     if (!arg.startsWith('-')) {
       // A script file: its contents are not judged; a release-sounding name is.
-      return EGRESS_WORD.test(baseName(arg).replace(/\.(sh|bash|zsh)$/, '')) ? verdict('egress', `${baseName(arg)} looks like a release script`) : LOCAL;
+      return EGRESS_WORD.test(baseName(arg).replace(/\.(sh|bash|zsh)$/, '')) ? verdict('egress', `${baseName(arg)} looks like a release script`, 'deploy') : LOCAL;
     }
   }
   if (segment.heredocs.length > 0) return segment.heredocs.reduce((acc, body) => worse(acc, shellConsequence(body, depth + 1)), LOCAL);
@@ -652,16 +713,16 @@ function interpreterInvocation(cmd: string, args: readonly string[], segment: Se
     if (arg === '-m') {
       const moduleName = args[index + 1] ?? '';
       if (/^(http\.server|SimpleHTTPServer|smtpd|aiosmtpd|ftplib)$/.test(moduleName)) return verdict('egress', `python -m ${moduleName} serves to other machines`);
-      if (/^(twine)$/.test(moduleName) && args.includes('upload')) return verdict('egress', 'twine uploads a package');
+      if (/^(twine)$/.test(moduleName) && args.includes('upload')) return verdict('egress', 'twine uploads a package', 'deploy');
       if (/^(pip|ensurepip|venv)$/.test(moduleName)) return verdict('network_read', `python -m ${moduleName} may download`);
       return LOCAL;
     }
     if (arg === '-') { stdin = true; continue; }
-    if (cmd === 'deno' && arg === 'deploy') return verdict('egress', 'deno deploy deploys');
+    if (cmd === 'deno' && arg === 'deploy') return verdict('egress', 'deno deploy deploys', 'deploy');
     if (cmd === 'bun' || cmd === 'deno') {
       if (['run', 'x', 'eval'].includes(arg)) continue;
       if (['install', 'add', 'i', 'update', 'upgrade'].includes(arg)) return verdict('network_read', `${cmd} ${arg} downloads`);
-      if (arg === 'publish') return verdict('egress', `${cmd} publishes`);
+      if (arg === 'publish') return verdict('egress', `${cmd} publishes`, 'deploy');
     }
     if (!arg.startsWith('-') && script === null) { script = arg; break; }
   }
@@ -671,7 +732,7 @@ function interpreterInvocation(cmd: string, args: readonly string[], segment: Se
     return NETWORK_CODE.test(code) ? verdict('unclear', `${cmd} inline code reaches for the network or runs commands`) : LOCAL;
   }
   if (script !== null) {
-    return EGRESS_WORD.test(baseName(script).replace(/\.[a-z]+$/, '')) ? verdict('egress', `${baseName(script)} looks like a release script`) : LOCAL;
+    return EGRESS_WORD.test(baseName(script).replace(/\.[a-z]+$/, '')) ? verdict('egress', `${baseName(script)} looks like a release script`, 'deploy') : LOCAL;
   }
   // A REPL, or code from a pipe Michi cannot see.
   return verdict('unclear', `${cmd} reads code Michi cannot see`);
@@ -820,13 +881,13 @@ function awsConsequence(args: readonly string[]): CallVerdict {
     if (operation === 'ls') return verdict('network_read', 'aws s3 ls reads S3');
     if (['cp', 'mv', 'sync'].includes(operation)) {
       const destination = operands[operands.length - 1] ?? '';
-      return destination.startsWith('s3://') || operation === 'mv' ? verdict('egress', `aws s3 ${operation} writes to S3`) : verdict('network_read', `aws s3 ${operation} downloads from S3`);
+      return destination.startsWith('s3://') || operation === 'mv' ? verdict('egress', `aws s3 ${operation} writes to S3`, 'deploy') : verdict('network_read', `aws s3 ${operation} downloads from S3`);
     }
-    return verdict('egress', `aws s3 ${operation} changes S3`);
+    return verdict('egress', `aws s3 ${operation} changes S3`, 'deploy');
   }
   if (service === 'logs' && (operation === 'tail' || operation === 'start-query' || operation === 'filter-log-events')) return verdict('network_read', `aws logs ${operation} reads`);
   if (AWS_READ_OPERATION.test(operation)) return verdict('network_read', `aws ${key} reads`);
-  return verdict('egress', `aws ${key} changes AWS`);
+  return verdict('egress', `aws ${key} changes AWS`, 'deploy');
 }
 
 function cloudCliConsequence(cmd: string, args: readonly string[]): CallVerdict {

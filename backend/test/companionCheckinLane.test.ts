@@ -24,7 +24,7 @@ import { startCompanion, type CompanionCoordinator, type CompanionCoordinatorDep
 import { CompanionEventBus } from '../src/services/companion/delivery';
 import { patchCompanionSettings } from '../src/services/companion/settings';
 import {
-  briefForDate, getCompanionMetaNumber, insertBrief, latestEventSeq, markCompanionWelcomeDone, recordDelegation, recordRun, setCompanionMetaNumber,
+  getCompanionMetaNumber, latestEventSeq, markCompanionWelcomeDone, recordDelegation, recordRun, setCompanionMetaNumber,
 } from '../src/services/companion/repository';
 import type { CompanionMichiSource, CompanionWorkerState } from '../src/services/companion/sources/michi';
 import type {
@@ -288,7 +288,6 @@ interface Decisions {
   turns: Array<[string, string, number]>;
   runs: Array<[string, number, string]>;
   meta: Array<number | null>;
-  briefs: Array<string | null>;
   delegations: Array<Record<string, unknown>>;
 }
 
@@ -298,7 +297,6 @@ function sharedState(): string {
   return JSON.stringify([
     rows("SELECT key, value FROM meta WHERE key LIKE 'companion:%' ORDER BY key"),
     rows('SELECT * FROM companion_delegations ORDER BY id'),
-    rows('SELECT * FROM companion_briefs ORDER BY date'),
     rows('SELECT * FROM companion_runs ORDER BY id'),
     rows('SELECT * FROM companion_cards ORDER BY id'),
     rows('SELECT * FROM companion_items ORDER BY id'),
@@ -316,7 +314,7 @@ describe('the shadow beside the coordinator (P6a)', () => {
 
   /**
    * Thursday morning to noon on 30 s ticks: two wakes ten minutes apart (the
-   * second failing once), the brief, a worker's report, and two hours away
+   * second failing once), a worker's report, and two hours away
    * with an item that comes in meanwhile, then one after the return. With the
    * shadow, the lane looks 15 s after each coordinator tick, as the scheduler's
    * own timer would, and each look must leave the shared state as it was.
@@ -328,9 +326,6 @@ describe('the shadow beside the coordinator (P6a)', () => {
     const runner = new FakeRunner();
     let wakes = 0;
     runner.respond = (request) => {
-      if (request.kind === 'brief') {
-        insertBrief({ date: '2026-11-05', headline: 'Two CRs need you', cards: [], closing: "That's all for today.", origin: 'llm', now });
-      }
       if (request.kind === 'wake' && ++wakes === 2) return { outcome: 'error', detail: 'timed out' };
       return { outcome: 'spoke', messageText: 'Noted.' };
     };
@@ -339,7 +334,7 @@ describe('the shadow beside the coordinator (P6a)', () => {
       turnRunner: () => runner, isPaneVisible: () => false, nodeViewedAt: () => null, conversationNodeId: () => null,
     });
     markCompanionWelcomeDone(localAt(4, 8, 0));
-    for (const key of ['companion:wake_cursor', 'companion:brief_cursor'] as const) setCompanionMetaNumber(key, latestEventSeq());
+    setCompanionMetaNumber('companion:wake_cursor', latestEventSeq());
     recordDelegation({ workspaceId: 'w', nodeId: 'n-worker', title: 'Fix the build', now: localAt(5, 8, 0) });
     const worker = (state: Partial<CompanionWorkerState>) => michi.workers.set('n-worker', {
       nodeId: 'n-worker', exists: true, workspaceName: 'W', title: 'Fix the build', turnStatus: 'active', stopReason: null, error: null,
@@ -385,8 +380,7 @@ describe('the shadow beside the coordinator (P6a)', () => {
       turns: runner.requests.map((request) => [request.kind, request.trigger, getDb().prepare('SELECT started_at AS at FROM companion_runs WHERE id = ?').get(request.runId)!.at as number]),
       runs: (getDb().prepare("SELECT kind, started_at AS at, outcome FROM companion_runs WHERE kind != 'poll' ORDER BY started_at, rowid").all() as Array<{ kind: string; at: number; outcome: string }>)
         .map((run) => [run.kind, run.at, run.outcome]),
-      meta: (['companion:wake_cursor', 'companion:brief_cursor', 'companion:last_wake_at'] as const).map((key) => getCompanionMetaNumber(key)),
-      briefs: [briefForDate('2026-11-05')?.origin ?? null],
+      meta: (['companion:wake_cursor', 'companion:last_wake_at'] as const).map((key) => getCompanionMetaNumber(key)),
       delegations: (getDb().prepare('SELECT node_id AS nodeId, state, closed_reason AS closedReason FROM companion_delegations ORDER BY node_id').all() as Array<Record<string, unknown>>)
         .map((row) => ({ ...row })),
     };
@@ -400,14 +394,14 @@ describe('the shadow beside the coordinator (P6a)', () => {
     const { decisions, lane } = await scenario(true);
     assert.deepEqual(decisions, without, 'the same turns, at the same times, moving the same cursors');
     assert.deepEqual(without.turns.map(([kind]) => kind),
-      ['heartbeat', 'wake', 'wake', 'brief', 'wake', 'worker_report', 'heartbeat', 'heartbeat', 'heartbeat', 'wake'],
+      ['heartbeat', 'wake', 'wake', 'wake', 'worker_report', 'heartbeat', 'heartbeat', 'heartbeat', 'wake'],
       'control: the scenario has every kind, a failed wake retried, no wake for what came in while away, and a heartbeat every hour, away too');
 
     const shadow = reconcileCheckinShadow(getDb(), localAt(5, 0), localAt(6, 0));
     assert.deepEqual([shadow.shadowOnly, shadow.coordinatorOnly], [[], []], JSON.stringify({ lane, turns: without.turns }));
     assert.equal(shadow.matched, without.turns.length);
     assert.deepEqual(shadow.days.map((day) => [day.date, day.counts]), [['2026-11-05', {
-      worker_report: { shadow: 1, coordinator: 1 }, wake: { shadow: 4, coordinator: 4 }, brief: { shadow: 1, coordinator: 1 },
+      worker_report: { shadow: 1, coordinator: 1 }, wake: { shadow: 4, coordinator: 4 },
       heartbeat: { shadow: 4, coordinator: 4 },
     }]]);
     for (const [kind, at] of lane) {
@@ -417,13 +411,10 @@ describe('the shadow beside the coordinator (P6a)', () => {
   });
 
   test('a check-in the coordinator starts before the lane\'s first look is still the shadow\'s: it read its cursors first', async () => {
-    // The brief is due at the coordinator's very first tick, ahead of the scheduler's first look.
+    // The hourly heartbeat is due at the coordinator's very first tick, ahead of the scheduler's first look.
     let now = localAt(5, 9, 0);
     const runner = new FakeRunner();
-    runner.respond = (request) => {
-      if (request.kind === 'brief') insertBrief({ date: '2026-11-05', headline: 'Two CRs need you', cards: [], closing: "That's all for today.", origin: 'llm', now });
-      return { outcome: 'spoke', messageText: 'Noted.' };
-    };
+    runner.respond = () => ({ outcome: 'spoke', messageText: 'Noted.' });
     const coordinator = startCompanion({
       clock: { now: () => now }, sources: [new FakeSource('cr')], michiSource: null, auth: null, autoTick: false, events: new CompanionEventBus(),
       turnRunner: () => runner, isPaneVisible: () => false, nodeViewedAt: () => null, conversationNodeId: () => null,
@@ -433,9 +424,9 @@ describe('the shadow beside the coordinator (P6a)', () => {
       await coordinator.service.onPresence(HERE);
       await coordinator.tick();
       await coordinator.idle();
-      assert.deepEqual(runner.requests.map((request) => request.kind), ['brief'], 'the coordinator\'s first tick ran it');
+      assert.deepEqual(runner.requests.map((request) => request.kind), ['heartbeat'], 'the coordinator\'s first tick ran it');
       now = localAt(5, 9, 0, 15);
-      assert.equal(coordinator.lookAsLane(now), 'brief', 'and the lane would have started it too');
+      assert.equal(coordinator.lookAsLane(now), 'heartbeat', 'and the lane would have started it too');
       const report = reconcileCheckinShadow(getDb(), localAt(5, 0), localAt(6, 0));
       assert.deepEqual([report.matched, report.shadowOnly, report.coordinatorOnly], [1, [], []]);
     } finally {
@@ -472,14 +463,14 @@ describe('the reconciliation report', () => {
   beforeEach(openDb);
   afterEach(dropDb);
 
-  test('pairs starts of a kind within the tolerance, by day, with each day\'s first brief; kind and time only', () => {
+  test('pairs starts of a kind within the tolerance, by day, with each day\'s first heartbeat; kind and time only', () => {
     const day = localAt(5, 0);
-    const run = (kind: 'wake' | 'brief' | 'worker_report', at: number, turn = true) => {
+    const run = (kind: 'wake' | 'heartbeat' | 'worker_report', at: number, turn = true) => {
       const record = recordRun({ kind, trigger: 'schedule', startedAt: at, outcome: 'spoke', finishedAt: at + MINUTE });
       if (turn) getDb().prepare('UPDATE companion_runs SET turn_id = ? WHERE id = ?').run(`cmp-${record.id}`, record.id);
     };
-    run('brief', localAt(5, 9, 0));
-    recordCheckinShadowStart('brief', localAt(5, 9, 0, 20));
+    run('heartbeat', localAt(5, 9, 0));
+    recordCheckinShadowStart('heartbeat', localAt(5, 9, 0, 20));
     run('wake', localAt(5, 10, 0));
     recordCheckinShadowStart('wake', localAt(5, 10, 1, 30), getDb());
     run('wake', localAt(5, 11, 0), false);
@@ -487,10 +478,10 @@ describe('the reconciliation report', () => {
     run('wake', localAt(6, 8, 0));
     recordCheckinShadowStart('wake', localAt(6, 7, 59, 30));
     const report = reconcileCheckinShadow(getDb(), day, localAt(7, 0));
-    assert.equal(report.matched, 2, 'the brief 20 s apart and the next day\'s wake 30 s early');
+    assert.equal(report.matched, 2, 'the heartbeat 20 s apart and the next day\'s wake 30 s early');
     assert.deepEqual(report.shadowOnly, [{ kind: 'wake', at: localAt(5, 10, 1, 30) }, { kind: 'worker_report', at: localAt(5, 12, 0) }], '90 s apart is not the same');
     assert.deepEqual(report.coordinatorOnly, [{ kind: 'wake', at: localAt(5, 10, 0) }], 'a run with no turn never started a check-in');
-    assert.deepEqual(report.days.map((entry) => [entry.date, entry.counts.wake, entry.brief]), [
+    assert.deepEqual(report.days.map((entry) => [entry.date, entry.counts.wake, entry.firstHeartbeat]), [
       ['2026-11-05', { shadow: 1, coordinator: 1 }, { shadow: localAt(5, 9, 0, 20), coordinator: localAt(5, 9, 0) }],
       ['2026-11-06', { shadow: 1, coordinator: 1 }, { shadow: null, coordinator: null }],
     ]);
@@ -597,9 +588,7 @@ describe('the lane runs the check-ins (P6b, companion:engine = scheduler)', () =
     repo = new ScheduledJobsRepository();
     started = [];
     markCompanionWelcomeDone(localAt(4, 8, 0));
-    for (const key of ['companion:wake_cursor', 'companion:brief_cursor'] as const) setCompanionMetaNumber(key, latestEventSeq());
-    // Wakes only: the brief has its own test above, and its default time is long past at noon.
-    patchCompanionSettings({ brief: { enabled: false } });
+    setCompanionMetaNumber('companion:wake_cursor', latestEventSeq());
     // The hourly heartbeat: its last at noon, so due at 13:00, after the wake tests below (its own test is last).
     setCompanionMetaNumber('companion:last_heartbeat_at', now);
   });
@@ -818,7 +807,7 @@ describe('the lane runs the check-ins (P6b, companion:engine = scheduler)', () =
 
   test('the scheduler\'s record of each outcome', () => {
     assert.deepEqual(laneOutcome({ kind: null, outcome: null, detail: null }), { status: 'succeeded', summary: 'Nothing to check in about', error: null });
-    assert.deepEqual(laneOutcome({ kind: 'brief', outcome: 'quiet', detail: null }), { status: 'succeeded', summary: 'brief: quiet', error: null });
+    assert.deepEqual(laneOutcome({ kind: 'heartbeat', outcome: 'quiet', detail: null }), { status: 'succeeded', summary: 'heartbeat: quiet', error: null });
     assert.deepEqual(laneOutcome({ kind: 'wake', outcome: 'superseded', detail: null }), { status: 'cancelled', summary: 'wake: superseded', error: null });
     assert.deepEqual(laneOutcome({ kind: 'worker_report', outcome: 'error', detail: 'timed out' }), { status: 'failed', summary: 'worker_report: error', error: 'timed out' });
   });

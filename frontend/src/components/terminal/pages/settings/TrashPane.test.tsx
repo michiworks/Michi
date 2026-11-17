@@ -263,7 +263,7 @@ describe('Settings › Trash', () => {
     state.purgeDeletionAsync.mockReturnValue(new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }));
     render(<TrashPane />);
     fireEvent.click(screen.getByRole('button', { name: 'More actions for michi notes' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete permanently...' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete permanently…' }));
     await waitFor(() => expect(state.purgeDeletionAsync).toHaveBeenCalledWith('del-b'));
     expect((screen.getByRole('button', { name: 'Restore Design review' }) as HTMLButtonElement).disabled).toBe(true);
     expect(state.confirm.mock.calls[0][0].message).toContain('This cannot be undone');
